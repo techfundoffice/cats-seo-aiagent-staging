@@ -1,0 +1,89 @@
+{
+  // ───────────────────────────────────────────────────────────────────────────
+  // Staging deployment of the cats SEO AI agent. Independent repo — every
+  // STATEFUL binding points at a FRESH resource so this worker never reads or
+  // writes production (catsluvus.com) data. Same Cloudflare account/zone as
+  // production; only the worker name, DOMAIN, and stateful binding IDs differ.
+  // ───────────────────────────────────────────────────────────────────────────
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cats-seo-aiagent-staging",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-04-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "ai": { "binding": "AI", "remote": true },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "ARTICLES_KV",
+      "id": "f98fb459875c40009492867275b666bf"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "SKILLS_DB",
+      "database_name": "cats-seo-skills-staging",
+      "database_id": "07709ff7-c593-471a-9271-4a26c01a58bc"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "SKILL_FETCH_QUEUE", "queue": "skill-fetch-staging" }
+    ],
+    "consumers": [
+      {
+        "queue": "skill-fetch-staging",
+        "max_batch_size": 25,
+        "max_batch_timeout": 10,
+        "max_concurrency": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "skill-fetch-staging-dlq"
+      }
+    ]
+  },
+  // Cron intentionally OFF on staging. Flip to ["* * * * *"] only when you want
+  // this worker to autonomously scout + generate + publish (and, if
+  // GITHUB_TOKEN_SECRET is set, open GitHub issues). Leave empty for a quiet
+  // staging site you drive manually via POST /api/generate-one.
+  "triggers": { "crons": [] },
+  "r2_buckets": [
+    {
+      "binding": "IMAGES_R2",
+      "bucket_name": "seo-images-staging"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "SEOArticleAgent",
+        "name": "SEOArticleAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["SEOArticleAgent"],
+      "tag": "v1"
+    },
+    {
+      "tag": "v2"
+    }
+  ],
+  // PETINSURANCE service binding intentionally OMITTED. It binds the production
+  // consumer Worker that serves catsluvus.com from the production KV. The code
+  // treats it as optional (env.d.ts: `PETINSURANCE?: Fetcher`); when absent, the
+  // Step-14 live-URL probe falls back to a public fetch. If you stand up a
+  // staging consumer Worker bound to the staging ARTICLES_KV, add it back here:
+  //   "services": [{ "binding": "PETINSURANCE", "service": "<staging-consumer>" }],
+  "vars": {
+    "AMAZON_AFFILIATE_TAG": "catsluvus03-20",
+    "DOMAIN": "cats-seo-aiagent-staging.webmaster-bc8.workers.dev",
+    "CLOUDFLARE_ZONE_ID": "646da2c86dbbe1dff196c155381b0704",
+    "CLOUDFLARE_ACCOUNT_ID": "bc8e15f958dc350e00c0e39d80ca6941"
+  }
+}

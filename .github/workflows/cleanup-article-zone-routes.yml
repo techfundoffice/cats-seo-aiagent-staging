@@ -1,0 +1,117 @@
+name: Cleanup - Delete Per-Article Zone Routes
+
+# One-time (and idempotent) workflow that deletes the ~1000 legacy
+# per-article Cloudflare zone routes that were added individually for every
+# published article before the wildcard catsluvus.com/*/* route was
+# introduced.
+#
+# Safe to run multiple times - routes that no longer exist are silently
+# skipped.  Keeper routes (IndexNow key file, the new wildcard) are never
+# touched.
+#
+# Run AFTER confirming that the wildcard route and the KV-serve handler in
+# src/server.ts are deployed and serving articles correctly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run - list routes to delete without actually deleting"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+
+      - name: Delete stale per-article zone routes
+        shell: bash
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set +e
+          eval $(doppler secrets download --token "$DOPPLER_TOKEN" --no-file --format env 2>&1)
+
+          TOKEN="${CF_API_TOKEN}"
+          ZONE_ID="646da2c86dbbe1dff196c155381b0704"
+          WORKER_NAME="cats-seo-aiagent"
+          KEEP1="catsluvus.com/5d2a70a712524fe39b9dda29ab79e6ee.txt"
+          KEEP2="catsluvus.com/*/*"
+
+          echo "=== Fetching all zone routes (100 per page) ==="
+          RESP=$(curl -sS \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/workers/routes?per_page=1000" \
+            -H "Authorization: Bearer ${TOKEN}")
+          SUCCESS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('success', False))" 2>/dev/null)
+          if [ "$SUCCESS" != "True" ]; then
+            echo "Failed to fetch routes: $RESP"
+            exit 1
+          fi
+          TOTAL=$(echo "$RESP" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('result', [])))" 2>/dev/null)
+          echo "Total routes in zone: ${TOTAL}"
+
+          echo ""
+          echo "=== Identifying routes to delete ==="
+          TO_DELETE=$(echo "$RESP" | python3 -c "
+          import json,sys,os
+          d       = json.load(sys.stdin)
+          keep1   = os.environ['KEEP1']
+          keep2   = os.environ['KEEP2']
+          worker  = os.environ['WORKER_NAME']
+          for r in d.get('result', []):
+              if r.get('pattern') not in (keep1, keep2) and r.get('script') == worker:
+                  print(r['id'] + '  ' + r['pattern'])
+          " KEEP1="$KEEP1" KEEP2="$KEEP2" WORKER_NAME="$WORKER_NAME" 2>/dev/null)
+
+          if [ -z "$TO_DELETE" ]; then
+            DELETE_COUNT=0
+          else
+            DELETE_COUNT=$(echo "$TO_DELETE" | grep -c '^')
+          fi
+          echo "Routes to delete: ${DELETE_COUNT}"
+          echo "$TO_DELETE"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo ""
+            echo "=== DRY RUN - no routes deleted ==="
+            echo "Re-run with dry_run=false to perform the actual cleanup."
+            exit 0
+          fi
+
+          echo ""
+          echo "=== Deleting routes ==="
+          DELETED=0
+          FAILED=0
+          for ROUTE_ID_PATTERN in $(echo "$TO_DELETE" | awk '{print $1 ":" $2}'); do
+            ROUTE_ID=$(echo "$ROUTE_ID_PATTERN" | cut -d: -f1)
+            PATTERN=$(echo "$ROUTE_ID_PATTERN" | cut -d: -f2-)
+            DEL_RESP=$(curl -sS -X DELETE \
+              "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/workers/routes/${ROUTE_ID}" \
+              -H "Authorization: Bearer ${TOKEN}")
+            DEL_OK=$(echo "$DEL_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('success', False))" 2>/dev/null)
+            if [ "$DEL_OK" = "True" ]; then
+              echo "  Deleted: ${PATTERN} (${ROUTE_ID})"
+              DELETED=$((DELETED + 1))
+            else
+              echo "  Failed:  ${PATTERN} (${ROUTE_ID}): $DEL_RESP"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Deleted: ${DELETED}"
+          echo "Failed:  ${FAILED}"
+          if [ "$FAILED" -gt 0 ]; then
+            exit 1
+          fi

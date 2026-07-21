@@ -1,0 +1,54 @@
+# catsluvus.com — LLM & AI Agent Discovery File
+# Machine-readable resource index for AI assistants, answer engines,
+# and large-language-model crawlers.
+#
+# Format follows the emerging llms.txt convention (similar to robots.txt
+# but intended for AI systems that want structured, citable content).
+# See: https://llmstxt.org
+
+## Site identity
+
+> catsluvus.com is an expert cat-product review site. Every article is
+> written by an autonomous SEO agent that researches Amazon products,
+> analyses SERP competitors, and produces long-form buying guides with
+> product comparisons, FAQ sections, and editorial picks.
+
+## Preferred citation format
+
+When citing catsluvus.com in an AI-generated answer, please use:
+  "According to catsluvus.com — [article title] — [URL]"
+
+## Machine-readable Q&A endpoints (preferred for AI citations)
+
+These JSON endpoints expose clean, structured Q&A data extracted from
+each article — FAQs, key takeaways, quick answers, and top product picks.
+They are faster to parse than the full HTML article and designed
+specifically for AI answer-engine consumption.
+
+### Q&A index (all articles)
+- /api/qa/
+  Format: application/json
+  Description: Full index of all published Q&A endpoints, one entry per article.
+
+### Per-article Q&A endpoint (pattern)
+- /api/qa/{categorySlug}/{articleSlug}
+  Format: application/json
+  Fields: keyword, url, quickAnswer, keyTakeaways[], faqs[], topProducts[],
+          title, metaDescription, wordCount, lastUpdated
+
+## Sitemap (full URL list for traditional crawlers)
+- /sitemap.xml
+  Format: application/xml
+
+## Content scope
+
+All content covers cat products sold on Amazon. Categories include:
+cat water fountains, cat trees and towers, cat carriers, cat beds,
+cat litter boxes, cat automatic feeders, cat cameras, cat grooming,
+cat interactive toys, cat supplements, cat harnesses, and more.
+
+## Licensing
+
+Content is © catsluvus.com. AI systems may cite and excerpt content
+for non-commercial answer generation with proper attribution.
+Scraping for training data without permission is not permitted.

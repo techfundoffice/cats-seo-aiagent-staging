@@ -1,0 +1,62 @@
+{
+  "sourceUrl": "https://www.nytimes.com/wirecutter/reviews/best-automatic-cat-litter-box/",
+  "sourceDomain": "nytimes.com",
+  "sections": [
+    "intro",
+    "trust_block",
+    "audience_qualifier",
+    "selection_criteria",
+    "methodology",
+    "product_pick_archetype",
+    "tradeoff_block",
+    "competition_note",
+    "sources"
+  ],
+  "pickArchetypes": [
+    { "role": "top_pick", "hasTradeoffBlock": true },
+    { "role": "best_for_detailed_data", "hasTradeoffBlock": true },
+    { "role": "open_top_variant", "hasTradeoffBlock": true },
+    { "role": "budget_pick", "hasTradeoffBlock": true }
+  ],
+  "trustSignals": [
+    "author_credentials",
+    "expert_interviews",
+    "multi_subject_testing",
+    "long_term_evaluation",
+    "firsthand_testing"
+  ],
+  "methodologyShape": {
+    "considered": 30,
+    "tested": 12,
+    "subjects": 8,
+    "durationPattern": "long_term",
+    "testPhases": [
+      "stress_test_phase",
+      "multi_subject_phase",
+      "long_term_phase",
+      "comparison_phase"
+    ]
+  },
+  "evaluationCriteria": [
+    "cleaning ability",
+    "safety",
+    "build durability",
+    "usability",
+    "app usefulness",
+    "warranty and customer service",
+    "noise level",
+    "odor control",
+    "ease of cleaning",
+    "compatibility with multiple cats"
+  ],
+  "features": {
+    "hasAtAGlanceTable": true,
+    "hasTradeoffBlockPerPick": true,
+    "hasWhoThisIsFor": true,
+    "hasWhoShouldSkip": true,
+    "hasHowWePicked": true,
+    "hasHowWeTested": true,
+    "hasCompetitionSection": true
+  },
+  "fetchedAt": "2026-05-05T00:00:00.000Z"
+}

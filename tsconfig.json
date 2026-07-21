@@ -1,0 +1,7 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    // add your overrides here
+  },
+  "exclude": ["seo-playground", "node_modules"]
+}

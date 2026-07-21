@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cats-seo-playground",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-04-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  // D1 database: create once with `npx wrangler d1 create cats-seo-playground`,
+  // paste the returned database_id below, then apply the schema with
+  // `npx wrangler d1 execute cats-seo-playground --remote --file=./migrations/0001_init.sql`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cats-seo-playground",
+      "database_id": "ab689daf-8654-4ee4-88d4-96a976840730"
+    }
+  ]
+}

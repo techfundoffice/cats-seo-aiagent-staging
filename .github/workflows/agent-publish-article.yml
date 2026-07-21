@@ -1,0 +1,54 @@
+name: Agent — Publish Article (CI Verification)
+
+# Triggered by the Durable Object after committing article files via GitHub API.
+# This workflow verifies the branch builds cleanly before the PR is merged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      working_branch:
+        description: "Branch where article files were committed"
+        required: true
+        type: string
+      change_set_id:
+        description: "Unique correlation ID for tracking in the sheet"
+        required: true
+        type: string
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - verify-build
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.working_branch }}
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx oxfmt --write .
+      - run: npm run check
+      - run: npx vite build
+
+      - name: Callback to agent
+        if: always()
+        env:
+          AGENT_CALLBACK_URL: ${{ secrets.AGENT_CALLBACK_URL }}
+        run: |
+          if [ -n "$AGENT_CALLBACK_URL" ]; then
+            curl -sS -X POST "${AGENT_CALLBACK_URL}/api/github-callback" \
+              -H "Content-Type: application/json" \
+              -d "{\"change_set_id\":\"${{ inputs.change_set_id }}\",\"status\":\"${{ job.status }}\"}" \
+              || echo "Callback failed (non-fatal)"
+          fi

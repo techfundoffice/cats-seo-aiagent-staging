@@ -1,0 +1,19 @@
+---
+description: After coding, run checks and commit and push to main
+alwaysApply: true
+---
+
+# Git: always commit and push when done
+
+When you finish a task that changes project files (source, config, or rules):
+
+1. Run **`npm run check`** and fix failures before committing.
+2. Run **`npx oxfmt --write .`** if you edited TypeScript/JavaScript and formatting is not already clean.
+3. **Commit** to **`main`** with a clear message (what changed and why).
+4. **`git push origin main`** so GitHub Actions can deploy (see `cloudflare-deploy` rule).
+
+Do not leave substantive work only on disk: if there are staged or unstaged changes you authored, push them unless the user explicitly asked not to use git.
+
+**Before you finish a turn where you edited files:** run `git status`. If anything is modified or untracked that belongs in the repo, **commit and push in that same turn** — do not wait for the user to say “push” again.
+
+Skip commit when there is **nothing to commit** (`git status` clean). Never force-push unless the user asks.

@@ -1,0 +1,21 @@
+---
+description: Production reaches Cloudflare only via main-branch CI; do not steer users toward manual Worker deploys
+alwaysApply: true
+---
+
+# Cloudflare deploy (this project)
+
+## What actually ships production
+
+- **Pushing to `main`** triggers **`.github/workflows/deploy.yml`**, which runs `npm ci`, `npm run check`, `npx vite build`, and **`npx wrangler deploy`** using repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+- **Other branches / PRs** do not run that production deploy workflow; only **`main`** pushes deploy.
+
+## Instructions for the AI (Cursor)
+
+- **Default:** When the user wants changes live on Cloudflare, say **merge to `main` and push** (or push to `main` per team convention) and rely on GitHub Actions. **Do not** routinely tell them to run `wrangler deploy`, open the Cloudflare dashboard to deploy, or use Doppler + Wrangler as the primary path unless they explicitly want to **bypass CI** or **fix a failed Action**.
+- **Do not** imply the assistant will or should operate their Cloudflare account, tokens, or dashboard.
+- **Exceptions (only when the user asks or CI is broken):** local/manual `npx vite build && npx wrangler deploy` with their own credentials (e.g. Doppler) is documented in root `CLAUDE.md` for bypass or debugging—not the normal release loop.
+
+## One-line summary for the user
+
+**Push to `main` → GitHub Actions → Cloudflare.** That is the supported way this codebase reaches production.

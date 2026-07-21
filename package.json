@@ -1,0 +1,66 @@
+{
+  "name": "cats-seo-aiagent-staging",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare AI Agent for autonomous SEO article generation — catsluvus.com",
+  "keywords": [
+    "agents",
+    "ai",
+    "cloudflare"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "format": "oxfmt --write .",
+    "lint": "oxlint src/",
+    "test": "vitest run",
+    "bench": "vitest bench --run",
+    "check": "oxfmt --check . && oxlint src/ && tsc && vitest run",
+    "composio": "node ./scripts/composio-run.mjs",
+    "verify:sheet-read": "node ./scripts/verify-composio-sheets-read.mjs",
+    "debug:pull-ndjson": "node ./scripts/pull-debug-ndjson.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "^0.4.1",
+    "@cloudflare/kumo": "^1.18.0",
+    "@composio/core": "^0.6.10",
+    "@composio/vercel": "^0.6.10",
+    "@openrouter/ai-sdk-provider": "^2.9.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "^0.10.1",
+    "ai": "^6.0.158",
+    "mermaid": "^11.14.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.1.10",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^7.29.0",
+    "@cloudflare/vite-plugin": "1.31.2",
+    "@cloudflare/workers-types": "^4.20260411.1",
+    "@rolldown/plugin-babel": "^0.2.2",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zilliz/claude-context-core": "^0.1.13",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.7",
+    "wrangler": "4.83.0"
+  },
+  "overrides": {
+    "tslib": "2.8.1"
+  }
+}

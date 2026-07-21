@@ -1,0 +1,16 @@
+---
+description: Do not add Workers Routes to wrangler.jsonc for cats-seo-aiagent
+globs: wrangler.jsonc
+alwaysApply: false
+---
+
+# Wrangler: no `routes` for cats-seo-aiagent
+
+**Never add a `routes` array** (or `route`) to [`wrangler.jsonc`](wrangler.jsonc) for this Worker.
+
+- Patterns like `catsluvus.com/*/*` are **invalid** for Cloudflare’s Routes API (**10022**): wildcards are only allowed at the **start of the hostname** or the **end of the path**, not as `*/*` in the middle.
+- **`catsluvus.com/*`** often conflicts with another Worker on the zone (**10020**, e.g. `catsluvus-website-payload`).
+- This Worker is the **article generator / pipeline** — it **writes** to KV (`ARTICLES_KV`). **Public HTML for article URLs is served by other Workers** on `catsluvus.com` (category-prefix routes, same KV). Do not declare user-facing zone routes here.
+- Any IndexNow `.txt` or similar **production routes** belong in the **Cloudflare dashboard**, not in this repo’s Wrangler config.
+
+Before pushing: `git diff wrangler.jsonc` should show **no** `routes` / `route` block unless the team explicitly changed architecture.

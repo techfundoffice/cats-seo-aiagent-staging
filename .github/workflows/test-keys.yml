@@ -1,0 +1,135 @@
+name: Test Live API Keys
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+
+      - name: Test all failing keys
+        shell: bash
+        run: |
+          set +e  # Never abort on non-zero exit
+          # Pull secrets
+          eval $(doppler secrets download --token "$DOPPLER_TOKEN" --no-file --format env 2>&1)
+          echo "Doppler load exit: $?"
+
+          echo ""
+          echo "=== 1. SERPER API KEY ==="
+          SERPER_RESP=$(curl -s --max-time 10 -X POST "https://google.serper.dev/search" \
+            -H "X-API-KEY: $SERPER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"q":"cat water fountain","num":3}')
+          SERPER_HTTP=$(echo "$SERPER_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print('HTTP inferred from body')" 2>/dev/null || echo "non-json")
+          echo "Serper raw response (first 200): ${SERPER_RESP:0:200}"
+          echo "$SERPER_RESP" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          if 'organic' in d: print('SERPER_STATUS=ok results=' + str(len(d['organic'])))
+          elif 'message' in d: print('SERPER_STATUS=error msg=' + str(d.get('message',''))[:80])
+          elif 'error' in d: print('SERPER_STATUS=error ' + str(d.get('error',''))[:80])
+          else: print('SERPER_STATUS=unknown keys=' + str(list(d.keys())))
+          " 2>/dev/null || echo "SERPER_STATUS=parse_failed"
+
+          echo ""
+          echo "=== 2. GOOGLE CSE ==="
+          echo "GOOGLE_API_KEY prefix: ${GOOGLE_API_KEY:0:8}..."
+          echo "GOOGLE_CSE_ID prefix: ${GOOGLE_CSE_ID:0:8}..."
+          CSE_RESP=$(curl -s --max-time 10 "https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CSE_ID}&q=cat+water+fountain&num=3")
+          echo "CSE raw response (first 200): ${CSE_RESP:0:200}"
+          echo "$CSE_RESP" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          if 'items' in d: print('CSE_STATUS=ok results=' + str(len(d['items'])))
+          elif 'error' in d: print('CSE_STATUS=error ' + str(d['error'].get('message',''))[:80])
+          else: print('CSE_STATUS=unknown keys=' + str(list(d.keys())))
+          " 2>/dev/null || echo "CSE_STATUS=parse_failed"
+
+          echo ""
+          echo "=== 3. GENSPARK API ==="
+          echo "GENSPARK_API_KEY prefix: ${GENSPARK_API_KEY:0:8}..."
+          GS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+            -X POST "https://api.genspark.ai/v1/chat/completions" \
+            -H "Authorization: Bearer $GENSPARK_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"genspark-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":5}')
+          echo "Genspark HTTP: $GS_HTTP"
+          GS_RESP=$(curl -s --max-time 15 \
+            -X POST "https://api.genspark.ai/v1/chat/completions" \
+            -H "Authorization: Bearer $GENSPARK_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"genspark-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":5}')
+          echo "Genspark raw (first 200): ${GS_RESP:0:200}"
+          echo "$GS_RESP" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          if 'choices' in d: print('GENSPARK_STATUS=ok')
+          elif 'error' in d: print('GENSPARK_STATUS=error ' + str(d.get('error',''))[:80])
+          else: print('GENSPARK_STATUS=unknown keys=' + str(list(d.keys())))
+          " 2>/dev/null || echo "GENSPARK_STATUS=parse_failed"
+
+          echo ""
+          echo "=== 4. INDEXNOW KEY ==="
+          echo "INDEXNOW_KEY (first 8): ${INDEXNOW_KEY:0:8}..."
+          # Test if key file exists on the domain
+          INOW_FILE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://catsluvus.com/${INDEXNOW_KEY}.txt")
+          echo "Key file HTTP: $INOW_FILE_HTTP (need 200)"
+          # Test actual IndexNow submission
+          INOW_RESP=$(curl -s --max-time 10 -w "\nHTTP:%{http_code}" -X POST "https://api.indexnow.org/indexnow" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "{\"host\":\"catsluvus.com\",\"key\":\"${INDEXNOW_KEY}\",\"urlList\":[\"https://catsluvus.com/cat-grooming-tools/cat-brush-for-sensitive-skin-gentle\"]}")
+          echo "IndexNow submit response: $INOW_RESP"
+
+          echo ""
+          echo "=== 5. AMAZON CREATORS API ==="
+          echo "AMAZON_APP_ID prefix: ${AMAZON_APP_ID:0:8}..."
+          echo "AMAZON_API_SECRET prefix: ${AMAZON_API_SECRET:0:8}..."
+          TOK_RESP=$(curl -s --max-time 10 -X POST \
+            "https://creatorsapi.auth.us-east-1.amazoncognito.com/oauth2/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials&client_id=${AMAZON_APP_ID}&client_secret=${AMAZON_API_SECRET}")
+          echo "Creators token raw (first 200): ${TOK_RESP:0:200}"
+          echo "$TOK_RESP" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          if 'access_token' in d: print('CREATORS_STATUS=ok')
+          elif 'error' in d: print('CREATORS_STATUS=error ' + d.get('error','') + ' ' + d.get('error_description','')[:60])
+          else: print('CREATORS_STATUS=unknown keys=' + str(list(d.keys())))
+          " 2>/dev/null || echo "CREATORS_STATUS=parse_failed body=${TOK_RESP:0:100}"
+
+          echo ""
+          echo "=== 6. OPENCLAW GATEWAY ==="
+          echo "OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:0:40}..."
+          OC_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${OPENCLAW_GATEWAY_URL}" 2>/dev/null)
+          echo "OpenClaw gateway HTTP: $OC_HTTP"
+
+          echo ""
+          echo "=== 7. AMAZON PA API (Product Advertising) ==="
+          echo "AMAZON_ACCESS_KEY prefix: ${AMAZON_ACCESS_KEY:0:8}..."
+          echo "AMAZON_PARTNER_TAG: $AMAZON_PARTNER_TAG"
+          # PA API doesn't have a simple unauthenticated test, just confirm keys present
+          if [ -n "$AMAZON_ACCESS_KEY" ] && [ -n "$AMAZON_SECRET_KEY" ] && [ -n "$AMAZON_PARTNER_TAG" ]; then
+            echo "PA_API_STATUS=keys_present"
+          else
+            echo "PA_API_STATUS=missing_keys"
+          fi
+
+          echo ""
+          echo "=== 8. BRIGHTDATA ==="
+          echo "BRIGHTDATA_API_KEY prefix: ${BRIGHTDATA_API_KEY:0:8}..."
+          BD_HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+            "https://api.brightdata.com/zone/get_active_zone_names" \
+            -H "Authorization: Bearer $BRIGHTDATA_API_KEY")
+          echo "BrightData API HTTP: $BD_HTTP"
+
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "All checks complete"
+
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}

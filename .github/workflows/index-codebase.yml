@@ -1,0 +1,42 @@
+name: Index codebase to Milvus
+
+# Runs the @zilliz/claude-context-core indexer on every push to main
+# AND on manual dispatch. The worker's runtime searchCodebase() queries
+# the resulting Milvus collection over HTTPS.
+#
+# Required GitHub Actions secrets:
+#   OPENAI_API_KEY
+#   MILVUS_ADDRESS    (Zilliz Cloud cluster URL)
+#   MILVUS_TOKEN
+# Optional:
+#   MILVUS_COLLECTION (defaults to "code_chunks")
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/index-codebase.mjs"
+      - ".github/workflows/index-codebase.yml"
+  workflow_dispatch:
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run indexer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MILVUS_ADDRESS: ${{ secrets.MILVUS_ADDRESS }}
+          MILVUS_TOKEN: ${{ secrets.MILVUS_TOKEN }}
+          MILVUS_COLLECTION: ${{ secrets.MILVUS_COLLECTION }}
+        run: node scripts/index-codebase.mjs

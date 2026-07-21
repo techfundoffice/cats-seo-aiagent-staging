@@ -1,0 +1,1 @@
+/opt/browser-harness/SKILL.md

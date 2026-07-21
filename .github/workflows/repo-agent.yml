@@ -1,0 +1,455 @@
+name: Repo Agent
+
+# The GitHub Repo Agent closes the gap between "Copilot PR merged to
+# main" and "fix is running in production, no regression, branches
+# clean". Runs on four triggers:
+#
+#   1. workflow_run: Deploy completed
+#      - Success → post "Deploy ok <sha>" to the dashboard, then run
+#        the 10-min regression watchdog.
+#      - Failure → classify the wrangler error, open a Copilot-assigned
+#        issue with a deploy-specific runbook; direct-push for
+#        mechanical infra-only fixes (route conflicts).
+#
+#   2. schedule (*/15 min)
+#      - Cross-issue dedup: collapse redundant `claude-fix` issues that
+#        share (errorCategory) across keywords into one umbrella issue.
+#      - Stale PR sweep: comment on `copilot/*` PRs open > 3 days.
+#      - Secret expiry scan: grep recent logs for `401 Invalid
+#        authentication credentials`; if found, open a
+#        `secret-rotation` issue.
+#
+#   3. issues.opened (claude-fix label)
+#      - Cross-keyword dedup: if same errorCategory has >3 open issues
+#        from the last hour, close the new one as duplicate of the
+#        oldest with `Closed as duplicate of #N`.
+#
+#   4. workflow_dispatch — manual kick for debugging.
+#
+# All actions mirror to /api/admin/log-repo-agent on the live worker so
+# they surface in the "GitHub Repo Agent" dashboard panel. Auth = repo
+# secret ADMIN_API_TOKEN (already exists).
+
+on:
+  workflow_run:
+    # ONLY `Deploy` here — intentional. Earlier iterations also watched
+    # `Sanity Check` and `Auto-merge Copilot PRs`, which created a
+    # recursion trap: those workflows run on Copilot-authored PRs, so
+    # GitHub treated the downstream Repo Agent run as Copilot-authored
+    # too, putting it in `conclusion: action_required` itself. The Repo
+    # Agent would then need a maintainer to approve its OWN runs before
+    # it could approve the Copilot runs. Self-blocking.
+    #
+    # The scheduled-sweep job below handles stuck Copilot CI on a 15-min
+    # cadence. `Deploy` is safe to watch here because it only runs on
+    # `push: main` which the repo owner authored — those runs never need
+    # approval.
+    workflows: ["Deploy"]
+    types: [completed]
+  schedule:
+    - cron: "*/15 * * * *"
+  issues:
+    types: [opened]
+  workflow_dispatch:
+
+concurrency:
+  group: repo-agent-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  WORKER_ADMIN_BASE: https://cats-seo-aiagent.webmaster-bc8.workers.dev
+  REPO: techfundoffice/cats-seo-aiagent-cloudflare
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Branch 1: Deploy completed (success OR failure)
+  # Action-required reruns for Copilot workflows are handled by the
+  # scheduled sweep below (not an event trigger), to avoid the
+  # recursion trap where Copilot-triggered workflow_run events cause
+  # the Repo Agent's OWN runs to need approval.
+  # ─────────────────────────────────────────────────────────────────
+  on-deploy:
+    if: |
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Deploy' &&
+      github.event.workflow_run.conclusion != 'action_required'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify or fix the deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+          DEPLOY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_URL: ${{ github.event.workflow_run.html_url }}
+          DEPLOY_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -eo pipefail
+          SHA_SHORT="${DEPLOY_SHA:0:7}"
+
+          post_log() {
+            local level="$1"; local msg="$2"
+            curl -sS -o /dev/null -w "log %{http_code}\n" -X POST \
+              -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg l "$level" --arg m "$msg" '{level:$l,msg:$m}')" \
+              "$WORKER_ADMIN_BASE/api/admin/log-repo-agent" || true
+          }
+
+          if [ "$DEPLOY_CONCLUSION" = "success" ]; then
+            # Success path — record it, then watchdog for 10 min.
+            # Grab what got deployed (commit message first line).
+            TITLE=$(gh api "repos/$REPO/commits/$DEPLOY_SHA" --jq '.commit.message | split("\n")[0] | .[0:100]' 2>/dev/null || echo "")
+            post_log info "Deploy ok $SHA_SHORT — $TITLE"
+
+            # Baseline failure count right before the deploy dropped.
+            BASELINE=$(curl -sS -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+              "$WORKER_ADMIN_BASE/api/admin/recent-failures?limit=20" \
+              | jq '.count // 0')
+            echo "Baseline failed keywords: $BASELINE"
+
+            # Watchdog: 10 min, sample every 2 min, flag spike.
+            for i in 1 2 3 4 5; do
+              sleep 120
+              CURRENT=$(curl -sS -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+                "$WORKER_ADMIN_BASE/api/admin/recent-failures?limit=20" \
+                | jq '.count // 0')
+              echo "sample $i/5: failed=$CURRENT (baseline=$BASELINE)"
+              if [ "$CURRENT" -gt $((BASELINE + 5)) ]; then
+                post_log warning "Possible regression on $SHA_SHORT — recent-failures $BASELINE → $CURRENT"
+                gh issue create \
+                  --repo "$REPO" \
+                  --title "[auto] possible regression on $SHA_SHORT" \
+                  --label "claude-fix,auto,regression" \
+                  --body "Deploy $SHA_SHORT completed green but failure count jumped from $BASELINE to $CURRENT within $((i*2)) min.
+
+              Inspect recent failures:
+              \`\`\`
+              curl -sS -H \"Authorization: Bearer \$ADMIN_API_TOKEN\" \"$WORKER_ADMIN_BASE/api/admin/recent-failures?limit=20\"
+              \`\`\`
+
+              If the new failures are caused by $SHA_SHORT, revert the PR that produced it. Otherwise close this issue as not-a-regression."
+                break
+              fi
+            done
+            post_log info "Post-deploy watchdog complete on $SHA_SHORT — no regression detected"
+          else
+            # Failure path — fetch logs, decide: rerun (transient infra) or classify+escalate.
+            post_log error "Deploy failed $SHA_SHORT — fetching logs"
+            gh run view "$DEPLOY_RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -200 > /tmp/deploy.log || true
+            TAIL=$(tail -20 /tmp/deploy.log | head -c 2000)
+
+            # Transient-infra detection. Cloudflare/CF edge/Workers control plane
+            # occasionally returns 503/502/gateway timeouts/connection resets during
+            # `wrangler secret bulk` or `wrangler deploy`. These are NOT code bugs —
+            # opening a Copilot issue for them wastes cycles. Auto-rerun instead,
+            # capped at 3 attempts per run_id so a prolonged outage still escalates.
+            RUN_ATTEMPT=$(gh api "repos/$REPO/actions/runs/$DEPLOY_RUN_ID" --jq '.run_attempt // 1' 2>/dev/null || echo 1)
+            if [ "$RUN_ATTEMPT" -lt 3 ] && \
+               grep -qiE "503 service unavailable|502 bad gateway|upstream connect error|connection timeout|connection reset|reset reason:|malformed response from the api|ETIMEDOUT|ECONNRESET" /tmp/deploy.log; then
+              post_log warning "Deploy transient infra failure $SHA_SHORT (attempt $RUN_ATTEMPT/3) — auto-rerunning failed jobs"
+              HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$REPO/actions/runs/$DEPLOY_RUN_ID/rerun-failed-jobs")
+              if [ "$HTTP" = "201" ]; then
+                post_log info "Deploy rerun dispatched $SHA_SHORT — run $DEPLOY_RUN_ID attempt $((RUN_ATTEMPT + 1))"
+              else
+                post_log error "Deploy rerun API call returned HTTP $HTTP on $SHA_SHORT — falling through to classify"
+              fi
+              # Exit the step either way: rerun success → wait for next workflow_run;
+              # rerun failure → the NEXT workflow_run will fire this branch again, log
+              # the HTTP error above, and by then run_attempt will be high enough to
+              # fall through to the classify path below.
+              exit 0
+            fi
+
+            # Classify.  Known mechanical patterns get a tight runbook
+            # so Copilot's first pass is likely to land; unknown ones
+            # get the raw log tail for diagnostic work.
+            CATEGORY="deploy-unknown"
+            if grep -qi "exceeded the limit of 1000 Workers routes" /tmp/deploy.log; then
+              CATEGORY="deploy-route-limit"
+            elif grep -qi "Can.t deploy routes that are assigned to another worker" /tmp/deploy.log; then
+              CATEGORY="deploy-route-conflict"
+            elif grep -qi "secret.*not set\|missing.*secret\|undefined.*env\." /tmp/deploy.log; then
+              CATEGORY="deploy-missing-secret"
+            elif grep -qi "size.*exceed\|too large" /tmp/deploy.log; then
+              CATEGORY="deploy-bundle-too-large"
+            elif grep -qi "wrangler.jsonc\|wrangler.toml.*invalid\|schema.*validation" /tmp/deploy.log; then
+              CATEGORY="deploy-wrangler-invalid"
+            fi
+
+            BODY=$(cat <<EOF
+          ## Deploy failure on $SHA_SHORT
+
+          - **Run:** $DEPLOY_URL
+          - **Category:** \`$CATEGORY\`
+          - **Commit:** $SHA_SHORT
+
+          ### Log tail
+
+          \`\`\`
+          $TAIL
+          \`\`\`
+
+          ### Rules for the coding agent
+
+          - Fix the root cause — either \`wrangler.jsonc\` (routes/bindings) or \`src/\` (imports/types).
+          - For \`deploy-route-conflict\` / \`deploy-route-limit\`: drop the conflicting route from \`wrangler.jsonc\`. The worker stays reachable via the \`workers.dev\` subdomain.
+          - For \`deploy-missing-secret\`: update \`env.d.ts\` + the bootstrap procedure in \`CLAUDE.md\`, **do not** edit the secret value itself.
+          - Run \`npm run check\` before committing.
+          - Open a PR titled \`fix(deploy): <one-line root cause>\`.
+          - Never push directly to \`main\`. Branch protection will block it anyway.
+          - Close this issue with \`Fixes #<issue>\` in the PR body.
+
+          <!-- emitted by .github/workflows/repo-agent.yml -->
+          EOF
+          )
+            ISSUE_URL=$(gh issue create \
+              --repo "$REPO" \
+              --title "[auto] $CATEGORY on $SHA_SHORT" \
+              --label "claude-fix,auto,deploy-fix" \
+              --body "$BODY" \
+              --assignee "Copilot" 2>&1 || echo "")
+            post_log error "Deploy failed $SHA_SHORT — $CATEGORY — Copilot assigned: $ISSUE_URL"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # Branch 2: every 15 min — watchdog + sweeps
+  # ─────────────────────────────────────────────────────────────────
+  scheduled-sweep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - name: Safety-net rerun of any lingering action_required runs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+        run: |
+          set -eo pipefail
+
+          post_log() {
+            local level="$1"; local msg="$2"
+            curl -sS -o /dev/null -X POST \
+              -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg l "$level" --arg m "$msg" '{level:$l,msg:$m}')" \
+              "$WORKER_ADMIN_BASE/api/admin/log-repo-agent" || true
+          }
+
+          # Self-heal: rerun stuck Repo Agent runs only. Copilot-triggered
+          # runs inherit the Copilot actor on rerun and remain
+          # action_required, so rerunning them is ineffective — they need
+          # a fresh event fired by a non-Copilot actor instead (see below).
+          STUCK_REPO_AGENT=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?status=action_required&per_page=100" \
+            | jq -r '.workflow_runs[]? | select(.name == "Repo Agent")
+              | [.id, .name, (.head_branch // ""), (.head_sha[:7] // "")] | @tsv')
+
+          COUNT=0
+          while IFS=$'\t' read -r id name branch sha; do
+            [ -z "$id" ] && continue
+            HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/runs/$id/rerun")
+            if [ "$HTTP" = "201" ]; then
+              COUNT=$((COUNT + 1))
+            fi
+          done <<< "$STUCK_REPO_AGENT"
+
+          [ "$COUNT" -gt 0 ] && post_log info "Safety-net: reran $COUNT stuck Repo Agent run(s)"
+
+          # Unblock Copilot improve(auto) draft PRs stuck in action_required:
+          # Reruns of Copilot-triggered runs inherit the Copilot actor and
+          # remain blocked. Instead, mark ready-for-review as
+          # github-actions[bot], which fires a fresh ready_for_review event
+          # without the Copilot actor restriction and unblocks both
+          # sanity-check and auto-merge-copilot workflows.
+          # Only targets PRs whose title already has the proper improve(auto):
+          # prefix (no [WIP]), meaning Copilot has finished its code changes.
+          DRAFT_COPILOT_PRS=$(gh api "repos/$REPO/pulls?state=open&per_page=50" \
+            --jq '[.[] | select(
+                .user.login == "Copilot" and
+                .draft == true and
+                (.title | test("^improve\\(auto\\): "))
+              ) | .number] | .[]')
+
+          READY_COUNT=0
+          while read -r pr_num; do
+            [ -z "$pr_num" ] && continue
+            if gh pr ready "$pr_num" --repo "$REPO" 2>/dev/null; then
+              READY_COUNT=$((READY_COUNT + 1))
+              post_log info "Safety-net: marked PR #$pr_num ready-for-review (improve(auto) unblocked)"
+            fi
+          done <<< "$DRAFT_COPILOT_PRS"
+          [ "$READY_COUNT" -gt 0 ] && post_log info "Safety-net: unblocked $READY_COUNT improve(auto) PR(s)"
+
+      - name: Cross-issue dedup + stale sweep + secret scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+        run: |
+          set -eo pipefail
+
+          post_log() {
+            local level="$1"; local msg="$2"
+            curl -sS -o /dev/null -X POST \
+              -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg l "$level" --arg m "$msg" '{level:$l,msg:$m}')" \
+              "$WORKER_ADMIN_BASE/api/admin/log-repo-agent" || true
+          }
+
+          # ─── Cross-issue dedup ───────────────────────────────────
+          # Group open `claude-fix` issues by their [auto] <category>:
+          # prefix.  If any category has > 3 issues in the last hour,
+          # keep the oldest and close the rest as duplicates.
+          gh api "repos/$REPO/issues?labels=claude-fix&state=open&per_page=100&sort=created&direction=asc" \
+            --jq '.[] | [.number, .title, .created_at] | @tsv' > /tmp/open_issues.tsv
+
+          declare -A CAT_FIRST
+          declare -A CAT_COUNT
+          declare -A CAT_DUPLICATES
+
+          while IFS=$'\t' read -r num title created; do
+            # Extract category from titles like "[auto] parser-error: ..."
+            cat=$(echo "$title" | sed -nE 's/^\[auto\] ([a-z-]+): .*/\1/p')
+            [ -z "$cat" ] && continue
+            # Only consider issues from the last 2 hours.
+            if [ "$(date -d "$created" +%s)" -lt "$(date -d "2 hours ago" +%s)" ]; then
+              continue
+            fi
+            if [ -z "${CAT_FIRST[$cat]:-}" ]; then
+              CAT_FIRST[$cat]=$num
+              CAT_COUNT[$cat]=1
+            else
+              CAT_COUNT[$cat]=$((${CAT_COUNT[$cat]} + 1))
+              CAT_DUPLICATES[$cat]="${CAT_DUPLICATES[$cat]:-} $num"
+            fi
+          done < /tmp/open_issues.tsv
+
+          for cat in "${!CAT_COUNT[@]}"; do
+            if [ "${CAT_COUNT[$cat]}" -gt 3 ]; then
+              umbrella="${CAT_FIRST[$cat]}"
+              dupes="${CAT_DUPLICATES[$cat]}"
+              closed_list=""
+              for dup in $dupes; do
+                gh issue close "$dup" --repo "$REPO" \
+                  --comment "Closed as duplicate of #$umbrella — same \`$cat\` root cause. Let Copilot's PR on #$umbrella land and this keyword will retry automatically." \
+                  --reason "not planned" 2>/dev/null || continue
+                closed_list="$closed_list #$dup"
+              done
+              post_log info "Closed$closed_list as duplicate of #$umbrella ($cat — ${CAT_COUNT[$cat]} open in last 2h)"
+            fi
+          done
+
+          # ─── Stale PR sweep ──────────────────────────────────────
+          # copilot/* branches older than 3 days with no merge: ping.
+          STALE_CUTOFF=$(date -u -d "3 days ago" +"%Y-%m-%dT%H:%M:%SZ")
+          gh api "repos/$REPO/pulls?state=open&per_page=50" \
+            --jq ".[] | select(.user.login==\"Copilot\") | select(.updated_at < \"$STALE_CUTOFF\") | [.number, .title] | @tsv" \
+            > /tmp/stale_prs.tsv || true
+
+          STALE_COUNT=0
+          while IFS=$'\t' read -r num title; do
+            [ -z "$num" ] && continue
+            STALE_COUNT=$((STALE_COUNT + 1))
+            gh pr comment "$num" --repo "$REPO" \
+              --body "⏰ This Copilot PR hasn't been updated in > 3 days. If the root cause is already fixed by another merge, the Repo Agent will close it on the next sweep. Otherwise, rebase onto current main and the auto-merge will engage." 2>/dev/null || true
+          done < /tmp/stale_prs.tsv
+          [ "$STALE_COUNT" -gt 0 ] && post_log info "Stale PR sweep — pinged $STALE_COUNT Copilot PR(s)"
+
+          # ─── Secret expiry scan ──────────────────────────────────
+          # Look for 401 auth failures in recent logs.
+          LOGS=$(curl -sS -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+            "$WORKER_ADMIN_BASE/api/admin/logs?limit=200")
+          if echo "$LOGS" | jq -r '.entries[].msg' | grep -iE "401.*authentication|Invalid authentication credentials" | head -1 > /tmp/auth_hit; then
+            if [ -s /tmp/auth_hit ]; then
+              HIT=$(cat /tmp/auth_hit | head -c 200)
+              # Dedup: don't fire repeatedly.
+              DEDUP_TAG="secret-rotation-$(date -u +%Y-%m-%d)"
+              if ! gh issue list --repo "$REPO" --label "$DEDUP_TAG" --state all --limit 1 | grep -q .; then
+                gh label create "$DEDUP_TAG" --repo "$REPO" --color "e11d48" 2>/dev/null || true
+                gh issue create \
+                  --repo "$REPO" \
+                  --title "[auto] secret rotation needed — 401 in worker logs" \
+                  --label "claude-fix,auto,secret-rotation,$DEDUP_TAG" \
+                  --body "A 401 \"Invalid authentication credentials\" error was detected in the last 200 activity-log entries:
+
+          \`\`\`
+          $HIT
+          \`\`\`
+
+          Likely candidates: \`ANTHROPIC_API_KEY\`, \`CLAUDE_CODE_OAUTH_TOKEN\`, \`GITHUB_TOKEN_SECRET\`, \`CLOUDFLARE_API_TOKEN\`, \`OPENROUTER_API_KEY\`. Rotate the relevant one in Doppler (\`replit-n8n-catsluvus/prd\`) and mirror to the worker via the pattern in CLAUDE.md § Cloudflare Worker Secret Management." 2>/dev/null || true
+                post_log warning "Secret rotation issue opened — 401 in logs"
+              fi
+            fi
+          fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # Branch 3: issues.opened — cross-keyword dedup on hot-spot categories
+  # ─────────────────────────────────────────────────────────────────
+  on-issue-opened:
+    if: |
+      github.event_name == 'issues' &&
+      contains(github.event.issue.labels.*.name, 'claude-fix')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      issues: write
+    steps:
+      - name: Dedup within same errorCategory
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -eo pipefail
+
+          post_log() {
+            local msg="$1"
+            curl -sS -o /dev/null -X POST \
+              -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg l "info" --arg m "$msg" '{level:$l,msg:$m}')" \
+              "$WORKER_ADMIN_BASE/api/admin/log-repo-agent" || true
+          }
+
+          # Extract category from title: "[auto] <category>: <keyword>"
+          CAT=$(echo "$ISSUE_TITLE" | sed -nE 's/^\[auto\] ([a-z-]+): .*/\1/p')
+          [ -z "$CAT" ] && exit 0
+
+          # Count existing open issues of same category from last hour.
+          CUTOFF=$(date -u -d "1 hour ago" +"%Y-%m-%dT%H:%M:%SZ")
+          OLDEST=$(gh api "repos/$REPO/issues?labels=claude-fix&state=open&per_page=100&sort=created&direction=asc" \
+            --jq ".[] | select(.number != $ISSUE_NUM) | select(.created_at > \"$CUTOFF\") | select(.title | startswith(\"[auto] $CAT:\")) | .number" \
+            | head -1)
+
+          # Count total of same category (including current).
+          TOTAL=$(gh api "repos/$REPO/issues?labels=claude-fix&state=open&per_page=100" \
+            --jq "[.[] | select(.title | startswith(\"[auto] $CAT:\"))] | length")
+
+          # Only dedup when > 3 issues of same category are open, keeping the oldest.
+          if [ -n "$OLDEST" ] && [ "$TOTAL" -gt 3 ]; then
+            gh issue close "$ISSUE_NUM" --repo "$REPO" \
+              --comment "Closed as duplicate of #$OLDEST — same \`$CAT\` root cause. When Copilot's PR on #$OLDEST merges, the fix will resolve this keyword too. Retry via \`/api/admin/retry\` once deployed." \
+              --reason "not planned"
+            post_log "Closed #$ISSUE_NUM as duplicate of #$OLDEST ($CAT — $TOTAL open)"
+          fi

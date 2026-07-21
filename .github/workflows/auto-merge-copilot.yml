@@ -1,0 +1,84 @@
+name: Auto-merge Copilot PRs
+
+# When the GitHub Copilot Coding Agent opens a fix PR from a claude-fix
+# issue, mark it ready-for-review (if it came in as draft) and enable
+# auto-merge SQUASH immediately. GitHub will then hold the merge until
+# all required checks pass (sanity-check.yml's `check (ubuntu-24.04)`
+# gate), so we still get CI enforcement — we just skip the human step
+# of clicking "Merge when ready".
+#
+# The user chose "always auto-merge" explicitly. CLAUDE.md § Pull
+# Request Rules documents the handshake: mark ready (non-draft),
+# enable auto-merge with SQUASH, wait on required checks.
+#
+# Scope: only Copilot-authored PRs. Human PRs are untouched so the
+# dev loop for humans stays unchanged.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+
+jobs:
+  enable-auto-merge:
+    # Copilot's bot author shows up as several different logins
+    # depending on which API surface you read. Cover every variant we
+    # have seen: `Copilot`, `copilot-swe-agent`, `copilot-swe-agent[bot]`.
+    if: |
+      github.event.pull_request.user.login == 'Copilot' ||
+      github.event.pull_request.user.login == 'copilot-swe-agent' ||
+      github.event.pull_request.user.login == 'copilot-swe-agent[bot]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const pullRequestId = pr.node_id;
+
+            // 1. Mark ready-for-review if the PR came in as draft.
+            //    Auto-merge can't be enabled on draft PRs.
+            if (pr.draft) {
+              const readyMutation = `
+                mutation($id: ID!) {
+                  markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+                    pullRequest { id isDraft }
+                  }
+                }
+              `;
+              try {
+                await github.graphql(readyMutation, { id: pullRequestId });
+                core.info(`Marked PR #${pr.number} ready-for-review`);
+              } catch (err) {
+                core.warning(`Mark-ready failed for PR #${pr.number}: ${err.message}`);
+                return;
+              }
+            }
+
+            // 2. Enable auto-merge with SQUASH.  GitHub holds the merge
+            //    until the required `check (ubuntu-24.04)` status from
+            //    sanity-check.yml passes.
+            const enableMutation = `
+              mutation($id: ID!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $id,
+                  mergeMethod: SQUASH
+                }) {
+                  pullRequest { id autoMergeRequest { enabledAt mergeMethod } }
+                }
+              }
+            `;
+            try {
+              const result = await github.graphql(enableMutation, { id: pullRequestId });
+              const enabledAt = result?.enablePullRequestAutoMerge?.pullRequest?.autoMergeRequest?.enabledAt;
+              core.info(`Auto-merge enabled for PR #${pr.number} at ${enabledAt}`);
+            } catch (err) {
+              // Most common reasons this fails:
+              //  - PR is already mergeable (trivially clean) — nothing to do
+              //  - Required checks already failed — human must intervene
+              //  - Repo doesn't allow auto-merge — owner must enable
+              core.warning(`Enable auto-merge failed for PR #${pr.number}: ${err.message}`);
+            }
