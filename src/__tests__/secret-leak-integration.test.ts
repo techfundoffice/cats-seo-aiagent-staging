@@ -98,7 +98,7 @@ describe("agent.log secret-leak integration", () => {
       },
       {
         level: "info",
-        msg: "Stripe charge: sk_live_abcdefghij" + "klmnopqrstuvwx",
+        msg: "Stripe charge: sk_live_abcdefghijklmnopqrstuvwx",
         role: "observerAgent"
       },
       {

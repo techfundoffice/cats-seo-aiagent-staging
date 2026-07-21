@@ -51,7 +51,7 @@ describe("redactSecrets — positive matches", () => {
     ],
     [
       "Stripe sk_live_",
-      "Stripe live: sk_live_abcdefghij" + "klmnopqrstuvwx",
+      "Stripe live: sk_live_abcdefghijklmnopqrstuvwx",
       "Stripe live: [REDACTED]"
     ],
     [
@@ -141,7 +141,7 @@ describe("redactSecrets — idempotency", () => {
     "Cookie: session=abcdefghijklmnopqrstuvwxyz1234567890",
     "X-Hub-Signature-256: sha256=abcdef1234567890abcdef1234567890abcdef12",
     "Slack: xoxb-1234567890-abcdefghij-AbCdEfGhIjKlMnOpQrStUvWx",
-    "Stripe live: sk_live_abcdefghij" + "klmnopqrstuvwx",
+    "Stripe live: sk_live_abcdefghijklmnopqrstuvwx",
     "JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
   ])("redact(redact(x)) === redact(x): %s", (input) => {
     const r1 = redactSecrets(input);

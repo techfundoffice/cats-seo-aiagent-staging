@@ -10,7 +10,7 @@ function buildPayload(sizeBytes: number, secretsPerKB: number): string {
   const secrets = [
     "Authorization: Bearer sk-ant-abcdefghijklmnopqrst",
     "Cookie: session=abcdefghijklmnopqrstuvwxyz1234567890",
-    "Stripe: sk_live_abcdefghij" + "klmnopqrstuvwx",
+    "Stripe: sk_live_abcdefghijklmnopqrstuvwx",
     "https://b.s3.amazonaws.com/k?X-Amz-Signature=abc123def456ghi789jkl",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
   ];

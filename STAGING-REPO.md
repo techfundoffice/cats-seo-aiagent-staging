@@ -58,14 +58,3 @@ npx wrangler deploy    # deploys cats-seo-aiagent-staging (default wrangler.json
 
 Or push to `main` and let `.github/workflows/deploy.yml` run it.
 
-## One intentional divergence from production `src/`
-
-In the `redactSecrets` test fixtures, the single **fake** Stripe key value is
-written split across a string concatenation
-(`"sk_live_abcdefghij" + "klmnopqrstuvwx"`) instead of one contiguous literal.
-The runtime value is byte-identical, so the redaction tests behave exactly as
-in production — the split only prevents GitHub push protection from
-false-positive-blocking on a Stripe-shaped test string. Files:
-`src/pipeline/__tests__/redact-secrets.test.ts`,
-`src/pipeline/__tests__/redact-secrets.bench.ts`,
-`src/__tests__/secret-leak-integration.test.ts`.
