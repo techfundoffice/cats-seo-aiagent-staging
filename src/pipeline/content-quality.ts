@@ -233,6 +233,32 @@ function toPlainText(htmlOrText: string): string {
   return unescapeHtml(stripHtmlToPlainText(htmlOrText));
 }
 
+/**
+ * Extract the inner HTML of the writer-generated `.introduction` div by
+ * walking to its MATCHING closing tag (depth-counted over `<div>`/`</div>`).
+ * A non-greedy regex would truncate at the first `</div>`, losing any
+ * nested markup (callout/badge divs) the model emits despite the
+ * `<p>`-only intro spec. Unclosed markup degrades to "rest of document",
+ * which the word-count heuristics tolerate better than silent truncation.
+ */
+function extractIntroductionHtml(html: string): string {
+  const open =
+    /<div\b[^>]*class\s*=\s*["'][^"']*\bintroduction\b[^"']*["'][^>]*>/i.exec(
+      html
+    );
+  if (!open) return "";
+  const start = open.index + open[0].length;
+  const tagRe = /<\/?div\b[^>]*>/gi;
+  tagRe.lastIndex = start;
+  let depth = 1;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    depth += m[0][1] === "/" ? -1 : 1;
+    if (depth === 0) return html.slice(start, m.index);
+  }
+  return html.slice(start);
+}
+
 function getWordCount(text: string): number {
   return text.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g)?.length ?? 0;
 }
@@ -320,11 +346,7 @@ export function analyzeContentQuality(html: string): ContentQualityReport {
   // Intro = the writer-generated `.introduction` div rendered by
   // html-builder.ts. Measuring the whole H1→first-H2 span would count the
   // quick-answer box and other page chrome and permanently false-positive.
-  const introHtml =
-    cleaned.match(
-      /<div\b[^>]*class\s*=\s*["'][^"']*\bintroduction\b[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/i
-    )?.[1] ?? "";
-  const introText = toPlainText(introHtml);
+  const introText = toPlainText(extractIntroductionHtml(cleaned));
   const introWords = getWordCount(introText);
   const introPatternLabels = collectPatternLabels(
     firstWords(introText, INTRO_SCAN_WORDS)

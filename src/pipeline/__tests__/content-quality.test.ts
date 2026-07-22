@@ -134,6 +134,23 @@ describe("analyzeContentQuality — process language", () => {
       true
     );
   });
+
+  it("reads the full intro past a nested div (callout/badge)", () => {
+    // A non-greedy </div> capture would truncate at the callout's close and
+    // miss the trailing paragraph — including its process language.
+    const report = analyzeContentQuality(
+      page({
+        intro:
+          "<p>Hooded boxes contain scatter.</p>" +
+          '<div class="callout"><p>Vet tip: pick a box one and a half times your cat\'s length.</p></div>' +
+          "<p>At the time of writing, most models on this list share the same filter design, which we chose deliberately.</p>"
+      })
+    );
+    expect(report.introWords).toBeGreaterThan(30);
+    expect(report.issues.some((i) => i.includes("process language"))).toBe(
+      true
+    );
+  });
 });
 
 describe("analyzeContentQuality — template chrome exemptions", () => {
