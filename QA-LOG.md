@@ -56,3 +56,10 @@ and the deliberate improvement carried into the next iteration.
 - gpt-5-mini 750 under ⚠️ | deepseek-v4-pro 1156 ❌ | gemini-3-pro absent
 - DECISION: writer -> anthropic/claude-sonnet-5 (most precise + best
   prose tier + 2x Kimi speed). Secret-only switch; revert = 1 change.
+
+## Model decision (2026-07-23)
+- User decision: writer stays moonshotai/kimi-k2.5:nitro (code default;
+  OPENROUTER_KIMI_MODEL override secret deleted). Rationale: pipeline QC
+  flattens model quality deltas; Kimi is the proven cheapest reliable
+  option. Sonnet-5/Grok/Gemini remain one secret change away.
+- Trial ledger: kimi 92/97, grok 95, sonnet-5 97 — all 8-check passes.
