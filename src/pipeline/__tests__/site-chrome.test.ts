@@ -15,7 +15,9 @@ describe("wrapWithSiteChrome", () => {
     expect(out).toContain(">Home</a>");
     expect(out).toContain(">About Us</a>");
     expect(out).toContain('href="https://catsluvus.com/photos/"');
-    expect(out).not.toMatch(/href="https:\/\/catsluvus\.com\/blog\/"[^>]*>Photos/);
+    expect(out).not.toMatch(
+      /href="https:\/\/catsluvus\.com\/blog\/"[^>]*>Photos/
+    );
     // Exactly one Photos menu link, and only one services bar (no nested copy in Book Now)
     expect((out.match(/>Photos<\/a>/g) || []).length).toBe(1);
     expect((out.match(/class="clu-services-bar"/g) || []).length).toBe(1);

@@ -19,70 +19,72 @@ afterEach(() => {
 describe("fetchViaApify (junglee Amazon-crawler)", () => {
   it("maps junglee dataset items to products with real ASIN affiliate URLs", async () => {
     const warnings: string[] = [];
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : String(input);
-      if (url.includes("junglee~amazon-crawler") && url.includes("/runs")) {
-        expect(url).not.toContain("gajo-cz");
-        const body = JSON.parse(String(init?.body ?? "{}")) as {
-          categoryOrProductUrls?: Array<{ url: string }>;
-        };
-        expect(body.categoryOrProductUrls?.[0]?.url).toContain(
-          "amazon.com/s?k="
-        );
-        expect(decodeURIComponent(body.categoryOrProductUrls?.[0]?.url ?? "")).toContain(
-          "cat water fountain"
-        );
-        return new Response(
-          JSON.stringify({
-            data: {
-              id: "run-test-1",
-              status: "SUCCEEDED",
-              defaultDatasetId: "ds-test-1"
-            }
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : String(input);
+        if (url.includes("junglee~amazon-crawler") && url.includes("/runs")) {
+          expect(url).not.toContain("gajo-cz");
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            categoryOrProductUrls?: Array<{ url: string }>;
+          };
+          expect(body.categoryOrProductUrls?.[0]?.url).toContain(
+            "amazon.com/s?k="
+          );
+          expect(
+            decodeURIComponent(body.categoryOrProductUrls?.[0]?.url ?? "")
+          ).toContain("cat water fountain");
+          return new Response(
+            JSON.stringify({
+              data: {
+                id: "run-test-1",
+                status: "SUCCEEDED",
+                defaultDatasetId: "ds-test-1"
+              }
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes("/datasets/ds-test-1/items")) {
+          return new Response(
+            JSON.stringify([
+              {
+                asin: "B08NCDBT7Q",
+                title: "Veken Cat Water Fountain 95oz Automatic",
+                price: { value: 29.99, currency: "$" },
+                stars: 4.4,
+                reviewsCount: 12034,
+                imageUrl: "https://m.media-amazon.com/images/I/example.jpg"
+              },
+              {
+                asin: "NOTVALID",
+                title: "Broken ASIN row must be dropped",
+                price: { value: 1, currency: "$" },
+                stars: 5,
+                reviewsCount: 1
+              },
+              {
+                // valid ASIN shape but dog-only title → filtered
+                asin: "B0DOGONLY1",
+                title: "Premium Dog Water Bowl Dispenser",
+                price: { value: 19.99, currency: "$" },
+                stars: 4,
+                reviewsCount: 50
+              },
+              {
+                asin: "b0dzwwpgdn",
+                title: "Veken Cat Fountain Detachable Tank",
+                price: { value: 18.99, currency: "$" },
+                stars: 4.2,
+                reviewsCount: 1523,
+                imageUrl: "https://m.media-amazon.com/images/I/example2.jpg"
+              }
+            ]),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(`unexpected url ${url}`, { status: 500 });
       }
-      if (url.includes("/datasets/ds-test-1/items")) {
-        return new Response(
-          JSON.stringify([
-            {
-              asin: "B08NCDBT7Q",
-              title: "Veken Cat Water Fountain 95oz Automatic",
-              price: { value: 29.99, currency: "$" },
-              stars: 4.4,
-              reviewsCount: 12034,
-              imageUrl: "https://m.media-amazon.com/images/I/example.jpg"
-            },
-            {
-              asin: "NOTVALID",
-              title: "Broken ASIN row must be dropped",
-              price: { value: 1, currency: "$" },
-              stars: 5,
-              reviewsCount: 1
-            },
-            {
-              // valid ASIN shape but dog-only title → filtered
-              asin: "B0DOGONLY1",
-              title: "Premium Dog Water Bowl Dispenser",
-              price: { value: 19.99, currency: "$" },
-              stars: 4,
-              reviewsCount: 50
-            },
-            {
-              asin: "b0dzwwpgdn",
-              title: "Veken Cat Fountain Detachable Tank",
-              price: { value: 18.99, currency: "$" },
-              stars: 4.2,
-              reviewsCount: 1523,
-              imageUrl: "https://m.media-amazon.com/images/I/example2.jpg"
-            }
-          ]),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      return new Response(`unexpected url ${url}`, { status: 500 });
-    }) as unknown as typeof fetch;
+    ) as unknown as typeof fetch;
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock;
 
     const products = await fetchViaApify(

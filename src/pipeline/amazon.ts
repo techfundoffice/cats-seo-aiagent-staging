@@ -863,9 +863,7 @@ export async function fetchViaApify(
           break;
         }
         if (status === "FAILED" || status === "ABORTED") {
-          onWarn?.(
-            `Apify actor ${runId} ${status} — no products`
-          );
+          onWarn?.(`Apify actor ${runId} ${status} — no products`);
           return [];
         }
       }
@@ -887,9 +885,7 @@ export async function fetchViaApify(
       { signal: AbortSignal.timeout(APIFY_CALL_TIMEOUT_MS) }
     );
     if (!dataResp.ok) {
-      onWarn?.(
-        `Apify dataset fetch ${dataResp.status} ${dataResp.statusText}`
-      );
+      onWarn?.(`Apify dataset fetch ${dataResp.status} ${dataResp.statusText}`);
       return [];
     }
     const dataset = (await dataResp.json()) as Record<string, unknown>[];
@@ -937,8 +933,7 @@ export async function fetchViaApify(
         }
         if (!priceStr.match(/\$\d/)) priceStr = "";
       }
-      const ratingNum =
-        parseFloat(String(p.stars ?? p.rating ?? "0")) || 0;
+      const ratingNum = parseFloat(String(p.stars ?? p.rating ?? "0")) || 0;
       const rawReviewCount = String(
         p.reviewsCount ?? p.reviewCount ?? p.reviews ?? "0"
       );

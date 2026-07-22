@@ -1469,7 +1469,6 @@ const CHROME_SCRIPT = `function openCluDrawer() {
         });
       })();`;
 
-
 /** Map dead catsluvus.com menu paths (404) to nearest live 200 pages. */
 const CATSLUVUS_HREF_FIXES: Record<string, string> = {
   "https://catsluvus.com/sign-in/": "https://catsluvus.com/login/",
@@ -1478,25 +1477,32 @@ const CATSLUVUS_HREF_FIXES: Record<string, string> = {
   "https://catsluvus.com/faq": "https://catsluvus.com/contact-us-map/",
   "https://catsluvus.com/in-the-news/": "https://catsluvus.com/blog/",
   "https://catsluvus.com/in-the-news": "https://catsluvus.com/blog/",
-  "https://catsluvus.com/community-partners/": "https://catsluvus.com/about-us/",
+  "https://catsluvus.com/community-partners/":
+    "https://catsluvus.com/about-us/",
   "https://catsluvus.com/community-partners": "https://catsluvus.com/about-us/",
-  "https://catsluvus.com/services-rates/": "https://catsluvus.com/cat-boarding/",
+  "https://catsluvus.com/services-rates/":
+    "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/services-rates": "https://catsluvus.com/cat-boarding/",
-  "https://catsluvus.com/services-and-rates/": "https://catsluvus.com/cat-boarding/",
+  "https://catsluvus.com/services-and-rates/":
+    "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/suites-rates/": "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/suites-rates": "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/amenities/": "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/amenities": "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/entertainment/": "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/entertainment": "https://catsluvus.com/cat-boarding/",
-  "https://catsluvus.com/webcam-security/": "https://catsluvus.com/cat-boarding/",
-  "https://catsluvus.com/webcam-security": "https://catsluvus.com/cat-boarding/",
+  "https://catsluvus.com/webcam-security/":
+    "https://catsluvus.com/cat-boarding/",
+  "https://catsluvus.com/webcam-security":
+    "https://catsluvus.com/cat-boarding/",
   "https://catsluvus.com/hours/": "https://catsluvus.com/contact-us-map/",
   "https://catsluvus.com/hours": "https://catsluvus.com/contact-us-map/",
-  "https://catsluvus.com/holiday-schedule/": "https://catsluvus.com/contact-us-map/",
-  "https://catsluvus.com/holiday-schedule": "https://catsluvus.com/contact-us-map/",
+  "https://catsluvus.com/holiday-schedule/":
+    "https://catsluvus.com/contact-us-map/",
+  "https://catsluvus.com/holiday-schedule":
+    "https://catsluvus.com/contact-us-map/",
   "https://catsluvus.com/join-our-team/": "https://catsluvus.com/about-us/",
-  "https://catsluvus.com/join-our-team": "https://catsluvus.com/about-us/",
+  "https://catsluvus.com/join-our-team": "https://catsluvus.com/about-us/"
 };
 
 function rewriteDeadCatsluvusHrefs(html: string): string {
@@ -1511,7 +1517,10 @@ function rewriteDeadCatsluvusHrefs(html: string): string {
 
 function isProductionDomain(domain: string | undefined): boolean {
   if (!domain) return false;
-  const d = domain.trim().toLowerCase().replace(/^www\./, "");
+  const d = domain
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
   return d === "catsluvus.com" || d.endsWith(".catsluvus.com");
 }
 

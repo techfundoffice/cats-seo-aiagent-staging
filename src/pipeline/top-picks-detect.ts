@@ -18,7 +18,9 @@ const AMAZON_DP = /amazon\.com\/dp\/[A-Z0-9]{10}/i;
  * True only when HTML has a real Top Picks section with ≥1 Amazon ASIN link
  * and is not the intentional empty-picks honesty copy.
  */
-export function articleHasRealTopPicks(html: string | null | undefined): boolean {
+export function articleHasRealTopPicks(
+  html: string | null | undefined
+): boolean {
   if (!html || html.length < 20) return false;
   if (HONESTY_EMPTY.test(html)) return false;
   if (!TOP_PICKS_MARKER.test(html)) return false;
@@ -29,7 +31,5 @@ export function articleHasRealTopPicks(html: string | null | undefined): boolean
 export function extractProductAsins(html: string | null | undefined): string[] {
   if (!html) return [];
   const matches = html.match(/\/dp\/([A-Z0-9]{10})/gi) ?? [];
-  return [
-    ...new Set(matches.map((m) => m.slice(4).toUpperCase()))
-  ];
+  return [...new Set(matches.map((m) => m.slice(4).toUpperCase()))];
 }

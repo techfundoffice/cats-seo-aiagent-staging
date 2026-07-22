@@ -8,12 +8,12 @@ deploy configuration and the resources it binds to differ.
 
 ## What changed vs the production repo
 
-| File | Change |
-|------|--------|
-| `wrangler.jsonc` | Now the **staging** config (was `wrangler.staging.jsonc`). Worker name `cats-seo-aiagent-staging`, staging KV/D1/R2/queue IDs, `DOMAIN=cats-seo-aiagent-staging.webmaster-bc8.workers.dev`, cron **off**, no `PETINSURANCE` service binding. |
-| `wrangler.staging.jsonc` | **Removed** — redundant now that the staging config is canonical. |
-| `vite.staging.config.ts` | **Removed** — the default `vite.config.ts` builds against `wrangler.jsonc`, which is now staging. |
-| `package.json` | `name` → `cats-seo-aiagent-staging`. |
+| File                     | Change                                                                                                                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wrangler.jsonc`         | Now the **staging** config (was `wrangler.staging.jsonc`). Worker name `cats-seo-aiagent-staging`, staging KV/D1/R2/queue IDs, `DOMAIN=cats-seo-aiagent-staging.webmaster-bc8.workers.dev`, cron **off**, no `PETINSURANCE` service binding. |
+| `wrangler.staging.jsonc` | **Removed** — redundant now that the staging config is canonical.                                                                                                                                                                            |
+| `vite.staging.config.ts` | **Removed** — the default `vite.config.ts` builds against `wrangler.jsonc`, which is now staging.                                                                                                                                            |
+| `package.json`           | `name` → `cats-seo-aiagent-staging`.                                                                                                                                                                                                         |
 
 Everything else (the 24-step pipeline in `src/pipeline/`, the React dashboard,
 the skills subsystem, CI workflows) is unchanged.
@@ -57,6 +57,5 @@ npx wrangler deploy    # deploys cats-seo-aiagent-staging (default wrangler.json
 ```
 
 Or push to `main` and let `.github/workflows/deploy.yml` run it.
-
 
 <!-- ci-trigger: verify push->Actions deploy wiring -->
