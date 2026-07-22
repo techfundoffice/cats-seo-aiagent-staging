@@ -304,6 +304,26 @@ const ACTIVITY_LOG_STATE_MAX_ENTRIES = 200;
 const ACTIVITY_LOG_ERRORS_MAX_ENTRIES = 200;
 
 /**
+ * Age-based expiry for the errors-only buffer. FIFO eviction alone lets
+ * long-solved errors linger for weeks when the error rate drops to zero
+ * (the healthier the system, the staler the panel). Entries older than
+ * this are pruned on every log() append; entries with unparseable
+ * timestamps are kept (never silently drop evidence on a parse bug).
+ */
+const ACTIVITY_LOG_ERRORS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isActivityLogEntryFresh(
+  entry: { timeDate?: string; timeTime?: string },
+  nowMs: number
+): boolean {
+  const parsed = Date.parse(
+    `${entry.timeDate ?? ""} ${entry.timeTime ?? ""}`.trim()
+  );
+  if (!Number.isFinite(parsed)) return true;
+  return nowMs - parsed <= ACTIVITY_LOG_ERRORS_MAX_AGE_MS;
+}
+
+/**
  * Cap on the separate observer-only buffer (`state.observerLog`). Observer
  * fires once per 15 min and emits 1-2 entries per tick (info + optional
  * warning), so 40 ≈ 10 hours of history retained — survives eviction
@@ -3694,6 +3714,24 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     // observability data only (no admin actions, no secrets). Browser
     // cookies are sent automatically; the panel does NOT carry
     // ADMIN_API_TOKEN — fixes the 401-on-load issue from #5480 review.
+    // Clear the errors-only ring buffer. Cookie-authed like the other
+    // dashboard routes — the panel's "Clear" button calls this and the
+    // state broadcast refreshes every connected client automatically.
+    if (
+      url.pathname === "/api/dashboard/clear-errors" &&
+      request.method === "POST"
+    ) {
+      const prevCount = Array.isArray(this.state.activityLogErrors)
+        ? this.state.activityLogErrors.length
+        : 0;
+      this.setState({ ...this.state, activityLogErrors: [] });
+      this.log(
+        "info",
+        `Errors panel cleared from dashboard (${prevCount} entries dropped)`
+      );
+      return Response.json({ ok: true, cleared: prevCount });
+    }
+
     if (
       url.pathname === "/api/dashboard/openai-activity" &&
       request.method === "GET"
@@ -6201,9 +6239,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     // Errors get a separate, longer-retained buffer so real failures don't
     // get evicted from the rolling main log when info/warning traffic
     // spikes. Capped at ACTIVITY_LOG_ERRORS_MAX_ENTRIES — eviction by FIFO.
-    const prevErrors = Array.isArray(this.state.activityLogErrors)
-      ? this.state.activityLogErrors
-      : [];
+    const prevErrors = (
+      Array.isArray(this.state.activityLogErrors)
+        ? this.state.activityLogErrors
+        : []
+    ).filter((e) => isActivityLogEntryFresh(e, Date.now()));
     const errorBuf = isActivityLogErrorLevel(level)
       ? appendToRingBuffer(
           prevErrors,

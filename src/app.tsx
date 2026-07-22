@@ -3019,6 +3019,25 @@ function LegacyScoutPanel({ state }: { state: SEOAgentState }) {
   );
 }
 
+// Entry age from the log timestamps ("07/22/2026" + "12:01:00"); null when
+// unparseable so callers can skip age treatment rather than mislabel.
+function activityEntryAgeMs(entry: {
+  timeDate?: string;
+  timeTime?: string;
+}): number | null {
+  const parsed = Date.parse(
+    `${entry.timeDate ?? ""} ${entry.timeTime ?? ""}`.trim()
+  );
+  return Number.isFinite(parsed) ? Math.max(0, Date.now() - parsed) : null;
+}
+
+function formatActivityAge(ms: number): string {
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
 // Filtered slice of the activity log for one severity level. Reuses
 // <ActivityLogRow> so per-row copy buttons + memoization come for free, and
 // guarantees zero drift from the main Activity Log's row format. One
@@ -3043,6 +3062,9 @@ function LevelLogPanel({
   // real failures stay visible after info/warning chatter pushes their
   // originals out of `activityLog`. Warnings panel reads the live main log
   // as before (warnings are noisy and don't need long-term retention).
+  // Entries older than 24h render dimmed (server also expires errors after
+  // 7 days), and the errors panel has a Clear button so a fixed incident
+  // doesn't haunt the dashboard until 200 newer errors evict it.
   const source =
     level === "error"
       ? sanitizeActivityLogEntries(state.activityLogErrors)
@@ -3106,43 +3128,76 @@ function LevelLogPanel({
             {entries.length}
           </span>
         </h2>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.preventDefault();
-            const clipboard = navigator.clipboard;
-            if (!clipboard?.writeText) {
-              console.warn(
-                `Activity panel copy unavailable for ${level} (${entries.length} entries): Clipboard API missing`
-              );
-              return;
-            }
-            const text = entries.map(formatActivityEntry).join("\n");
-            clipboard.writeText(text).catch((err) => {
-              const errorMessage = errMsg(err);
-              console.warn(
-                `Activity panel copy failed for ${level} (${entries.length} entries): ${errorMessage}`,
-                { level, entryCount: entries.length, error: err }
-              );
-            });
-          }}
-          disabled={entries.length === 0}
-          title={`Copy all ${level} entries`}
-          aria-label={`Copy all ${level} entries`}
-          style={{
-            padding: "0.25rem 0.625rem",
-            background: "#f3f4f6",
-            color: "#374151",
-            borderRadius: "0.375rem",
-            fontWeight: 500,
-            fontSize: "0.75rem",
-            border: "1px solid #e5e7eb",
-            cursor: entries.length === 0 ? "not-allowed" : "pointer",
-            opacity: entries.length === 0 ? 0.5 : 1
-          }}
-        >
-          📋 Copy all
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          {level === "error" && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                fetch("/api/dashboard/clear-errors", { method: "POST" }).catch(
+                  (err) => {
+                    console.warn(
+                      `Errors panel clear failed (${entries.length} entries): ${errMsg(err)}`
+                    );
+                  }
+                );
+              }}
+              disabled={entries.length === 0}
+              title="Clear all error entries (state refreshes via live sync)"
+              aria-label="Clear all error entries"
+              style={{
+                padding: "0.25rem 0.625rem",
+                background: "#fef2f2",
+                color: "#b91c1c",
+                borderRadius: "0.375rem",
+                fontWeight: 500,
+                fontSize: "0.75rem",
+                border: "1px solid #fecaca",
+                cursor: entries.length === 0 ? "not-allowed" : "pointer",
+                opacity: entries.length === 0 ? 0.5 : 1
+              }}
+            >
+              🧹 Clear
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              const clipboard = navigator.clipboard;
+              if (!clipboard?.writeText) {
+                console.warn(
+                  `Activity panel copy unavailable for ${level} (${entries.length} entries): Clipboard API missing`
+                );
+                return;
+              }
+              const text = entries.map(formatActivityEntry).join("\n");
+              clipboard.writeText(text).catch((err) => {
+                const errorMessage = errMsg(err);
+                console.warn(
+                  `Activity panel copy failed for ${level} (${entries.length} entries): ${errorMessage}`,
+                  { level, entryCount: entries.length, error: err }
+                );
+              });
+            }}
+            disabled={entries.length === 0}
+            title={`Copy all ${level} entries`}
+            aria-label={`Copy all ${level} entries`}
+            style={{
+              padding: "0.25rem 0.625rem",
+              background: "#f3f4f6",
+              color: "#374151",
+              borderRadius: "0.375rem",
+              fontWeight: 500,
+              fontSize: "0.75rem",
+              border: "1px solid #e5e7eb",
+              cursor: entries.length === 0 ? "not-allowed" : "pointer",
+              opacity: entries.length === 0 ? 0.5 : 1
+            }}
+          >
+            📋 Copy all
+          </button>
+        </div>
       </summary>
       <div
         role="log"
@@ -3168,9 +3223,21 @@ function LevelLogPanel({
             {emptyMessage}
           </p>
         ) : (
-          entries.map((entry) => (
-            <ActivityLogRow key={entry.logRef} entry={entry} />
-          ))
+          entries.map((entry) => {
+            const ageMs = activityEntryAgeMs(entry);
+            const stale = ageMs !== null && ageMs > 24 * 3_600_000;
+            return (
+              <div
+                key={entry.logRef}
+                title={
+                  ageMs !== null ? `${formatActivityAge(ageMs)} ago` : undefined
+                }
+                style={stale ? { opacity: 0.55 } : undefined}
+              >
+                <ActivityLogRow entry={entry} />
+              </div>
+            );
+          })
         )}
       </div>
     </details>
