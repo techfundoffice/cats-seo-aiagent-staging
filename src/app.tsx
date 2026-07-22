@@ -3129,37 +3129,38 @@ function LevelLogPanel({
           </span>
         </h2>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          {level === "error" && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                fetch("/api/dashboard/clear-errors", { method: "POST" }).catch(
-                  (err) => {
-                    console.warn(
-                      `Errors panel clear failed (${entries.length} entries): ${errMsg(err)}`
-                    );
-                  }
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              const endpoint =
+                level === "error"
+                  ? "/api/dashboard/clear-errors"
+                  : "/api/dashboard/clear-warnings";
+              fetch(endpoint, { method: "POST" }).catch((err) => {
+                console.warn(
+                  `${level} panel clear failed (${entries.length} entries): ${errMsg(err)}`
                 );
-              }}
-              disabled={entries.length === 0}
-              title="Clear all error entries (state refreshes via live sync)"
-              aria-label="Clear all error entries"
-              style={{
-                padding: "0.25rem 0.625rem",
-                background: "#fef2f2",
-                color: "#b91c1c",
-                borderRadius: "0.375rem",
-                fontWeight: 500,
-                fontSize: "0.75rem",
-                border: "1px solid #fecaca",
-                cursor: entries.length === 0 ? "not-allowed" : "pointer",
-                opacity: entries.length === 0 ? 0.5 : 1
-              }}
-            >
-              🧹 Clear
-            </button>
-          )}
+              });
+            }}
+            disabled={entries.length === 0}
+            title={`Clear all ${level} entries (state refreshes via live sync)`}
+            aria-label={`Clear all ${level} entries`}
+            style={{
+              padding: "0.25rem 0.625rem",
+              background: level === "error" ? "#fef2f2" : "#fffbeb",
+              color: level === "error" ? "#b91c1c" : "#b45309",
+              borderRadius: "0.375rem",
+              fontWeight: 500,
+              fontSize: "0.75rem",
+              border:
+                level === "error" ? "1px solid #fecaca" : "1px solid #fde68a",
+              cursor: entries.length === 0 ? "not-allowed" : "pointer",
+              opacity: entries.length === 0 ? 0.5 : 1
+            }}
+          >
+            🧹 Clear
+          </button>
           <button
             type="button"
             onClick={(e) => {

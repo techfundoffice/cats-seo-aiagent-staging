@@ -111,6 +111,7 @@ import { probeUrlHttpStatus } from "./articleUrlHttpStatus";
 import { emitAgentDebugLog, normalizeDebugSessionId } from "./agentDebugEmit";
 import {
   isActivityLogErrorLevel,
+  isActivityLogWarningLevel,
   normalizeActivityLogLevel
 } from "./activityLogLevels";
 import {
@@ -3646,6 +3647,42 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         `Errors panel cleared from dashboard (${prevCount} entries dropped)`
       );
       return Response.json({ ok: true, cleared: prevCount });
+    }
+
+    // Clear warning-level entries. Warnings have no dedicated ring — they
+    // live in the rolling main activity log (and sometimes the observer
+    // ring), so clearing filters those buffers in place. Info/error rows
+    // are untouched.
+    if (
+      url.pathname === "/api/dashboard/clear-warnings" &&
+      request.method === "POST"
+    ) {
+      const isWarning = (e: unknown): boolean =>
+        !!e &&
+        typeof e === "object" &&
+        isActivityLogWarningLevel((e as { level?: string }).level ?? "");
+      const prevLog = Array.isArray(this.state.activityLog)
+        ? this.state.activityLog
+        : [];
+      const prevObserver = Array.isArray(this.state.observerLog)
+        ? this.state.observerLog
+        : [];
+      const nextLog = prevLog.filter((e) => !isWarning(e));
+      const nextObserver = prevObserver.filter((e) => !isWarning(e));
+      const cleared =
+        prevLog.length -
+        nextLog.length +
+        (prevObserver.length - nextObserver.length);
+      this.setState({
+        ...this.state,
+        activityLog: nextLog,
+        observerLog: nextObserver
+      });
+      this.log(
+        "info",
+        `Warnings panel cleared from dashboard (${cleared} entries dropped)`
+      );
+      return Response.json({ ok: true, cleared });
     }
 
     if (
