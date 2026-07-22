@@ -16,6 +16,11 @@ SKIP = {
     "DOMAIN",
     "CLOUDFLARE_ZONE_ID",
     "CLOUDFLARE_ACCOUNT_ID",
+    # Staging: keep the coding-agent escalation loop dormant. Without this
+    # worker secret, escalateToCodingAgent() logs "skipping issue" and no-ops,
+    # so staging never opens claude-fix GitHub issues or assigns Copilot.
+    # (Also disables article-HTML GitHub backup + authenticated skill fetches.)
+    "GITHUB_TOKEN_SECRET",
 }
 
 secrets = json.load(sys.stdin)
