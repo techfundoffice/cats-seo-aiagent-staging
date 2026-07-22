@@ -30,7 +30,16 @@ import { aiGenerateWithPoll, type AiPollOptions } from "./ai-poll";
 import type { SEOArticleAgent } from "../server";
 
 const WORKERS_AI_KIMI_MODEL = "@cf/moonshotai/kimi-k2.5";
-const OPENROUTER_KIMI_MODEL = "moonshotai/kimi-k2.5";
+/**
+ * Default OpenRouter model for the writer. `:nitro` routes to the
+ * highest-throughput provider (benchmarked ~15% faster output than the
+ * default routing, same model/pricing class). Override per-deploy with
+ * the OPENROUTER_KIMI_MODEL env/secret (e.g. to trial a new model).
+ */
+const OPENROUTER_KIMI_MODEL_DEFAULT = "moonshotai/kimi-k2.5:nitro";
+function openRouterKimiModelId(env: Env): string {
+  return env.OPENROUTER_KIMI_MODEL?.trim() || OPENROUTER_KIMI_MODEL_DEFAULT;
+}
 const OPENROUTER_FREE_MODEL = "openrouter/free";
 const OPENROUTER_REASONING_DISABLED = { reasoning: { enabled: false } };
 
@@ -151,7 +160,7 @@ function isOpenRouterAuthError(err: unknown): boolean {
 export function getKimiModel(env: Env): LanguageModel {
   const key = resolveOpenRouterKey(env);
   if (key) {
-    return createOpenRouter({ apiKey: key })(OPENROUTER_KIMI_MODEL);
+    return createOpenRouter({ apiKey: key })(openRouterKimiModelId(env));
   }
   return makeWorkersAiKimiModel(env);
 }
@@ -270,7 +279,7 @@ export async function runKimiWithPoll(
   ): Promise<{ text: string; finishReason: string } | null> => {
     const openrouter = createOpenRouter({ apiKey });
     const { text, finishReason } = await generateText({
-      model: openrouter(OPENROUTER_KIMI_MODEL),
+      model: openrouter(openRouterKimiModelId(env)),
       // AI SDK expects typed message roles; cast from our narrowed shape.
       messages: msgs as ModelMessage[],
       maxOutputTokens: params.max_tokens ?? 4096,

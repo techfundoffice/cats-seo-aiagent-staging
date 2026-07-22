@@ -179,6 +179,8 @@ declare namespace Cloudflare {
 		 * `wrangler secret put OPENROUTER_API_KEY`.
 		 */
 		OPENROUTER_API_KEY?: string;
+		/** Optional override of the OpenRouter writer model ID (defaults to kimi-k2.5:nitro). */
+		OPENROUTER_KIMI_MODEL?: string;
 		/**
 		 * Bearer token for the `/api/admin/*` debug/control surface.
 		 * Consumed by `.github/workflows/claude.yml` so Claude Code in CI
