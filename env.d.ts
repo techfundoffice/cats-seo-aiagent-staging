@@ -9,6 +9,12 @@ declare namespace Cloudflare {
 		ARTICLES_KV: KVNamespace;
 		IMAGES_R2: R2Bucket;
 		SKILLS_DB: D1Database;
+		/**
+		 * Scout database + article ledger. Keywords are imported here (the
+		 * scout never invents them) and article outcomes + DataForSEO
+		 * metrics are written back. See migrations-keywords/.
+		 */
+		KEYWORDS_DB: D1Database;
 		SKILL_FETCH_QUEUE: Queue;
 		AI: Ai;
 		ASSETS: Fetcher;

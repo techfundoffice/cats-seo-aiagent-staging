@@ -2664,6 +2664,39 @@ async function generateArticleUnsafe(
       );
     }
 
+    // Article ledger (KEYWORDS_DB D1): one queryable row per published
+    // article — keyword, URL, score, size, product count, competitor.
+    // Best-effort: a D1 hiccup must never fail the publish.
+    try {
+      const ledgerDb = agent.envBindings.KEYWORDS_DB;
+      if (ledgerDb) {
+        await ledgerDb
+          .prepare(
+            `INSERT OR REPLACE INTO article_ledger
+               (kv_key, slug, keyword, category_slug, url, seo_score,
+                word_count, product_count, competitor_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+          )
+          .bind(
+            kvKey,
+            slug,
+            keyword,
+            categorySlug,
+            url,
+            seoResult.score,
+            computedWordCount,
+            products.length,
+            competitorData?.url ?? ""
+          )
+          .run();
+      }
+    } catch (ledgerErr: unknown) {
+      agent.log(
+        "warning",
+        `Article ledger (D1) write failed for ${kvKey}: ${errMsg(ledgerErr)}`
+      );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Step 14/24: Live URL verification (must pass before “Published”)
     // IndexNow is NOT fired here — it fires once at the end via finalizeArticle()

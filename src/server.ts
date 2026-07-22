@@ -3905,6 +3905,136 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // POST /api/admin/keywords/import — batch-import scout keywords into
+      // the KEYWORDS_DB D1 queue. Body: { keywords: [{ keyword,
+      // categorySlug, categoryTitle?, volume?, cpc?, difficulty?,
+      // priority?, source? }] }. Slug-deduped (INSERT OR IGNORE); the
+      // scout consumes rows in priority/volume order.
+      if (
+        url.pathname === "/api/admin/keywords/import" &&
+        request.method === "POST"
+      ) {
+        const db = this.env.KEYWORDS_DB;
+        if (!db) {
+          return Response.json(
+            { ok: false, error: "KEYWORDS_DB binding missing" },
+            { status: 500 }
+          );
+        }
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json(
+            { ok: false, error: "invalid JSON body" },
+            { status: 400 }
+          );
+        }
+        const rows = Array.isArray((body as { keywords?: unknown }).keywords)
+          ? ((body as { keywords: unknown[] }).keywords as Array<
+              Record<string, unknown>
+            >)
+          : null;
+        if (!rows || rows.length === 0 || rows.length > 500) {
+          return Response.json(
+            { ok: false, error: "keywords must be an array of 1-500 rows" },
+            { status: 400 }
+          );
+        }
+        const stmt = db.prepare(
+          `INSERT OR IGNORE INTO scout_keywords
+             (keyword, slug, category_slug, category_title, volume, cpc,
+              difficulty, source, priority)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+        );
+        const batch: D1PreparedStatement[] = [];
+        let skippedInvalid = 0;
+        for (const r of rows) {
+          const kw = typeof r.keyword === "string" ? r.keyword.trim() : "";
+          const cat =
+            typeof r.categorySlug === "string" ? r.categorySlug.trim() : "";
+          if (!kw || !cat) {
+            skippedInvalid++;
+            continue;
+          }
+          batch.push(
+            stmt.bind(
+              kw,
+              keywordToSlug(kw),
+              cat,
+              typeof r.categoryTitle === "string" ? r.categoryTitle : "",
+              typeof r.volume === "number" ? r.volume : null,
+              typeof r.cpc === "number" ? r.cpc : null,
+              typeof r.difficulty === "number" ? r.difficulty : null,
+              typeof r.source === "string" && r.source ? r.source : "import",
+              typeof r.priority === "number" ? r.priority : 0
+            )
+          );
+        }
+        if (batch.length === 0) {
+          return Response.json(
+            { ok: false, error: "no valid rows", skippedInvalid },
+            { status: 400 }
+          );
+        }
+        const results = await db.batch(batch);
+        const inserted = results.reduce(
+          (n, res) => n + (res.meta?.changes ?? 0),
+          0
+        );
+        const duplicates = batch.length - inserted;
+        this.log(
+          "info",
+          `Scout DB import: ${inserted} keyword(s) added, ${duplicates} duplicate(s), ${skippedInvalid} invalid`,
+          "dataSpecialist"
+        );
+        return Response.json({
+          ok: true,
+          inserted,
+          duplicates,
+          skippedInvalid
+        });
+      }
+
+      // GET /api/admin/keywords — queue visibility: counts by status +
+      // recent rows (optionally filtered by ?status=).
+      if (url.pathname === "/api/admin/keywords" && request.method === "GET") {
+        const db = this.env.KEYWORDS_DB;
+        if (!db) {
+          return Response.json(
+            { ok: false, error: "KEYWORDS_DB binding missing" },
+            { status: 500 }
+          );
+        }
+        const limit = parseAdminLimit(url.searchParams.get("limit"), 50, 500);
+        const status = (url.searchParams.get("status") ?? "").trim();
+        const counts = await db
+          .prepare(
+            `SELECT status, COUNT(*) AS n FROM scout_keywords GROUP BY status`
+          )
+          .all();
+        const rowsRes = status
+          ? await db
+              .prepare(
+                `SELECT * FROM scout_keywords WHERE status = ?1
+                 ORDER BY priority DESC, volume DESC LIMIT ?2`
+              )
+              .bind(status, limit)
+              .all()
+          : await db
+              .prepare(
+                `SELECT * FROM scout_keywords
+                 ORDER BY created_at DESC LIMIT ?1`
+              )
+              .bind(limit)
+              .all();
+        return Response.json({
+          ok: true,
+          counts: counts.results,
+          rows: rowsRes.results
+        });
+      }
+
       // POST /api/admin/qc-gate — run the post-publish QC gate against
       // an arbitrary URL. Body: { url: string }. Returns the full
       // structured report (durationMs, jsonLd.{valid, blockCount,

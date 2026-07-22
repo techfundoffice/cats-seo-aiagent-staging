@@ -29,6 +29,15 @@
       "binding": "SKILLS_DB",
       "database_name": "cats-seo-skills-staging",
       "database_id": "07709ff7-c593-471a-9271-4a26c01a58bc"
+    },
+    {
+      // Scout database + article ledger. The scout consumes keywords from
+      // here (it never invents them), and publish/analytics write article
+      // outcomes + DataForSEO metrics back — one queryable lifecycle DB.
+      "binding": "KEYWORDS_DB",
+      "database_name": "cats-seo-keywords-staging",
+      "database_id": "eb4adaaa-785d-49fc-a9c2-de4aeb3b2676",
+      "migrations_dir": "migrations-keywords"
     }
   ],
   "queues": {

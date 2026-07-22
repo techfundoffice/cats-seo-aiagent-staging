@@ -273,6 +273,39 @@ export async function runAnalyticsTick(
         `;
         rowsInserted++;
       }
+      // Mirror the same rows into the queryable KEYWORDS_DB D1 ledger.
+      // Best-effort: a D1 hiccup must never fail the analytics tick.
+      try {
+        const db = agent.envBindings.KEYWORDS_DB;
+        if (db) {
+          const stmt = db.prepare(
+            `INSERT OR REPLACE INTO article_rankings
+               (kv_key, keyword, date, position, search_volume,
+                est_traffic, cpc, serp_features, country)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'US')`
+          );
+          await db.batch(
+            result.rows.map((row) =>
+              stmt.bind(
+                kvKey,
+                row.keyword,
+                today,
+                row.position,
+                row.searchVolume,
+                row.estTraffic,
+                row.cpc,
+                row.serpFeatures.join(",")
+              )
+            )
+          );
+        }
+      } catch (d1Err: unknown) {
+        agent.log(
+          "warning",
+          `Analytics tick: D1 rankings mirror failed for ${kvKey}: ${errMsg(d1Err)}`,
+          "rankTracker"
+        );
+      }
       const top = result.rows[0];
       agent.log(
         "info",
