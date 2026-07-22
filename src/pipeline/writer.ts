@@ -77,6 +77,11 @@ import {
 } from "./fabricated-testing-claims";
 import { neutralizeTestingHeadings } from "./testing-vocab-swap";
 import {
+  analyzeContentQuality,
+  summarizeContentQuality,
+  type ProcessLanguageFinding
+} from "./content-quality";
+import {
   detectUnsourcedClaims,
   summarizeUnsourcedClaims,
   type UnsourcedClaimFinding
@@ -2592,6 +2597,60 @@ async function generateArticleUnsafe(
       );
     }
 
+    // Step 14.8: readability metrics + process-language detection (ported
+    // from every-app/sam's publish-readiness analyzers, MIT). Flags prose
+    // that exposes the writing process instead of serving the reader —
+    // self-referential "this guide", "at the time of writing", "we chose/
+    // excluded", methodology or exclusion talk outside the wc-methodology
+    // template box, and process-note headings like "How We Chose".
+    // Non-blocking: readability metrics are logged for trend observability,
+    // and process-language findings record a defect-loop finding + feed the
+    // Polish Agent (Step 18) which rewrites each flagged sentence around the
+    // reader's problem and payoff. Detector throws never block publish.
+    let processLanguageFindings: ProcessLanguageFinding[] = [];
+    try {
+      const contentQuality = analyzeContentQuality(html);
+      agent.log(
+        "info",
+        `Step 14.8: content quality — ${summarizeContentQuality(contentQuality)}`
+      );
+      if (contentQuality.issues.length > 0) {
+        processLanguageFindings = contentQuality.findings;
+        agent.log(
+          "warning",
+          `Step 14.8: process-language issues — ${contentQuality.issues.join(" | ")} — defect-loop finding recorded; Polish Agent will rewrite. Sample: "${(processLanguageFindings[0]?.snippet ?? "").slice(0, 160)}"`,
+          "qaReviewer"
+        );
+        await recordFinding(agent, {
+          defectClass: "prepub-process-language",
+          kvKey,
+          timestamp: new Date().toISOString(),
+          evidence: {
+            occurrenceCount: processLanguageFindings.length,
+            sampleSnippet: processLanguageFindings
+              .slice(0, 3)
+              .map((f) => `[${f.category}] ${f.snippet}`)
+              .join(" | ")
+              .slice(0, 240),
+            keyword,
+            issues: contentQuality.issues.join(" | ").slice(0, 240),
+            introWords: contentQuality.introWords,
+            averageSentenceLength:
+              contentQuality.readability.averageSentenceLength,
+            longSentences: contentQuality.readability.longSentences,
+            complexWordRate: contentQuality.readability.complexWordRate
+          },
+          suspectedCodePath:
+            "src/pipeline/writer.ts:buildArticle (intro/section/heading prompts emitting process or methodology language)"
+        });
+      }
+    } catch (cqErr: unknown) {
+      agent.log(
+        "info",
+        `Step 14.8: content-quality analyzer threw (${errMsg(cqErr)}); proceeding with publish`
+      );
+    }
+
     // Hard structural guard, unconditional — mirrors the same invariant
     // enforced on Editorial Agent rewrites (editorial-agent.ts). "Exactly
     // one H1" is a document-shape invariant, not a scorable-and-offsettable
@@ -3232,10 +3291,11 @@ async function generateArticleUnsafe(
       failedChecks.length > 0 ||
       designContentIssueCount > 0 ||
       unsourcedClaimFindings.length > 0 ||
-      fabricatedTestingFindings.length > 0
+      fabricatedTestingFindings.length > 0 ||
+      processLanguageFindings.length > 0
     ) {
       agent.updateStep(
-        `18/24: Polish (${failedChecks.length} checks, ${designContentIssueCount} design, ${unsourcedClaimFindings.length} claims, ${fabricatedTestingFindings.length} testing)`
+        `18/24: Polish (${failedChecks.length} checks, ${designContentIssueCount} design, ${unsourcedClaimFindings.length} claims, ${fabricatedTestingFindings.length} testing, ${processLanguageFindings.length} process)`
       );
       try {
         const polishResult = await runPolishAgent(
@@ -3246,7 +3306,8 @@ async function generateArticleUnsafe(
           designAuditReport,
           seoScorecardQcPromptCells,
           unsourcedClaimFindings,
-          fabricatedTestingFindings
+          fabricatedTestingFindings,
+          processLanguageFindings
         );
         if (polishResult.improved) {
           const polishStrip = stripPricesFromHtml(
@@ -3779,7 +3840,7 @@ YOU MUST RETURN ONLY A JSON OBJECT with this exact schema. No markdown, no backt
   "metaDescription": "string, EXACTLY between 140 and 160 characters (Google SERP truncates ~160; under 140 wastes prime CTR real estate). Count chars — this is a hard requirement. Must be a COMPLETE sentence ending with punctuation, include keyword once and a CTA like 'Shop our top picks.' or 'Find yours today.'",
   "quickAnswer": "string, 40-60 word direct answer for Featured Snippet Position 0, start with the answer not context",
   "keyTakeaways": ["string 15-25 words each", "exactly 5 items"],
-  "introduction": "string, 100-150 words in HTML (<p> tags). ${hasProducts ? "Name the top product first." : "Open with the reader's specific problem and what this guide solves."} Brief context on why these matter.",
+  "introduction": "string, 100-150 words in HTML (<p> tags). ${hasProducts ? "Name the top product first." : "Open with the reader's specific problem and the payoff of solving it — no self-referential framing like 'this guide covers'."} Brief context on why these matter.",
   "sections": [
     {"heading": "string H2 heading", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML (<p> and <ul>/<li> tags). Detailed, actionable."},
     {"heading": "string", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML"},
@@ -3852,6 +3913,7 @@ AI WRITING STYLE:
 - Varied sentence lengths: mix short punchy sentences (5-8 words) with longer flowing ones (20-30 words)
 - Write like a human expert having a conversation, not a bullet-point summary
 - Use transitional phrases between paragraphs
+- READER-FACING PROSE ONLY: write like a finished magazine piece, never like research or process notes. Do NOT write self-referential framing ("this guide", "this article", "in this roundup"), "at the time of writing", writer-process statements ("we chose", "we picked", "we excluded", "what we left out"), or methodology/selection-criteria talk — the site template already renders an honest "How We Picked" box. No headings like "How We Chose" or "Our Methodology". State facts and recommendations directly.
 
 FIELD GUIDANCE:
 - introduction: ${introMinWords}-${introMinWords + 50} words. ${hasProducts ? "Name top product, brief why." : "Lead with the reader's specific decision, not the keyword."}

@@ -140,7 +140,19 @@ export const ALL_DEFECT_CLASSES = [
   // 5 hits in 24h fires the auto-fix loop so the writer prompt gets
   // tightened rather than the live corpus accumulating false authority
   // claims that Google's YMYL / E-E-A-T systems penalise.
-  "live-unsourced-ymyl-claim"
+  "live-unsourced-ymyl-claim",
+  // Pre-publish body text leans on process language — self-referential
+  // framing ("this guide"), "at the time of writing", writer-process
+  // statements ("we chose", "we excluded"), methodology/exclusion talk
+  // outside the wc-methodology template box, or process-note headings
+  // ("How We Chose"). Reads like research notes rather than a finished
+  // article; Google's helpful-content signals penalise it. Detected by
+  // writer.ts Step 14.8 (`analyzeContentQuality` in content-quality.ts,
+  // ported from every-app/sam's publish-readiness analyzer) and fed to
+  // the Polish Agent for rewriting. 5 hits in 24h fire the auto-fix
+  // loop so the writer prompt gets tightened rather than articles being
+  // patched one at a time.
+  "prepub-process-language"
 ] as const;
 
 export type DefectClass = (typeof ALL_DEFECT_CLASSES)[number];

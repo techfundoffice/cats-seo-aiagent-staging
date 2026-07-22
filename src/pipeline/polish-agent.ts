@@ -15,6 +15,7 @@ import { SEO_SCORECARD_CHECK_COUNT } from "./seo-score";
 import type { DesignAuditReport } from "./design-audit";
 import type { UnsourcedClaimFinding } from "./unsourced-claims";
 import type { FabricatedTestingClaimFinding } from "./fabricated-testing-claims";
+import type { ProcessLanguageFinding } from "./content-quality";
 
 export interface PolishResult {
   /** Whether at least one find/replace rewrite was successfully applied. */
@@ -111,7 +112,8 @@ export async function runPolishAgent(
   designAuditReport?: DesignAuditReport,
   qcPromptCells?: readonly (string | null)[] | null,
   unsourcedClaims: readonly UnsourcedClaimFinding[] = [],
-  testingClaims: readonly FabricatedTestingClaimFinding[] = []
+  testingClaims: readonly FabricatedTestingClaimFinding[] = [],
+  processFindings: readonly ProcessLanguageFinding[] = []
 ): Promise<PolishResult> {
   const designContentIssues =
     designAuditReport && !designAuditReport.skipped
@@ -121,7 +123,8 @@ export async function runPolishAgent(
     failedChecks.length === 0 &&
     designContentIssues.length === 0 &&
     unsourcedClaims.length === 0 &&
-    testingClaims.length === 0
+    testingClaims.length === 0 &&
+    processFindings.length === 0
   ) {
     return {
       improved: false,
@@ -214,6 +217,21 @@ export async function runPolishAgent(
     ? `\n\nFABRICATED TESTING CLAIMS — sentences implying Cats Luv Us physically tested/trialled products (FTC false-endorsement risk, see HARD RULE 2). For EACH, generate a rewrite that removes the product-trial claim and re-attributes the basis to public product specs, customer reviews, or general cat-care experience. The "find" text must be copied from the quoted sentence. Use checkId "T1", "T2", … to reference these:\n${testingList}`
     : "";
 
+  // Process-language block (from analyzeContentQuality, writer.ts Step
+  // 14.8). Sentences and headings that expose the writing process instead
+  // of serving the reader. The Polish model rewrites each around the
+  // reader's problem and payoff — no new claims, no prices, no testing
+  // language (HARD RULES still apply to these rewrites).
+  const processList = processFindings
+    .slice(0, 8)
+    .map(
+      (f, idx) => `  P${idx + 1} [${f.category}] "${f.snippet.slice(0, 220)}"`
+    )
+    .join("\n");
+  const processBlock = processList
+    ? `\n\nPROCESS-LANGUAGE PASSAGES — prose that exposes the writing process instead of serving the reader (self-referential "this guide/article", "at the time of writing", "we chose/picked/excluded", methodology or exclusion talk, process-note headings). For EACH, rewrite to state the fact or recommendation directly and drop the process framing — keep the useful information, cut the meta-commentary. A [meta-heading] entry is a heading: replace it with a reader-facing section title that describes the content. The "find" text must be copied from the quoted passage. Use checkId "P1", "P2", … to reference these:\n${processList}`
+    : "";
+
   // Strip HTML to text for context
   const plainText = unescapeHtml(stripHtmlToPlainText(articleHtml)).slice(
     0,
@@ -224,7 +242,7 @@ export async function runPolishAgent(
   const polishUserPrompt = `This article about "${keyword}" scored ${SEO_SCORECARD_CHECK_COUNT - failedChecks.length}/${SEO_SCORECARD_CHECK_COUNT} on our SEO scorecard. Fix the failed checks below by generating HTML rewrites.
 
 FAILED CHECKS:
-${checkList}${designBlock}${claimBlock}${testingBlock}
+${checkList}${designBlock}${claimBlock}${testingBlock}${processBlock}
 
 ARTICLE TEXT (for context):
 ${plainText}
