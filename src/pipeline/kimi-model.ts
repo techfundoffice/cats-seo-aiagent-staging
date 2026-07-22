@@ -42,6 +42,19 @@ function openRouterKimiModelId(env: Env): string {
 }
 const OPENROUTER_FREE_MODEL = "openrouter/free";
 const OPENROUTER_REASONING_DISABLED = { reasoning: { enabled: false } };
+const OPENROUTER_REASONING_LOW = { reasoning: { effort: "low" as const } };
+
+/**
+ * Model-aware reasoning options. Kimi ships a thinking-overflow bug so we
+ * hard-disable reasoning; xAI Grok models REJECT `enabled: false`
+ * (reasoning is mandatory) so they get low effort instead — keeps token
+ * burn minimal while satisfying the endpoint.
+ */
+function openRouterReasoningOptions(env: Env) {
+  return /^x-ai\//i.test(openRouterKimiModelId(env))
+    ? OPENROUTER_REASONING_LOW
+    : OPENROUTER_REASONING_DISABLED;
+}
 
 /**
  * Hard cap on a single OpenRouter `generateText()` call. Without this, a
@@ -220,11 +233,11 @@ export function getScoutModel(env: Env): LanguageModel {
  */
 export function getKimiProviderOptions(env: Env):
   | {
-      openrouter: { reasoning: { enabled: boolean } };
+      openrouter: { reasoning: { enabled: boolean } | { effort: "low" } };
     }
   | undefined {
   if (resolveOpenRouterKey(env)) {
-    return { openrouter: OPENROUTER_REASONING_DISABLED };
+    return { openrouter: openRouterReasoningOptions(env) };
   }
   return undefined;
 }
@@ -283,7 +296,7 @@ export async function runKimiWithPoll(
       // AI SDK expects typed message roles; cast from our narrowed shape.
       messages: msgs as ModelMessage[],
       maxOutputTokens: params.max_tokens ?? 4096,
-      providerOptions: { openrouter: OPENROUTER_REASONING_DISABLED },
+      providerOptions: { openrouter: openRouterReasoningOptions(env) },
       abortSignal: AbortSignal.timeout(OPENROUTER_CALL_TIMEOUT_MS)
     });
     if (text && text.trim().length > 0) {
