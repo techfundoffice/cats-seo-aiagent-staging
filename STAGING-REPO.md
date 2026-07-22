@@ -59,3 +59,12 @@ npx wrangler deploy    # deploys cats-seo-aiagent-staging (default wrangler.json
 Or push to `main` and let `.github/workflows/deploy.yml` run it.
 
 <!-- ci-trigger: verify push->Actions deploy wiring -->
+
+## Browser Rendering (set 2026-07-22)
+
+Worker secret `CLOUDFLARE_API_TOKEN_SECRET` is set (token
+`github_cats-seo-aiagent-staging` with Account → Browser Rendering → Edit).
+Enables: Design Audit (Step 15), post-publish live-leak check, content
+fingerprint gate, editorial screenshot audits, and `/api/admin/render`.
+Note: `/api/admin/render` only accepts `catsluvus.com` URLs (prod-domain
+allowlist inherited from the shared source).
