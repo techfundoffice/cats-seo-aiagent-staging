@@ -369,6 +369,45 @@ export function templateForDefectClass(defectClass: DefectClass): {
             "Removing fabricated testing language must not drop the SEO score by more than 5 points. If the writer-prompt change over-constrains Kimi, article quality suffers even if the defect is gone."
         }
       };
+    case "prepub-process-language":
+      return {
+        checks: [
+          {
+            kind: "regex-must-not-match",
+            id: "no-temporal-process-language",
+            // "at/as of the time of (this) writing" — never legitimate on
+            // this site; prices and availability live behind the affiliate
+            // link, so the temporal hedge only exposes the writing process.
+            pattern: "\\b(?:at|as of) the time of (?:this )?writing\\b",
+            flags: "i"
+          },
+          {
+            kind: "regex-must-not-match",
+            id: "no-process-note-headings",
+            // Writer-generated process-note H2/H3s. Deliberately excludes
+            // "How We Picked" — that heading is legitimate template output
+            // inside the wc-methodology disclosure box (html-builder.ts);
+            // the runtime detector (content-quality.ts) strips that section
+            // before its broader heading check.
+            pattern:
+              "<h[23][^>]*>[^<]*(?:how (?:i|we) chose|our methodology|selection criteria|what (?:i|we) left out|exclusions?)[^<]*</h[23]",
+            flags: "i"
+          },
+          {
+            kind: "seo-score-delta-gte",
+            id: "seo-not-regressed",
+            threshold: -5
+          }
+        ],
+        rationale: {
+          "no-temporal-process-language":
+            "writer.ts Step 14.8 (analyzeContentQuality in content-quality.ts) fires this defect when body prose leans on process language. 'At the time of writing' is the highest-precision single trigger — it never serves the reader on an evergreen affiliate page. A fix (tighter writer prompt) must prevent it in regenerated articles.",
+          "no-process-note-headings":
+            "Headings like 'How We Chose', 'Our Methodology', or 'What We Left Out' are internal process notes, not reader-facing sections. The site already renders an honest 'How We Picked' disclosure box from the template (wc-methodology, excluded from this pattern); writer-generated duplicates read as research notes and dilute the section structure.",
+          "seo-not-regressed":
+            "Removing process language must not drop the SEO score by more than 5 points. If the writer-prompt change over-constrains Kimi, article quality suffers even if the defect is gone."
+        }
+      };
     // Other classes get added here as they get wired in subsequent PRs.
     // Returning a minimal default ensures the function is total.
     default:
