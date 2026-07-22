@@ -5,7 +5,7 @@
  *   1. Read the stored HTML from KV, extract visible body text, Kimi-audit
  *      against an ingested wireframe (abstract pattern types from a
  *      reference URL like NYT Wirecutter — see wireframe-ingest.ts).
- *   2. Drive Composio's `BROWSER_TOOL_CREATE_TASK` to open the live page,
+ *   2. Drive Cloudflare Browser Rendering to open the live page,
  *      screenshot above-the-fold + full-page, gather rendered text.
  *   3. Kimi-vision-audit the screenshots (layout, hierarchy, density,
  *      CTA placement) and merge with the text audit into a single report
@@ -305,7 +305,7 @@ export async function runEditorialAgent(
   const publicUrl = kvKeyToPublicUrl(agent, kvKey);
   agent.log(
     "info",
-    `Editorial Agent [step 2/4]: dispatching Composio browser to screenshot ${publicUrl}`,
+    `Editorial Agent [step 2/4]: dispatching Browser Rendering to screenshot ${publicUrl}`,
     "editorialAgent"
   );
   const screenshots = await collectScreenshots(agent, publicUrl);
@@ -1039,95 +1039,21 @@ Return strict JSON with keys: missingSections (array), weaknessesVsReference (ar
 }
 
 /**
- * Dispatches a Composio browser task to load the URL, scroll the page,
- * capture screenshots, and return rendered text + screenshot URLs.
+ * Captures the live page (rendered text + screenshots) via Cloudflare
+ * Browser Rendering — the only browser backend.
  */
 async function collectScreenshots(
   agent: SEOArticleAgent,
   url: string
 ): Promise<{ urls: string[]; extractedText: string }> {
-  // Primary path: Composio BROWSER_TOOL (residential IPs, scroll automation).
-  const createResp = await agent.executeComposioTool(
-    "BROWSER_TOOL_CREATE_TASK",
-    {
-      startUrl: url,
-      task: `Load the page at ${url}. Wait for all content to finish rendering. Scroll to the bottom slowly so every section becomes visible. Take a full-page screenshot plus one above-the-fold screenshot. Return the extracted visible body text (no nav, no footer, no cookie banners) and the screenshot file references.`
-    },
-    25_000
-  );
-  const taskId = extractField(createResp, [
-    "taskId",
-    "data.taskId",
-    "data.data.taskId"
-  ]);
-  if (!taskId) {
-    agent.log(
-      "info",
-      `Editorial Agent: Composio browser returned no taskId — falling back to Cloudflare Browser Rendering`,
-      "editorialAgent"
-    );
-    return await collectScreenshotsViaCloudflare(agent, url);
-  }
-
-  // Poll WATCH_TASK until finished or timeout (~3 min max).
-  const deadline = Date.now() + 180_000;
-  let lastStepSeen = 0;
-  let finalResp: unknown = null;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 5_000));
-    const watch = await agent.executeComposioTool(
-      "BROWSER_TOOL_WATCH_TASK",
-      { taskId, lastStepSeen },
-      15_000
-    );
-    if (!watch) continue;
-    const status = extractField(watch, [
-      "status",
-      "data.status",
-      "data.data.status"
-    ]) as string | undefined;
-    const currentStep = parseBrowserTaskStep(
-      extractField(watch, [
-        "current_step",
-        "data.current_step",
-        "data.data.current_step"
-      ]),
-      lastStepSeen
-    );
-    if (currentStep > lastStepSeen) lastStepSeen = currentStep;
-    if (status === "finished" || status === "failed" || status === "stopped") {
-      finalResp = watch;
-      break;
-    }
-  }
-  if (!finalResp) {
-    agent.log(
-      "warning",
-      `Editorial Agent: browser task ${taskId} did not finish within 3 min — falling back to Cloudflare Browser Rendering`,
-      "editorialAgent"
-    );
-    return await collectScreenshotsViaCloudflare(agent, url);
-  }
-
-  const screenshotUrls = extractScreenshotUrls(finalResp);
-  const extractedText = extractRenderedText(finalResp);
-  if (screenshotUrls.length === 0) {
-    agent.log(
-      "warning",
-      `Editorial Agent: Composio browser task finished but returned 0 screenshots — falling back to Cloudflare Browser Rendering`,
-      "editorialAgent"
-    );
-    return await collectScreenshotsViaCloudflare(agent, url, extractedText);
-  }
-  return { urls: screenshotUrls, extractedText };
+  return await collectScreenshotsViaCloudflare(agent, url);
 }
 
 /**
- * Fallback: Cloudflare Browser Rendering API. We own the endpoint and
- * bindings so this is the reliable floor when Composio BROWSER_TOOL is
- * missing or flaking. Uses `renderPage` (HTML content) + a desktop
- * `capturePageScreenshot` (JPEG bytes → R2 → worker-served URL so the
- * audit + the dashboard A/B panel can reach the image).
+ * Cloudflare Browser Rendering API. We own the endpoint and bindings so
+ * this is the reliable browser backend. Uses `renderPage` (HTML content)
+ * + a desktop `capturePageScreenshot` (JPEG bytes → R2 → worker-served
+ * URL so the audit + the dashboard A/B panel can reach the image).
  */
 async function collectScreenshotsViaCloudflare(
   agent: SEOArticleAgent,
@@ -1697,89 +1623,6 @@ function sanitizeStringArray(raw: unknown): string[] {
     .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     .map((v) => v.trim())
     .slice(0, 6);
-}
-
-function parseBrowserTaskStep(raw: unknown, fallback: number): number {
-  const normalized =
-    typeof raw === "string"
-      ? raw.trim()
-      : typeof raw === "number" || typeof raw === "bigint"
-        ? String(raw)
-        : "";
-  if (!/^\d+$/.test(normalized)) return fallback;
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < fallback) return fallback;
-  return parsed;
-}
-
-function extractField(raw: unknown, paths: string[]): unknown {
-  const root = unwrapSingleItemArray(raw);
-  if (!root || typeof root !== "object") return undefined;
-  for (const path of paths) {
-    const parts = path.split(".");
-    let cur: unknown = root;
-    for (const p of parts) {
-      cur = unwrapSingleItemArray(cur);
-      if (!cur || typeof cur !== "object") {
-        cur = undefined;
-        break;
-      }
-      cur = (cur as Record<string, unknown>)[p];
-    }
-    cur = unwrapSingleItemArray(cur);
-    if (cur !== undefined) return cur;
-  }
-  return undefined;
-}
-
-function extractScreenshotUrls(raw: unknown): string[] {
-  // Composio browser task output shapes vary. Pull any https URLs that
-  // look like screenshot/artifact references from `outputFiles` and/or
-  // step actions.
-  if (!raw || typeof raw !== "object") return [];
-  const urls = new Set<string>();
-  const visit = (v: unknown): void => {
-    if (!v) return;
-    if (typeof v === "string") {
-      const m = v.match(
-        /https?:\/\/[^\s"')]+\.(?:png|jpg|jpeg|webp)(?:\?[^\s"')#]+)?/gi
-      );
-      if (m) m.forEach((u) => urls.add(u));
-      return;
-    }
-    if (Array.isArray(v)) {
-      v.forEach(visit);
-      return;
-    }
-    if (typeof v === "object") {
-      Object.values(v as Record<string, unknown>).forEach(visit);
-    }
-  };
-  visit(raw);
-  return Array.from(urls).slice(0, 8);
-}
-
-function extractRenderedText(raw: unknown): string {
-  // Delegate directly when the browser-task payload is a top-level string
-  // or array — some Composio response shapes skip the "output"/"result"
-  // wrapper object entirely. Previously these fell through to the
-  // `typeof raw !== "object"` guard and returned "", silently discarding
-  // the rendered text.
-  if (typeof raw === "string" || Array.isArray(raw)) {
-    return collectRenderedText(raw).slice(0, 8000);
-  }
-  if (!raw || typeof raw !== "object") return "";
-  const text = collectRenderedText(
-    extractField(raw, [
-      "output",
-      "data.output",
-      "data.data.output",
-      "result",
-      "data.result",
-      "data.data.result"
-    ])
-  );
-  return text.slice(0, 8000);
 }
 
 function collectRenderedText(raw: unknown): string {

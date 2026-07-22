@@ -19,19 +19,6 @@ describe("computeExternalProviderHealth — empty log", () => {
 });
 
 describe("computeExternalProviderHealth — per-provider detection", () => {
-  it("Composio 401 ak_ pattern → composio degraded", () => {
-    const log = [
-      makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_WLlo0*****"}}'
-      )
-    ];
-    const out = computeExternalProviderHealth(log);
-    const composio = out.find((p) => p.id === "composio")!;
-    expect(composio.tier).toBe("degraded");
-    expect(composio.failures).toBe(1);
-    expect(composio.remediationUrl).toContain("composio");
-  });
-
   it("DataForSEO HTTP 402 pattern → dataforseo degraded", () => {
     const log = [
       makeEntry(
@@ -55,16 +42,16 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
     expect(kimi.tier).toBe("exhausted");
   });
 
-  it("Composio reaches exhausted tier at the 5+ threshold", () => {
+  it("DataForSEO reaches exhausted tier at the 5+ threshold", () => {
     const log = Array.from({ length: 5 }, () =>
       makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_xyz"}}'
+        "[WARNING] Analytics tick: ranked_keywords failed for x:y: HTTP 402: {body}"
       )
     );
     const out = computeExternalProviderHealth(log);
-    const composio = out.find((p) => p.id === "composio")!;
-    expect(composio.tier).toBe("exhausted");
-    expect(composio.failures).toBe(5);
+    const dfs = out.find((p) => p.id === "dataforseo")!;
+    expect(dfs.tier).toBe("exhausted");
+    expect(dfs.failures).toBe(5);
   });
 
   it("mixed: multiple providers degraded simultaneously", () => {
@@ -73,14 +60,11 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
         "[kimi-model] OpenRouter call failed (This request requires more credits); falling back to Workers AI"
       ),
       makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_xyz"}}'
-      ),
-      makeEntry(
         "[WARNING] Analytics tick: ranked_keywords failed for x:y: HTTP 402: {body}"
       )
     ];
     const out = computeExternalProviderHealth(log);
-    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(3);
+    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(2);
   });
 
   it("non-secret prose does not trip any provider", () => {
@@ -92,18 +76,6 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
     const out = computeExternalProviderHealth(log);
     expect(out.every((p) => p.tier === "ok")).toBe(true);
   });
-
-  it("bare Composio key prefix does not count as a real auth failure token", () => {
-    const log = [
-      makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_"}}'
-      )
-    ];
-    const out = computeExternalProviderHealth(log);
-    const composio = out.find((p) => p.id === "composio")!;
-    expect(composio.tier).toBe("ok");
-    expect(composio.failures).toBe(0);
-  });
 });
 
 describe("degradedProviders — filtered view for banner", () => {
@@ -114,12 +86,12 @@ describe("degradedProviders — filtered view for banner", () => {
   it("returns only providers that have failures", () => {
     const log = [
       makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_xyz"}}'
+        "[WARNING] Analytics tick: ranked_keywords failed for x:y: HTTP 402: {body}"
       )
     ];
     const out = degradedProviders(log);
     expect(out).toHaveLength(1);
-    expect(out[0].id).toBe("composio");
+    expect(out[0].id).toBe("dataforseo");
   });
 
   it("preserves canonical order even when some are filtered", () => {
@@ -140,14 +112,14 @@ describe("computeExternalProviderHealth — defensive", () => {
   it("missing msg fields don't crash", () => {
     const log = [
       makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_xyz"}}'
+        "[WARNING] Analytics tick: ranked_keywords failed for x:y: HTTP 402: {body}"
       ),
       { msg: undefined } as { msg?: string },
       {} as { msg?: string }
     ];
     const out = computeExternalProviderHealth(log);
-    const composio = out.find((p) => p.id === "composio")!;
-    expect(composio.failures).toBe(1);
+    const dfs = out.find((p) => p.id === "dataforseo")!;
+    expect(dfs.failures).toBe(1);
   });
 });
 
@@ -210,13 +182,10 @@ describe("computeExternalProviderHealth — Amazon + IndexNow patterns", () => {
     expect(indexnow.tier).toBe("ok");
   });
 
-  it("all 5 providers detected at once when all degraded", () => {
+  it("all 4 providers detected at once when all degraded", () => {
     const log = [
       makeEntry(
         "[kimi-model] OpenRouter call failed (This request requires more credits); falling back to Workers AI"
-      ),
-      makeEntry(
-        'Sheet mirror skipped: 401 {"error":{"message":"Invalid API key: ak_xyz"}}'
       ),
       makeEntry(
         "[WARNING] Analytics tick: ranked_keywords failed for x:y: HTTP 402: {body}"
@@ -229,6 +198,6 @@ describe("computeExternalProviderHealth — Amazon + IndexNow patterns", () => {
       )
     ];
     const out = computeExternalProviderHealth(log);
-    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(5);
+    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(4);
   });
 });

@@ -1254,8 +1254,8 @@ export default function Dashboard() {
 
         {/* External-provider health banner — multi-provider derivation
             from the live activity log. Surfaces OpenRouter credit
-            exhaustion (#4780), Composio API-key revocation (#4787), and
-            DataForSEO HTTP 402 quota wall. Hidden during normal
+            exhaustion (#4780) and the DataForSEO HTTP 402 quota wall.
+            Hidden during normal
             operation. Per-provider remediation link makes the operator
             action one click away. */}
         <ExternalProviderHealthBanner state={state} />
@@ -4227,9 +4227,9 @@ function EditorialAgentPanel({ state }: { state: SEOAgentState }) {
             }}
           >
             Fires automatically after every published article. Reads the KV
-            HTML, drives Composio browser to screenshot the live page, audits vs
-            a per-category editorial benchmark (defaults to NYT Wirecutter),
-            rewrites and republishes when findings warrant.
+            HTML, drives Cloudflare Browser Rendering to screenshot the live
+            page, audits vs a per-category editorial benchmark (defaults to NYT
+            Wirecutter), rewrites and republishes when findings warrant.
           </p>
         </div>
         <div

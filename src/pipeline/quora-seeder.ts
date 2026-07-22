@@ -15,14 +15,13 @@ import { errMsg, getEnvBinding, normalizeSingleLine } from "./http-utils";
  *   2. For each unanswered or low-answer thread found, uses Workers AI
  *      (Llama) to synthesise a genuine, helpful answer drawn from the
  *      article's FAQ content and quick-answer box.
- *   3. Posts the answer via Composio's Quora tool when COMPOSIO_API_KEY
- *      and QUORA_API_TOKEN are available; otherwise logs a dry-run
- *      summary so the operator can paste manually.
+ *   3. Logs a dry-run summary so the operator can paste answers
+ *      manually — Quora exposes no public posting API, so the seeder
+ *      never auto-posts.
  *
  * Gracefully skips when:
  *   - No PAA questions were collected in Step 5.
  *   - Quora search returns no relevant threads.
- *   - COMPOSIO_API_KEY / QUORA_API_TOKEN are absent (dry-run mode).
  *
  * Never throws — failures are logged as warnings so the pipeline
  * continues to Step 22 regardless.
@@ -41,9 +40,6 @@ const MAX_FAQ_CHARS = 3_000;
 // const APIFY_FETCH_TIMEOUT_MS = 210_000;
 /** Client-side timeout for the legacy Quora HTML scrape (ms). */
 const QUORA_SCRAPE_TIMEOUT_MS = 10_000;
-/** Client-side timeout for the Composio answer-post call (ms). */
-const COMPOSIO_POST_TIMEOUT_MS = 10_000;
-
 export interface QuoraSeederInput {
   keyword: string;
   articleUrl: string;
@@ -316,77 +312,14 @@ Write a genuine, helpful Quora answer (150–220 words) that answers the questio
   }
 }
 
-// ── Composio Quora posting ─────────────────────────────────────────────────
-
-/**
- * Attempts to post the answer to Quora via Composio.
- * Returns true on success, false on any failure (non-fatal).
- */
-async function postAnswerViaComposio(
-  agent: SEOArticleAgent,
-  questionUrl: string,
-  answerText: string
-): Promise<boolean> {
-  const composioKey =
-    getEnvBinding(agent.envBindings, "COMPOSIO_API_KEY") ?? "";
-  const quoraToken = getEnvBinding(agent.envBindings, "QUORA_API_TOKEN") ?? "";
-
-  if (!composioKey || !quoraToken) return false;
-
-  try {
-    // Composio OpenAI-compatible endpoint — call the Quora answer-post tool.
-    const resp = await fetch(
-      "https://backend.composio.dev/api/v1/actions/execute",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": composioKey
-        },
-        body: JSON.stringify({
-          actionName: "QUORA_POST_ANSWER",
-          input: {
-            question_url: questionUrl,
-            answer_text: answerText,
-            access_token: quoraToken
-          }
-        }),
-        signal: AbortSignal.timeout(COMPOSIO_POST_TIMEOUT_MS)
-      }
-    );
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      const bodySnippet = normalizeSingleLine(body).slice(0, 200);
-      agent.log(
-        "warning",
-        `Quora Seeder: Composio post failed HTTP ${resp.status} for ${questionUrl} — ${bodySnippet}`
-      );
-      return false;
-    }
-
-    const json = (await resp.json()) as {
-      successful?: boolean;
-      success?: boolean;
-    };
-    return json.successful === true || json.success === true;
-  } catch (err: unknown) {
-    agent.log(
-      "warning",
-      `Quora Seeder: Composio post error for ${questionUrl} — ${errMsg(err)}`
-    );
-    return false;
-  }
-}
-
 /**
  * Runs the Quora seeding pass for one article candidate by:
- * 1) searching relevant Quora threads from keyword/PAA queries,
- * 2) generating short answers, and
- * 3) posting via Composio when credentials are present.
+ * 1) searching relevant Quora threads from keyword/PAA queries, and
+ * 2) generating short answers (always dry-run — Quora exposes no public
+ *    posting API, so synthesized answers are logged for manual use only).
  *
  * Returns a structured result for activity logging and downstream pipeline
- * stages; when credentials are missing, the function safely degrades to dry-run.
+ * stages.
  */
 export async function runQuoraSeeder(
   agent: SEOArticleAgent,
@@ -456,31 +389,15 @@ export async function runQuoraSeeder(
     );
   }
 
-  // Detect dry-run mode (no credentials).
-  const composioKey =
-    getEnvBinding(agent.envBindings, "COMPOSIO_API_KEY") ?? "";
-  const quoraToken = getEnvBinding(agent.envBindings, "QUORA_API_TOKEN") ?? "";
-  const dryRun = !composioKey || !quoraToken;
-  let dryRunSkipReason = "Dry-run: COMPOSIO_API_KEY or QUORA_API_TOKEN not set";
-
-  if (dryRun && (composioKey || quoraToken)) {
-    const missingBindings = [
-      !composioKey ? "COMPOSIO_API_KEY" : null,
-      !quoraToken ? "QUORA_API_TOKEN" : null
-    ]
-      .filter(Boolean)
-      .join(", ");
-    dryRunSkipReason = `Dry-run: missing ${missingBindings}; set both COMPOSIO_API_KEY and QUORA_API_TOKEN`;
-    agent.log(
-      "warning",
-      `Quora Seeder dry-run: missing ${missingBindings}; set both COMPOSIO_API_KEY and QUORA_API_TOKEN to enable answer posting`,
-      "marketing"
-    );
-  }
+  // Always dry-run: Quora has no public posting API, so answers are
+  // synthesized and logged but never auto-posted.
+  const dryRun = true;
+  const dryRunSkipReason =
+    "Dry-run: Quora has no public posting API — answer synthesized for manual use";
 
   const threads: QuoraSeededThread[] = [];
   let lastModelPromptCell = "";
-  let seededCount = 0;
+  const seededCount = 0;
 
   for (const candidate of candidates.slice(0, 3)) {
     const { answerText, modelPromptCell } = await synthesiseAnswer(
@@ -490,21 +407,10 @@ export async function runQuoraSeeder(
     );
     lastModelPromptCell = modelPromptCell;
 
-    let posted = false;
-    let skipReason: string | undefined;
-
-    if (dryRun) {
-      skipReason = dryRunSkipReason;
-    } else if (answerText.startsWith("Answer synthesis failed")) {
-      skipReason = answerText;
-    } else {
-      posted = await postAnswerViaComposio(agent, candidate.url, answerText);
-      if (!posted) {
-        skipReason = "Composio post returned failure";
-      }
-    }
-
-    if (posted) seededCount++;
+    const posted = false;
+    const skipReason = answerText.startsWith("Answer synthesis failed")
+      ? answerText
+      : dryRunSkipReason;
 
     threads.push({
       questionUrl: candidate.url,
@@ -527,7 +433,7 @@ export async function runQuoraSeeder(
   }
 
   const summary = dryRun
-    ? `Quora Seeder dry-run: ${threads.length} thread(s) found, answers synthesised (set QUORA_API_TOKEN + COMPOSIO_API_KEY to post)`
+    ? `Quora Seeder dry-run: ${threads.length} thread(s) found, answers synthesised for manual posting (Quora has no public posting API)`
     : `Quora Seeder: ${seededCount}/${threads.length} answer(s) posted`;
 
   agent.log("info", summary, "marketing", {

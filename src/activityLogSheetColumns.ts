@@ -352,7 +352,7 @@ export const ACTIVITY_LOG_SISS_DELTA_LOGICAL_INDEX =
 /**
  * Logical index of the **`quora seeder`** column (default sheet **AL**):
  * Step 16 Quora Answer Seeder summary — threads found, answers posted
- * or dry-run status when QUORA_API_TOKEN / COMPOSIO_API_KEY not set.
+ * or dry-run status (Quora has no public posting API).
  */
 export const ACTIVITY_LOG_QUORA_SEEDER_LOGICAL_INDEX =
   ACTIVITY_LOG_SISS_DELTA_LOGICAL_INDEX + 1;
@@ -1006,7 +1006,7 @@ export function getActivityLogSheetColumnLegendLines(): string[] {
     `Column ${col(ACTIVITY_LOG_MODEL_PROMPT_LOGICAL_INDEX)} (modelPrompt): Workers AI system+user prompt for that log row when the pipeline attached modelPrompt (any Workers AI / tool-using call we instrument); truncated for Sheets.`
   );
   lines.push(
-    `Column ${col(ACTIVITY_LOG_MCP_TOOL_LOGICAL_INDEX)} (${ACTIVITY_LOG_SHEET_HEADER_MCP_TOOL}): comma-separated tool names from AI SDK tool calls when logged (e.g. search, execute, Composio tool keys); MCP registration lines use a short server label; otherwise blank.`
+    `Column ${col(ACTIVITY_LOG_MCP_TOOL_LOGICAL_INDEX)} (${ACTIVITY_LOG_SHEET_HEADER_MCP_TOOL}): comma-separated tool names from AI SDK tool calls when logged (e.g. search, execute); MCP registration lines use a short server label; otherwise blank.`
   );
   return lines;
 }

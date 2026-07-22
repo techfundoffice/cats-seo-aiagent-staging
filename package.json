@@ -20,15 +20,11 @@
     "test": "vitest run",
     "bench": "vitest bench --run",
     "check": "oxfmt --check . && oxlint src/ && tsc && vitest run",
-    "composio": "node ./scripts/composio-run.mjs",
-    "verify:sheet-read": "node ./scripts/verify-composio-sheets-read.mjs",
     "debug:pull-ndjson": "node ./scripts/pull-debug-ndjson.mjs"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "^0.4.1",
     "@cloudflare/kumo": "^1.18.0",
-    "@composio/core": "^0.6.10",
-    "@composio/vercel": "^0.6.10",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",

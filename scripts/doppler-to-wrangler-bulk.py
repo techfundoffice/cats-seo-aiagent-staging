@@ -21,6 +21,8 @@ SKIP = {
     # so staging never opens claude-fix GitHub issues or assigns Copilot.
     # (Also disables article-HTML GitHub backup + authenticated skill fetches.)
     "GITHUB_TOKEN_SECRET",
+    # Composio was removed from this codebase — never push its key.
+    "COMPOSIO_API_KEY",
 }
 
 secrets = json.load(sys.stdin)

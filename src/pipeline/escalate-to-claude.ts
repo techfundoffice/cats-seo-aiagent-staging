@@ -439,10 +439,9 @@ export function getSafeKeyword(value: string): string {
 }
 
 /**
- * Create a GitHub issue via the REST API directly, bypassing Composio.
- * Composio's `github` toolkit can lose its connection during MCP backend
- * migrations (Rube → Composio sunset 2026-05-15), at which point every
- * `executeComposioTool("GITHUB_CREATE_AN_ISSUE", ...)` returns `null` and
+ * Create a GitHub issue via the REST API directly. Historically this
+ * went through a hosted tool-proxy whose connection could drop, at which
+ * point every issue-create returned `null` and
  * the auto-heal loop loses its exit valve. The direct path uses the
  * `GITHUB_TOKEN_SECRET` worker secret already required for article
  * backups — no extra config.
@@ -886,7 +885,7 @@ export async function assignCopilotToIssue(
 }
 
 /**
- * Direct GitHub GraphQL call. Bypasses Composio for the same reason as
+ * Direct GitHub GraphQL call. Direct REST/GraphQL for the same reason as
  * `createIssueDirect`. Returns `{ data, errors }` on a parseable response,
  * or `null` on transport/HTTP failure (caller already logs).
  *

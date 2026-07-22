@@ -2,21 +2,16 @@
  * Multi-provider health derivation from the in-memory activity log.
  * Generalizes the Kimi-only banner shipped in #4780. Operators have
  * been silently losing multiple external services at once (OpenRouter
- * credit wall + Composio API-key revocation + DataForSEO 402 paid-tier
- * exhaustion). Without a unified view, each surfaces only as scattered
- * warning lines that are easy to miss.
+ * credit wall + DataForSEO 402 paid-tier exhaustion). Without a unified
+ * view, each surfaces only as scattered warning lines that are easy to
+ * miss.
  *
  * Pure derivation. No state field, endpoint, scheduled tick.
  */
 
 import { computeKimiProviderHealth } from "./kimiProviderHealth";
 
-export type ExternalProviderId =
-  | "kimi"
-  | "composio"
-  | "dataforseo"
-  | "amazon"
-  | "indexnow";
+export type ExternalProviderId = "kimi" | "dataforseo" | "amazon" | "indexnow";
 
 type ProviderHealthTier = "ok" | "degraded" | "exhausted";
 
@@ -34,14 +29,6 @@ export interface ExternalProviderStatus {
   /** Short description of WHAT we observed in the log. */
   evidence: string;
 }
-
-/**
- * Composio API-key auth failures. Surfaces when the sheet mirror /
- * Doppler / browser-tool calls reject the configured `ak_…` key with a
- * 401 — operator needs to rotate via Composio dashboard. Detected via
- * the canonical "Invalid API key" wire message + the `ak_` prefix.
- */
-const COMPOSIO_AUTH_PATTERN = /Invalid API key:\s*ak_[A-Za-z0-9_*]{3,}/i;
 
 /**
  * DataForSEO HTTP 402 ("payment required") — the analytics + SERP
@@ -98,18 +85,15 @@ export function computeExternalProviderHealth(
   // pinned to the existing tests.
   const kimi = computeKimiProviderHealth(activityLog);
 
-  let composioFailures = 0;
   let dataforseoFailures = 0;
   let amazonFailures = 0;
   let indexnowFailures = 0;
   for (const entry of activityLog) {
     const msg = entry.msg ?? "";
-    if (COMPOSIO_AUTH_PATTERN.test(msg)) composioFailures++;
     if (DATAFORSEO_402_PATTERN.test(msg)) dataforseoFailures++;
     if (AMAZON_CREATORS_AUTH_PATTERN.test(msg)) amazonFailures++;
     if (INDEXNOW_403_PATTERN.test(msg)) indexnowFailures++;
   }
-  const composio = classify(composioFailures);
   const dataforseo = classify(dataforseoFailures);
   const amazon = classify(amazonFailures);
   const indexnow = classify(indexnowFailures);
@@ -123,16 +107,6 @@ export function computeExternalProviderHealth(
       evidence: `${kimi.openrouterFailures} OpenRouter failure(s), ${kimi.creditsExhaustedHits} credit-exhausted`,
       remediation: "Top up OpenRouter credits",
       remediationUrl: "https://openrouter.ai/settings/credits"
-    },
-    {
-      id: "composio",
-      label: "Composio (sheet mirror / browser / Doppler)",
-      tier: composio.tier,
-      failures: composioFailures,
-      evidence: `${composioFailures} "Invalid API key: ak_…" auth failure(s) in the live log`,
-      remediation:
-        "Rotate COMPOSIO_API_KEY worker secret (Cloudflare → Workers → secrets)",
-      remediationUrl: "https://app.composio.dev/settings"
     },
     {
       id: "dataforseo",

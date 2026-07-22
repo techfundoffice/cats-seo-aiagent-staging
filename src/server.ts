@@ -1,6 +1,4 @@
 import { Agent, routeAgentRequest, callable } from "agents";
-import { Composio } from "@composio/core";
-import { VercelProvider } from "@composio/vercel";
 import { generateText, stepCountIs, type ToolSet } from "ai";
 import {
   getKimiModel,
@@ -226,7 +224,7 @@ export type ActivityLogEntry = {
   pipelineContext?: PipelineContext;
   /**
    * Sheet column CA (`MCP Tool`): tool names from MCP / AI SDK calls when logged
-   * (e.g. `search`, `execute`, Composio tool keys); otherwise blank.
+   * (e.g. `search`, `execute`); otherwise blank.
    */
   mcpTool?: string;
   /**
@@ -759,12 +757,11 @@ function pickEditorialReferenceUrl(
 }
 
 /**
- * Extract a plain secret value from a Composio `DOPPLER_SECRETS_GET`
- * response. Doppler's native shape is `{ value: { raw, computed } }`;
- * Composio wrappers vary by toolkit/version and may use `data`,
- * `response_data`, `responseData`, or nested `response` envelopes.
- * Some toolkit versions also stringify those wrapper objects. Probe the
- * common paths, return trimmed string or null.
+ * Extract a plain secret value from a Doppler secrets-get response.
+ * Doppler's native REST shape is `{ value: { raw, computed } }`; older
+ * proxied responses wrapped that in `data` / `response_data` /
+ * `responseData` / `response` envelopes (sometimes stringified). Probe
+ * the common paths, return trimmed string or null.
  */
 function extractDopplerSecretValue(raw: unknown): string | null {
   const envelope = parseObjectLike(raw);
@@ -1164,7 +1161,7 @@ function activityLogSheetHeaderFullRowRange(): string {
 }
 
 /**
- * Collects unique `toolName` values from AI SDK `generateText` steps (MCP + Composio tools).
+ * Collects unique `toolName` values from AI SDK `generateText` steps (MCP tools).
  */
 function collectToolNamesFromGenerateTextResult(result: {
   readonly steps?: ReadonlyArray<{
@@ -2019,24 +2016,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     }
   }
 
-  // ── Composio integration ───────────────────────────────────────────────────
+  // ── Direct external connectors ─────────────────────────────────────────────
 
   /** Hosted Cloudflare API MCP (Code Mode: `search` + `execute`). */
   private static readonly cloudflareMcpServerName = "cloudflare-api";
   private static readonly cloudflareMcpUrl = "https://mcp.cloudflare.com/mcp";
 
-  private _composioSession: {
-    tools: () => Promise<Record<string, unknown>>;
-    execute: (
-      toolSlug: string,
-      arguments_?: Record<string, unknown>
-    ) => Promise<unknown>;
-  } | null = null;
   /**
    * Direct Google Sheets connector. `undefined` = not yet resolved this
-   * isolate; `null` = no service-account secret, fall back to Composio.
-   * Built lazily from GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON so the Sheet
-   * mirror no longer depends on the (separately rotated) Composio key.
+   * isolate; `null` = no service-account secret — the Sheet mirror is
+   * unavailable. Built lazily from GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON.
    */
   private _sheetsClient: GoogleSheetsDirectClient | null | undefined =
     undefined;
@@ -2082,84 +2071,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     }
   }
 
-  async getComposioTools() {
-    if (!this._composioSession) {
-      const apiKey = this.env.COMPOSIO_API_KEY;
-      if (!apiKey) {
-        this.log(
-          "warning",
-          "COMPOSIO_API_KEY not set — Composio tools unavailable"
-        );
-        return {};
-      }
-      const composio = new Composio({
-        apiKey,
-        provider: new VercelProvider()
-      });
-      this._composioSession = (await composio.create("seo-agent")) as {
-        tools: () => Promise<Record<string, unknown>>;
-        execute: (
-          toolSlug: string,
-          arguments_?: Record<string, unknown>
-        ) => Promise<unknown>;
-      };
-      this.log(
-        "info",
-        "Composio session initialized (1000+ toolkits available)"
-      );
-    }
-    return await this._composioSession.tools();
-  }
-
-  /**
-   * Public Composio tool executor for pipeline code (e.g. Doppler secret
-   * rotation, Apify actor runs). Lazily initializes the Composio
-   * session on first call. Returns `null` when `COMPOSIO_API_KEY` is unset,
-   * the session cannot be initialized, the tool times out, or execution
-   * throws — callers treat `null` as "tool unavailable, fall through".
-   */
-  async executeComposioTool(
-    toolSlug: string,
-    args: Record<string, unknown>,
-    timeoutMs = 20_000
-  ): Promise<unknown | null> {
-    if (!this._composioSession) {
-      try {
-        await this.withTimeout(
-          this.getComposioTools(),
-          15_000,
-          "Composio session initialization timed out"
-        );
-      } catch (err: unknown) {
-        this.log("warning", `Composio ${toolSlug} unavailable: ${errMsg(err)}`);
-        return null;
-      }
-    }
-    const session = this._composioSession;
-    if (!session?.execute) {
-      this.log(
-        "warning",
-        `Composio ${toolSlug} unavailable: session missing execute()`
-      );
-      return null;
-    }
-    try {
-      return await this.withTimeout(
-        session.execute(toolSlug, args),
-        timeoutMs,
-        `Composio ${toolSlug} timed out`
-      );
-    } catch (err: unknown) {
-      this.log("warning", `Composio ${toolSlug} failed: ${errMsg(err)}`);
-      return null;
-    }
-  }
-
   /**
    * Lazily build the direct Google Sheets connector from the
    * GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON secret. Returns null (and caches
-   * the null) when the secret is absent or malformed so callers fall back
-   * to the legacy Composio session. The result is memoised per isolate.
+   * the null) when the secret is absent or malformed — the Sheet mirror
+   * is then unavailable. The result is memoised per isolate.
    */
   private getDirectSheetsClient(): GoogleSheetsDirectClient | null {
     if (this._sheetsClient !== undefined) return this._sheetsClient;
@@ -2173,12 +2089,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         GoogleSheetsDirectClient.fromServiceAccountJson(json);
       this.log(
         "info",
-        `Direct Google Sheets connector initialized (service account ${this._sheetsClient.clientEmail}) — Composio no longer in the sheets path`
+        `Direct Google Sheets connector initialized (service account ${this._sheetsClient.clientEmail})`
       );
     } catch (err: unknown) {
       this.log(
         "warning",
-        `Direct Google Sheets connector unavailable, falling back to Composio: ${errMsg(err)}`
+        `Direct Google Sheets connector unavailable (bad GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON?): ${errMsg(err)}`
       );
       this._sheetsClient = null;
     }
@@ -2186,11 +2102,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   }
 
   /**
-   * Returns the executor used for `GOOGLESHEETS_*` calls: the direct
-   * connector when a service account is configured, otherwise the legacy
-   * Composio session (lazily initialized). Both expose the same
-   * `execute(slug, args)` signature so call sites are backend-agnostic.
-   * Returns null only when neither backend is available.
+   * Returns the executor used for `GOOGLESHEETS_*` calls — the direct
+   * service-account connector. Returns null when
+   * GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON is absent or malformed (the sheet
+   * mirror is then disabled; callers already treat null as "skip").
    */
   async getSheetsExecutor(): Promise<{
     execute: (slug: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -2201,23 +2116,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         execute: (slug, args) => direct.execute(slug, args)
       };
     }
-    if (!this._composioSession) {
-      try {
-        await this.withTimeout(
-          this.getComposioTools(),
-          15_000,
-          "Composio session initialization timed out"
-        );
-      } catch (err: unknown) {
-        this.log("warning", `Sheets executor unavailable: ${errMsg(err)}`);
-        return null;
-      }
-    }
-    const session = this._composioSession;
-    if (!session?.execute) return null;
-    return {
-      execute: (slug, args) => session.execute(slug, args)
-    };
+    return null;
   }
 
   /**
@@ -2255,14 +2154,15 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
 
   /**
    * Self-heal for Kimi K2.5 auth failures. When the OpenRouter binding on
-   * the Worker is dead (expired / revoked), call Composio's Doppler tool
-   * to pull the current value from `replit-n8n-catsluvus/prd`. If Doppler
-   * has a different (fresher) value, install it as an in-memory override
-   * via `setRotatedOpenRouterKey()` so subsequent Kimi calls pick it up
+   * the Worker is dead (expired / revoked), call the Doppler REST API
+   * directly (basic auth with the DOPPLER_TOKEN service token) to pull
+   * the current value from `replit-n8n-catsluvus/prd`. If Doppler has a
+   * different (fresher) value, install it as an in-memory override via
+   * `setRotatedOpenRouterKey()` so subsequent Kimi calls pick it up
    * without waiting for a redeploy.
    *
    * Returns the fresh key on successful rotation, or `null` when:
-   *   - Composio is unavailable (no API key / session init failed)
+   *   - DOPPLER_TOKEN is unset or the API call fails
    *   - Doppler returned no value or the same dead value
    *   - The response shape was unparseable
    *
@@ -2272,19 +2172,38 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   async rotateOpenRouterKeyFromDoppler(
     context: string
   ): Promise<string | null> {
-    const result = await this.executeComposioTool(
-      "DOPPLER_SECRETS_GET",
-      {
-        project: "replit-n8n-catsluvus",
-        config: "prd",
-        name: "OPENROUTER_API_KEY"
-      },
-      10_000
-    );
-    if (!result) {
+    const dopplerToken = this.env.DOPPLER_TOKEN?.trim();
+    if (!dopplerToken) {
       this.log(
         "warning",
-        `Kimi 401 self-heal (${context}): Doppler fetch failed — rotation skipped`
+        `Kimi 401 self-heal (${context}): DOPPLER_TOKEN not set — rotation skipped`
+      );
+      return null;
+    }
+    let result: unknown = null;
+    try {
+      const resp = await fetch(
+        "https://api.doppler.com/v3/configs/config/secret?project=replit-n8n-catsluvus&config=prd&name=OPENROUTER_API_KEY",
+        {
+          headers: {
+            Authorization: `Basic ${btoa(`${dopplerToken}:`)}`,
+            Accept: "application/json"
+          },
+          signal: AbortSignal.timeout(10_000)
+        }
+      );
+      if (resp.ok) result = await resp.json();
+      else {
+        this.log(
+          "warning",
+          `Kimi 401 self-heal (${context}): Doppler API HTTP ${resp.status} — rotation skipped`
+        );
+        return null;
+      }
+    } catch (err: unknown) {
+      this.log(
+        "warning",
+        `Kimi 401 self-heal (${context}): Doppler fetch failed (${errMsg(err)}) — rotation skipped`
       );
       return null;
     }
@@ -2830,49 +2749,46 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   }
 
   @callable()
-  async useComposioTool(prompt: string) {
+  async useAgentTools(prompt: string) {
     await this.ensureCloudflareMcpServer();
     await this.mcp.waitForConnections({ timeout: 20_000 });
 
-    const composioTools = await this.getComposioTools();
     const cloudflareTools = this.getCloudflareMcpAiTools();
     const merged: ToolSet = {
       ...cloudflareTools,
-      ...this.designAuditTools,
-      ...(composioTools as ToolSet)
+      ...this.designAuditTools
     };
 
     if (Object.keys(merged).length === 0) {
       return {
-        error:
-          "No tools available: set COMPOSIO_API_KEY and/or CLOUDFLARE_API_TOKEN_SECRET"
+        error: "No tools available: set CLOUDFLARE_API_TOKEN_SECRET"
       };
     }
 
     const cloudflareAddon =
       Object.keys(cloudflareTools).length > 0
-        ? `\n\nOptional Cloudflare account API tools (MCP Code Mode: search + execute) are available. Use them only when the user needs Cloudflare API operations (DNS, Workers, R2, KV, etc.). Prefer Composio tools for Google Sheets, SERP, and other third-party apps. Prefer read-only calls when unsure; do not exfiltrate secrets.`
+        ? `\n\nOptional Cloudflare account API tools (MCP Code Mode: search + execute) are available. Use them only when the user needs Cloudflare API operations (DNS, Workers, R2, KV, etc.). Prefer read-only calls when unsure; do not exfiltrate secrets.`
         : "";
 
-    const composioSystem = cloudflareAddon
+    const toolSystem = cloudflareAddon
       ? `You are a tool-using assistant.${cloudflareAddon}`
       : undefined;
     const result = await generateText({
       model: getKimiModel(this.env),
       providerOptions: getKimiProviderOptions(this.env),
       tools: merged,
-      ...(composioSystem ? { system: composioSystem } : {}),
+      ...(toolSystem ? { system: toolSystem } : {}),
       prompt,
       stopWhen: stepCountIs(5)
     });
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
       "info",
-      `Composio task: ${prompt.slice(0, 60)}...`,
+      `Agent tool task: ${prompt.slice(0, 60)}...`,
       "promptEngineer",
       {
         kanbanStage: "inProgress",
-        modelPrompt: formatActivityLogModelPromptCell(composioSystem, prompt),
+        modelPrompt: formatActivityLogModelPromptCell(toolSystem, prompt),
         ...(mcpNames !== "" ? { mcpTool: mcpNames } : {})
       }
     );
@@ -5017,7 +4933,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           );
         }
         // Fire-and-forget — the agent pipelines 4 steps incl. polling the
-        // Composio browser task (~1-3 min). The caller gets an immediate
+        // browser screenshot task (~1-3 min). The caller gets an immediate
         // accepted response; progress streams to the dashboard under
         // role=editorialAgent.
         this.ctx.waitUntil(
@@ -6709,7 +6625,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
 
   private enqueueSheetActivityLog(entry: ActivityLogEntry) {
     // Tee to Quadratic Postgres mirror (best-effort, non-blocking).
-    // Independent of the Composio Sheets queue so a Postgres outage
+    // Independent of the Sheets mirror queue so a Postgres outage
     // never stalls the Google-Sheet writer.
     void this.pushQuadraticIngest(entry);
 

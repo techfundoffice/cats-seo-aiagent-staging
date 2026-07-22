@@ -3383,7 +3383,7 @@ async function generateArticleUnsafe(
     // Step 21/24: Quora Answer Seeder — post AI-synthesised answers to Quora
     //               questions matching the keyword / PAA questions, citing the
     //               live article URL.  Non-fatal; degrades to dry-run when
-    //               QUORA_API_TOKEN or COMPOSIO_API_KEY are absent.
+    //               Quora exposes no public posting API (always dry-run).
     // ═══════════════════════════════════════════════════════════════════════════
     agent.updateStep("21/24: Quora Seeder");
     let quoraSeederSummary: string | undefined;

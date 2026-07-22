@@ -31,13 +31,17 @@ declare namespace Cloudflare {
 		 */
 		AI_SEARCH?: AiSearchInstance;
 		// Secrets (from Doppler → wrangler secret put)
-		COMPOSIO_API_KEY?: string;
+		/**
+		 * Doppler service token (dp.st.…) for direct Doppler REST API reads —
+		 * used by the OpenRouter-key rotation self-heal.
+		 */
+		DOPPLER_TOKEN?: string;
 		/**
 		 * Google Cloud service-account JSON key (the full
 		 * `{ "client_email", "private_key", ... }` document). Powers the
 		 * direct Google Sheets connector (src/pipeline/google-sheets-direct.ts)
-		 * so the "Sheet mirror" no longer depends on Composio. The target
-		 * spreadsheet must be shared with the service account's client_email.
+		 * ("Sheet mirror"). The target spreadsheet must be shared with the
+		 * service account's client_email.
 		 */
 		GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON?: string;
 		/**

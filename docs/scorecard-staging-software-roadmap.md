@@ -95,7 +95,7 @@ Schema maps **inputs:** `keyword`, `category`; **metadata:** `notes`, `seoScore`
 | Keyword                                 | SEO    | Pass rate | Words | Products | Top Picks        | Duration            |
 | --------------------------------------- | ------ | --------- | ----- | -------- | ---------------- | ------------------- |
 | scorecard probe only                    | **99** | **94%**   | 2684  | **5**    | yes (real ASINs) | ~194s               |
-| best automatic cat litter box           | **92** | **88%**   | 3490  | **0**    | yes*             | ~153s               |
+| best automatic cat litter box           | **92** | **88%**   | 3490  | **0**    | yes\*            | ~153s               |
 | best automatic cat litter box (earlier) | 0      | 0         | 0     | —        | —                | ~66s (empty finish) |
 
 \* `hasOurTopPicks=true` with `productCount=0` usually means the honesty empty strip still contains the words “Our Top Picks”—**Scorecard commercial metric can false-positive** if it only greps the phrase.

@@ -9,7 +9,7 @@ import { errMsg } from "./http-utils";
  *
  * Callers in writer.ts must never invert this order or call Apify when
  * Creators/PA already returned products.
- * Tier 4: SerpAPI Shopping via Composio (Google Shopping results)
+ * Tier 4: SerpAPI Shopping (Google Shopping results)
  * Tier 5: Keyword-derived fallback
  */
 

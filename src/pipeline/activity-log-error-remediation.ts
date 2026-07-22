@@ -17,11 +17,11 @@ const INVALID_JSON_RESPONSE_PREVIEW_MAX_CHARS = 280;
 const FALLBACK_REASON_PREVIEW_MAX_CHARS = 280;
 const FALLBACK_LOG_MESSAGE_MAX_CHARS = 1200;
 
-const JSON_CONTRACT_SYSTEM = `You are a senior on-call engineer for a Cloudflare Workers SEO article agent (Durable Object + SQLite, Workers AI, Composio Google Sheets mirror, KV/R2 when applicable).
+const JSON_CONTRACT_SYSTEM = `You are a senior on-call engineer for a Cloudflare Workers SEO article agent (Durable Object + SQLite, Workers AI, direct Google Sheets mirror, KV/R2 when applicable).
 
 Return ONLY a single JSON object (no markdown fences, no commentary). Required keys:
 - "summary": string, <=400 characters, concise human-readable error summary (do not paste the entire log message unless it is already short).
-- "remediationUser": string, detailed USER-style instructions for an upstream LLM: what broke, why it matters, and concrete remediation steps that respect Worker CPU/time limits, Durable Object storage, Composio rate limits, and Workers AI constraints.`;
+- "remediationUser": string, detailed USER-style instructions for an upstream LLM: what broke, why it matters, and concrete remediation steps that respect Worker CPU/time limits, Durable Object storage, Google Sheets API rate limits, and Workers AI constraints.`;
 
 const REMEDIATION_CELL_SYSTEM = `You are assisting an engineer who will fix failures in a Cloudflare Workers SEO article Durable Object pipeline. Follow the USER block carefully; prefer minimal, verifiable changes and cite likely file areas (Worker entry, Durable Object class, pipeline modules) when obvious from context.`;
 
@@ -266,7 +266,7 @@ ${msg}
 
 ${reasonBlock}Non-AI fallback checklist:
 1) Inspect Worker / Durable Object logs for this article run (wrangler tail).
-2) Confirm Composio Google Sheets connectivity and header layout version drift.
+2) Confirm Google Sheets connectivity (service account) and header layout version drift.
 3) Re-check Workers AI model availability and request limits for the failing call.
 4) If this was a transient model/JSON parse failure, retry the failing pipeline step.`;
   return {

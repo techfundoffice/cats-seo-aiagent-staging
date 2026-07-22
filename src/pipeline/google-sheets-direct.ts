@@ -114,7 +114,7 @@ export class GoogleSheetsDirectClient {
   /**
    * Parse a service-account JSON string into a client. Throws when the
    * JSON is missing the two fields the JWT flow requires, so the caller
-   * can fall back to Composio rather than emit cryptic crypto errors.
+   * fails fast with a clear message rather than cryptic crypto errors.
    */
   static fromServiceAccountJson(json: string): GoogleSheetsDirectClient {
     let parsed: GoogleServiceAccount;

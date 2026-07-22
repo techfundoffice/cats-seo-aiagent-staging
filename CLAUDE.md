@@ -1,5 +1,18 @@
 # CLAUDE.md — Development Rules
 
+> **⚠️ STAGING REPO — COMPOSIO REMOVED (2026-07-22).** This repo no longer
+> uses Composio anywhere: no `@composio/*` deps, no `.mcp.json`, no
+> `COMPOSIO_API_KEY`. Direct integrations replace it:
+> - **Google Sheets mirror** → `src/pipeline/google-sheets-direct.ts`
+>   (service account via `GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON`)
+> - **Doppler reads** (OpenRouter key self-heal) → Doppler REST API via
+>   `DOPPLER_TOKEN` worker secret
+> - **Editorial screenshots** → Cloudflare Browser Rendering via
+>   `CLOUDFLARE_API_TOKEN_SECRET`
+> - **Quora posting** → permanently dry-run (no public Quora API)
+> Sections below that mention Composio/Rube bootstrap are legacy prod-repo
+> context — do not follow them in this repo.
+
 ## Sandbox Bootstrap
 
 **Every new Claude session running in this repo auto-connects to Composio via `.mcp.json` at the repo root.** That file maps to `https://connect.composio.dev/mcp` with `x-consumer-api-key: ${COMPOSIO_API_KEY}` — this is the official post-Rube endpoint, protocol version `2024-11-05`. After the bootstrap below, Composio tools are available in-session without any CLI.

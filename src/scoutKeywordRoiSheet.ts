@@ -241,7 +241,7 @@ export async function fetchGoogleSpreadsheetSheetTitles(
         onError?.(
           slug,
           new Error(
-            `Composio sheet list returned no parseable tab titles from any endpoint (tried: ${sheetTitleFetchSlugs.join(", ")})`
+            `Sheet list returned no parseable tab titles from any endpoint (tried: ${sheetTitleFetchSlugs.join(", ")})`
           )
         );
       }
