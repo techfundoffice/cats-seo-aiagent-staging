@@ -4739,13 +4739,31 @@ async function searchYouTubeVideo(
 
     const html = await resp.text();
 
-    // Extract video ID from ytInitialData or watch links
-    const videoIdMatch =
-      html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/) ??
-      html.match(/(?:href="\/watch\?v=|\\\/watch\?v=)([a-zA-Z0-9_-]{11})\b/);
+    // Extract candidate (videoId, title) pairs and prefer a cat-relevant
+    // one: a title mentioning cats and not leading with dogs. YouTube
+    // ranks generic pet videos highly for carrier/stroller queries — the
+    // first hit is frequently dog content on what must be a cat page.
+    const candidates: Array<{ id: string; title: string }> = [];
+    const pairRe =
+      /"videoId":"([a-zA-Z0-9_-]{11})"[\s\S]{0,700}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){5,160})"/g;
+    for (const m of html.matchAll(pairRe)) {
+      if (candidates.length >= 10) break;
+      if (!candidates.some((c) => c.id === m[1])) {
+        candidates.push({ id: m[1], title: m[2] });
+      }
+    }
+    const catFirst =
+      candidates.find(
+        (c) =>
+          /\bcats?\b/i.test(c.title) && !/\b(?:dogs?|pupp\w*)\b/i.test(c.title)
+      ) ?? candidates[0];
+    const videoIdMatch = catFirst
+      ? ([catFirst.id, catFirst.id] as RegExpMatchArray)
+      : (html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/) ??
+        html.match(/(?:href="\/watch\?v=|\\\/watch\?v=)([a-zA-Z0-9_-]{11})\b/));
     if (!videoIdMatch) return null;
 
-    const videoId = videoIdMatch[1];
+    const videoId = catFirst ? catFirst.id : videoIdMatch[1];
 
     // Extract title from the same data block
     let title = keyword;

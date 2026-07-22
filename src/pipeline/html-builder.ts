@@ -872,14 +872,17 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
         // like-blurb` defect class at render time regardless of whether
         // Kimi's upstream response contained pickReasons entries.
         // See helper docstring + Step 14.5 detector in writer.ts:2169.
-        const completedReasoning = ensureWhyWeLikeMarker(
-          reasoning?.reasoning ?? "",
-          {
-            label: reasoning?.label,
-            productName: product.displayName,
-            keyword
-          }
-        );
+        // Kimi's pickReasons sometimes chain clauses with "→" arrows,
+        // which reads as machine output in editorial prose. Convert to
+        // natural connectors before rendering.
+        const proseReasoning = (reasoning?.reasoning ?? "")
+          .replace(/\s*(?:→|-{1,2}>)\s*/g, ", ")
+          .replace(/,\s*,/g, ", ");
+        const completedReasoning = ensureWhyWeLikeMarker(proseReasoning, {
+          label: reasoning?.label,
+          productName: product.displayName,
+          keyword
+        });
         const reasoningHtml =
           `<div class="pick-reasoning">` +
           (reasoning?.label

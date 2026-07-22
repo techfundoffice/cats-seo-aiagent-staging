@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enforceTitleLength } from "../keyword-utils";
+import { enforceTitleLength, normalizeTitle } from "../keyword-utils";
 
 // Regression suite for `enforceTitleLength`. The function is called in
 // writer.ts Step 14 immediately before publishing; a silent off-by-one or
@@ -151,5 +151,22 @@ describe("enforceTitleLength — maxChars edge cases", () => {
     const t = "Best Cat Water Fountain: 2026 Review";
     const result = enforceTitleLength(t, "best cat water fountain", 60);
     expect(result).toBe(t);
+  });
+});
+
+describe("normalizeTitle — pipe-segment dedupe", () => {
+  // Regression: live article 2026-07-22 shipped
+  // "Best Premium Cat Carrier with Wheels 2026 | Best Picks 2026" —
+  // the second segment repeats the year and the "Best" framing.
+  it("drops a redundant best/year pipe segment", () => {
+    const t = "Best Premium Cat Carrier with Wheels 2026 | Best Picks 2026";
+    expect(normalizeTitle(t, "premium cat carrier with wheels")).toBe(
+      "Best Premium Cat Carrier with Wheels 2026"
+    );
+  });
+
+  it("keeps an informative pipe segment", () => {
+    const t = "Best Cat Water Fountain 2026 | Buying Guide";
+    expect(normalizeTitle(t, "best cat water fountain")).toBe(t);
   });
 });

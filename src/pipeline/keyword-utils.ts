@@ -239,10 +239,38 @@ export function normalizeTitle(t: string, targetKeyword?: string): string {
       out.toLowerCase().includes(kw) &&
       !collapsed.toLowerCase().includes(kw)
     ) {
-      return out.replace(/\s{2,}/g, " ");
+      return dedupeTitleSegments(out.replace(/\s{2,}/g, " "));
     }
   }
-  return collapsed;
+  return dedupeTitleSegments(collapsed);
+}
+
+/**
+ * Drop pipe-separated title segments that add no new signal. Kimi
+ * sometimes emits "Best X 2026 | Best Picks 2026" — the second segment
+ * re-states the year and the "Best" framing, reading as keyword spam.
+ * A later segment is dropped when it repeats a year already present
+ * earlier, or when both it and the first segment start with Best/Top.
+ * Segments carrying new information ("| Buying Guide") are kept.
+ */
+function dedupeTitleSegments(title: string): string {
+  const parts = title.split(/\s*\|\s*/);
+  if (parts.length < 2) return title;
+  const kept: string[] = [parts[0]];
+  for (const seg of parts.slice(1)) {
+    if (!seg.trim()) continue;
+    const prior = kept.join(" | ");
+    const priorYears = new Set(prior.match(/\b20\d{2}\b/g) ?? []);
+    const repeatsYear = (seg.match(/\b20\d{2}\b/g) ?? []).some((y) =>
+      priorYears.has(y)
+    );
+    const bothLeadWithBest =
+      /^(?:best|top)\b/i.test(seg.trim()) &&
+      /^(?:\d{4}'s\s+)?(?:best|top)\b/i.test(parts[0].trim());
+    if (repeatsYear || bothLeadWithBest) continue;
+    kept.push(seg);
+  }
+  return kept.join(" | ");
 }
 
 /**
