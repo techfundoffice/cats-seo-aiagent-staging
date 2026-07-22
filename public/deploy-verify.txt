@@ -1,1 +1,1 @@
-staging-deploy-verify 223a07f-next 2026-07-22T18:32:42Z
+placeholder — overwritten by CI (Stamp deploy-verify canary step) with '<commit-sha> <build-time>' on every deploy

@@ -23,6 +23,14 @@ jobs:
       - run: npm ci
       - run: npx oxfmt --write .
       - run: npm run check
+
+      # Deploy canary: stamp the public marker with the exact commit + build
+      # time before the asset bundle is built, so
+      # GET /deploy-verify.txt on the live site always answers "which commit
+      # is deployed, and when did it ship?"
+      - name: Stamp deploy-verify canary
+        run: echo "$GITHUB_SHA $(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/deploy-verify.txt
+
       - run: npx vite build
 
       # Wrangler 4.83 returns non-zero (Cloudflare API code 11004
