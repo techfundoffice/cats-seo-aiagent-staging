@@ -189,44 +189,68 @@ async function sweepOneNode(
     return;
   }
 
-  agent.sql`INSERT OR IGNORE INTO categories (slug, name, status, expected_count)
-    VALUES (${categorySlug}, ${node.categoryName}, 'in_progress', 1)`;
-
+  // Route the bestseller-derived keyword through the Scout Database
+  // (KEYWORDS_DB) — the autonomous loop claims it from there like every
+  // other keyword. Real Amazon-demand data, tagged source='top-seller'.
   const keyword = `best ${node.categoryName.toLowerCase()}`;
   const slug = keywordToSlug(keyword);
-  const id = `${categorySlug}:${slug}`;
-  const existingKeyword = agent.sql<{ status: string }>`
-    SELECT status FROM keywords WHERE id = ${id}
-  `;
-
-  if (existingKeyword.length === 0) {
-    // First time this category has ever had a bestseller-derived keyword —
-    // insert it fresh. The existing autonomousLoop / generateArticle
-    // pipeline picks it up on its normal 5-min cadence, including its own
-    // real Amazon product lookup (amazon.ts tiers) — this keyword just
-    // makes sure that lookup is aimed at a category with confirmed real
-    // Amazon demand instead of an LLM guess.
-    agent.sql`INSERT OR IGNORE INTO keywords
-      (id, category_slug, keyword, slug, status, search_volume, keyword_difficulty, cpc)
-      VALUES (${id}, ${categorySlug}, ${keyword}, ${slug}, 'pending', 0, 0, 0)`;
+  const db = agent.envBindings.KEYWORDS_DB;
+  if (!db) {
     agent.log(
-      "info",
-      `Top Seller Scout: seeded new keyword "${keyword}" for node ${node.nodeId} (${asins.length} real bestsellers found)`,
+      "warning",
+      `Top Seller Scout: KEYWORDS_DB binding missing — cannot enqueue "${keyword}"`,
       "topSellerScout"
     );
-  } else if (existingKeyword[0].status === "completed") {
-    // Bestseller lineup changed since the article was last written —
-    // requeue it for a refresh rather than inserting a duplicate row.
-    agent.sql`UPDATE keywords SET status = 'pending' WHERE id = ${id}`;
+    return;
+  }
+  try {
+    const existing = await db
+      .prepare(`SELECT status FROM scout_keywords WHERE slug = ?1`)
+      .bind(slug)
+      .all<{ status: string }>();
+    const row = existing.results?.[0];
+    if (!row) {
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO scout_keywords
+             (keyword, slug, category_slug, category_title, source, status)
+           VALUES (?1, ?2, ?3, ?4, 'top-seller', 'pending')`
+        )
+        .bind(keyword, slug, categorySlug, node.categoryName)
+        .run();
+      agent.log(
+        "info",
+        `Top Seller Scout: seeded "${keyword}" into the Scout DB for node ${node.nodeId} (${asins.length} real bestsellers found)`,
+        "topSellerScout"
+      );
+    } else if (row.status === "published") {
+      // Bestseller lineup changed since the article was last written —
+      // requeue for a refresh rather than inserting a duplicate row.
+      await db
+        .prepare(
+          `UPDATE scout_keywords
+              SET status = 'pending', kv_key = '', error = '',
+                  claimed_at = NULL, finished_at = NULL
+            WHERE slug = ?1`
+        )
+        .bind(slug)
+        .run();
+      agent.log(
+        "info",
+        `Top Seller Scout: bestsellers changed for node ${node.nodeId} (${node.categoryName}) — requeued "${keyword}" in the Scout DB`,
+        "topSellerScout"
+      );
+    } else {
+      agent.log(
+        "info",
+        `Top Seller Scout: bestsellers changed for node ${node.nodeId} but "${keyword}" is already ${row.status} in the Scout DB — leaving as-is`,
+        "topSellerScout"
+      );
+    }
+  } catch (dbErr: unknown) {
     agent.log(
-      "info",
-      `Top Seller Scout: bestsellers changed for node ${node.nodeId} (${node.categoryName}) — requeued "${keyword}" for refresh`,
-      "topSellerScout"
-    );
-  } else {
-    agent.log(
-      "info",
-      `Top Seller Scout: bestsellers changed for node ${node.nodeId} but "${keyword}" is already ${existingKeyword[0].status} — leaving as-is`,
+      "warning",
+      `Top Seller Scout: Scout DB enqueue failed for "${keyword}": ${errMsg(dbErr)}`,
       "topSellerScout"
     );
   }

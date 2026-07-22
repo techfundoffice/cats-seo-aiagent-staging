@@ -2445,23 +2445,26 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       status: "scouting",
       currentCategory: null
     });
-    this.log("info", "Manual scout triggered");
-    const { scoutHighTicketCategory } = await import("./pipeline/scout");
-    const category = await scoutHighTicketCategory(this);
-    if (category) {
+    this.log("info", "Manual scout triggered — claiming from Scout DB");
+    const claimed = await this.claimNextScoutKeyword();
+    if (claimed) {
+      this.enqueueClaimedScoutKeyword(claimed);
       this.log(
         "info",
-        `Discovered: ${category.name} (${category.avgPrice})`,
+        `Scout DB: claimed "${claimed.keyword}" (${claimed.category_slug}) — queued`,
         "analyst",
         {
-          categorySlug: category.slug,
+          categorySlug: claimed.category_slug,
           kanbanStage: "queue"
         }
       );
       this.setState({ ...this.state, status: "idle" });
-      return category;
+      return claimed;
     }
-    this.log("warning", "No new category found");
+    this.log(
+      "warning",
+      "Scout database empty — import keywords via POST /api/admin/keywords/import"
+    );
     this.setState({ ...this.state, status: "idle" });
     return null;
   }
@@ -3084,6 +3087,13 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     },
     errorMessage: string
   ) {
+    // Best-effort Scout-DB write-back (fire-and-forget; matches by slug).
+    void this.updateScoutKeywordOutcome(
+      keywordToSlug(kw.keyword),
+      "failed",
+      "",
+      errorMessage
+    );
     const nextRetryCount = kw.retry_count + 1;
     if (nextRetryCount >= MAX_KEYWORD_RETRIES) {
       this
@@ -3115,6 +3125,105 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       lastSeoScorecardQcPromptCells: null
     });
     this.clearSheetStepColumnECache();
+  }
+
+  /**
+   * Atomically claim the highest-priority pending keyword from the Scout
+   * Database (KEYWORDS_DB D1). Returns null when the queue is empty — the
+   * scout NEVER invents keywords; rows arrive only via
+   * POST /api/admin/keywords/import (or a future refill-producer).
+   */
+  private async claimNextScoutKeyword(): Promise<{
+    keyword: string;
+    slug: string;
+    category_slug: string;
+    category_title: string;
+  } | null> {
+    const db = this.env.KEYWORDS_DB;
+    if (!db) {
+      this.log(
+        "warning",
+        "Scout DB unavailable (KEYWORDS_DB binding missing) — cannot claim keywords",
+        "analyst"
+      );
+      return null;
+    }
+    try {
+      const res = await db
+        .prepare(
+          `UPDATE scout_keywords
+              SET status = 'generating', claimed_at = datetime('now')
+            WHERE id = (SELECT id FROM scout_keywords
+                         WHERE status = 'pending'
+                         ORDER BY priority DESC, volume DESC, id ASC
+                         LIMIT 1)
+            RETURNING keyword, slug, category_slug, category_title`
+        )
+        .all<{
+          keyword: string;
+          slug: string;
+          category_slug: string;
+          category_title: string;
+        }>();
+      return res.results?.[0] ?? null;
+    } catch (err: unknown) {
+      this.log("warning", `Scout DB claim failed: ${errMsg(err)}`, "analyst");
+      return null;
+    }
+  }
+
+  /**
+   * Best-effort outcome write-back to the Scout Database. Matches by
+   * slug; a row that was never claimed from the DB (e.g. a manual
+   * generateOne with a novel keyword) is simply not present and the
+   * UPDATE is a no-op. Never throws.
+   */
+  private async updateScoutKeywordOutcome(
+    slug: string,
+    status: "published" | "failed",
+    kvKey: string,
+    error: string
+  ): Promise<void> {
+    const db = this.env.KEYWORDS_DB;
+    if (!db) return;
+    try {
+      await db
+        .prepare(
+          `UPDATE scout_keywords
+              SET status = ?1, kv_key = ?2, error = ?3,
+                  finished_at = datetime('now')
+            WHERE slug = ?4 AND status = 'generating'`
+        )
+        .bind(status, kvKey, error.slice(0, 500), slug)
+        .run();
+    } catch (err: unknown) {
+      this.log(
+        "warning",
+        `Scout DB outcome write-back failed for ${slug}: ${errMsg(err)}`,
+        "analyst"
+      );
+    }
+  }
+
+  /**
+   * Copy a claimed Scout-DB row into the DO's runtime tables so the
+   * existing 24-step pipeline runs unchanged.
+   */
+  private enqueueClaimedScoutKeyword(claimed: {
+    keyword: string;
+    slug: string;
+    category_slug: string;
+    category_title: string;
+  }): void {
+    const categoryName =
+      claimed.category_title.trim() || claimed.category_slug.replace(/-/g, " ");
+    this.sql`INSERT OR IGNORE INTO categories (slug, name, status)
+      VALUES (${claimed.category_slug}, ${categoryName}, 'in_progress')`;
+    const runtimeSlug = keywordToSlug(claimed.keyword);
+    const id = `${claimed.category_slug}:${runtimeSlug}`;
+    this
+      .sql`INSERT OR IGNORE INTO keywords (id, category_slug, keyword, slug, status)
+      VALUES (${id}, ${claimed.category_slug}, ${claimed.keyword}, ${runtimeSlug}, 'pending')`;
   }
 
   async autonomousLoop() {
@@ -3155,46 +3264,49 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         // #endregion
 
         if (pending.length === 0) {
-          // No pending keywords — scout a new category
+          // No pending runtime keywords — claim the next one from the
+          // Scout Database. The scout never invents keywords: an empty
+          // queue means the loop idles until keywords are imported.
           this.setState({
             ...this.state,
             status: "scouting",
             currentCategory: null
           });
-          const { scoutHighTicketCategory } = await import("./pipeline/scout");
-          const category = await scoutHighTicketCategory(this);
+          const claimed = await this.claimNextScoutKeyword();
           // #region agent log
           emitAgentDebugLog(this, {
             hypothesisId: "H1",
             location: "server.ts:autonomousLoop:scout",
-            message: "scout_result",
+            message: "scout_db_claim",
             data: {
-              categoryFound: Boolean(category),
-              categorySlug: category?.slug ?? null
+              claimed: Boolean(claimed),
+              slug: claimed?.slug ?? null,
+              categorySlug: claimed?.category_slug ?? null
             },
             runId: "pre-fix"
           });
           // #endregion
-          if (!category) {
+          if (!claimed) {
             this.log(
               "info",
-              "No categories to discover — idling",
+              "Scout database empty — import keywords via POST /api/admin/keywords/import — idling",
               "orchestrator",
               { kanbanStage: "done" }
             );
             this.setState({ ...this.state, status: "idle" });
             return;
           }
+          this.enqueueClaimedScoutKeyword(claimed);
           this.log(
             "info",
-            `Discovered: ${category.name} — keywords queued`,
+            `Scout DB: claimed "${claimed.keyword}" (${claimed.category_slug}) — queued`,
             "analyst",
             {
               kanbanStage: "queue",
-              categorySlug: category.slug
+              categorySlug: claimed.category_slug
             }
           );
-          // Next loop iteration will pick up the keywords
+          // Next loop iteration will pick up the keyword
           return;
         }
 
@@ -3290,6 +3402,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             (result.seoScore ?? 0) === 0 && (result.wordCount ?? 0) === 0;
           this
             .sql`UPDATE keywords SET status='completed', seo_score=${result.seoScore ?? 0} WHERE id=${kw.id}`;
+          await this.updateScoutKeywordOutcome(
+            kw.slug,
+            "published",
+            result.kvKey ?? "",
+            ""
+          );
           if (!skipped) {
             this
               .sql`INSERT OR IGNORE INTO articles (slug, category_slug, keyword, kv_key, url, seo_score, word_count)
