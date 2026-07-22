@@ -21,7 +21,7 @@
  * `POST /api/admin/editorial-review` with `{ kvKey, referenceUrl? }`.
  */
 
-import { parseObjectLike, unwrapSingleItemArray } from "../objectLike";
+import { parseObjectLike } from "../objectLike";
 import type { SEOArticleAgent } from "../server";
 import { extractKeywordPriceTokens, stripPricesFromHtml } from "./html-builder";
 import { runKimiWithPoll } from "./kimi-model";
@@ -1623,36 +1623,4 @@ function sanitizeStringArray(raw: unknown): string[] {
     .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     .map((v) => v.trim())
     .slice(0, 6);
-}
-
-function collectRenderedText(raw: unknown): string {
-  if (typeof raw === "string") return raw.trim();
-  if (Array.isArray(raw)) {
-    return raw
-      .map((value) => collectRenderedText(value))
-      .filter(Boolean)
-      .join("\n");
-  }
-  if (!raw || typeof raw !== "object") return "";
-
-  const obj = raw as Record<string, unknown>;
-  const preferredFields = [
-    "text",
-    "content",
-    "renderedText",
-    "visibleText",
-    "bodyText",
-    "extractedText",
-    "markdown"
-  ];
-  const preferredText = preferredFields
-    .map((key) => collectRenderedText(obj[key]))
-    .filter(Boolean)
-    .join("\n");
-  if (preferredText) return preferredText;
-
-  return Object.values(obj)
-    .map((value) => collectRenderedText(value))
-    .filter(Boolean)
-    .join("\n");
 }

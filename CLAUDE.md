@@ -3,6 +3,7 @@
 > **⚠️ STAGING REPO — COMPOSIO REMOVED (2026-07-22).** This repo no longer
 > uses Composio anywhere: no `@composio/*` deps, no `.mcp.json`, no
 > `COMPOSIO_API_KEY`. Direct integrations replace it:
+>
 > - **Google Sheets mirror** → `src/pipeline/google-sheets-direct.ts`
 >   (service account via `GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON`)
 > - **Doppler reads** (OpenRouter key self-heal) → Doppler REST API via
@@ -10,8 +11,8 @@
 > - **Editorial screenshots** → Cloudflare Browser Rendering via
 >   `CLOUDFLARE_API_TOKEN_SECRET`
 > - **Quora posting** → permanently dry-run (no public Quora API)
-> Sections below that mention Composio/Rube bootstrap are legacy prod-repo
-> context — do not follow them in this repo.
+>   Sections below that mention Composio/Rube bootstrap are legacy prod-repo
+>   context — do not follow them in this repo.
 
 ## Sandbox Bootstrap
 

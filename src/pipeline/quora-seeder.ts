@@ -2,7 +2,7 @@ import { generateText } from "ai";
 import type { SEOArticleAgent } from "../server";
 import { formatActivityLogModelPromptCell } from "../activityLogSheetColumns";
 import { getKimiModel, getKimiProviderOptions } from "./kimi-model";
-import { errMsg, getEnvBinding, normalizeSingleLine } from "./http-utils";
+import { errMsg, getEnvBinding } from "./http-utils";
 
 /**
  * Step 21/24 — Quora Answer Seeder.
