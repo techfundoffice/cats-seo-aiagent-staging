@@ -58,3 +58,5 @@ npx wrangler deploy    # deploys cats-seo-aiagent-staging (default wrangler.json
 
 Or push to `main` and let `.github/workflows/deploy.yml` run it.
 
+
+<!-- ci-trigger: verify push->Actions deploy wiring -->
