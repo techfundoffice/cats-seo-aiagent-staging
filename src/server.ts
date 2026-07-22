@@ -2689,6 +2689,34 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           lastSeoScorecardQcPromptCells: null
         });
       }
+      // Full success bookkeeping — identical to the autonomous loop's
+      // path. Without this, generateOne-published articles never reached
+      // the dashboard: articlesGenerated stayed frozen, the DO articles
+      // table (dashboard data + analytics tick source) never got a row,
+      // the keyword stayed pending, and the Scout DB outcome was never
+      // written.
+      const skipped =
+        (result.seoScore ?? 0) === 0 && (result.wordCount ?? 0) === 0;
+      const kwId = `${category}:${slug}`;
+      this
+        .sql`UPDATE keywords SET status='completed', seo_score=${result.seoScore ?? 0} WHERE id=${kwId}`;
+      if (!skipped) {
+        this
+          .sql`INSERT OR IGNORE INTO articles (slug, category_slug, keyword, kv_key, url, seo_score, word_count)
+          VALUES (${slug}, ${category}, ${keyword}, ${result.kvKey ?? ""}, ${result.url ?? ""}, ${result.seoScore ?? 0}, ${result.wordCount ?? 0})`;
+        this
+          .sql`UPDATE categories SET article_count = article_count + 1 WHERE slug=${category}`;
+        this.setState({
+          ...this.state,
+          articlesGenerated: this.state.articlesGenerated + 1
+        });
+      }
+      await this.updateScoutKeywordOutcome(
+        slug,
+        "published",
+        result.kvKey ?? "",
+        ""
+      );
       const mirrorCompetitorUrl = this.state.currentCompetitorUrl?.trim() ?? "";
       this.log(
         "info",
@@ -2732,6 +2760,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
       );
     } else {
+      this.setState({
+        ...this.state,
+        articlesFailed: this.state.articlesFailed + 1
+      });
+      void this.updateScoutKeywordOutcome(
+        slug,
+        "failed",
+        "",
+        result.error ?? "unknown"
+      );
       this.log(
         "error",
         `generateOne failed: ${result.error ?? "unknown"}`,

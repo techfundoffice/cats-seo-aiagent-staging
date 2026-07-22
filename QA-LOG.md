@@ -35,6 +35,7 @@ and the deliberate improvement carried into the next iteration.
   Amazon display name.
 
 ## Iteration 3 — best-cat-carrier-for-two-cats (Grok 4.5 trial)
+
 - Writer switched to x-ai/grok-4.5 (54798e5 model-aware reasoning +
   worker secret). ALL 8 CHECKS PASS. Score 95, 3343 words, ~5 min.
 - Title "One Clear Pick" — single-product pattern followed exactly.
@@ -43,11 +44,13 @@ and the deliberate improvement carried into the next iteration.
 - User-merged PR #1 (content-quality analyzers) rode along cleanly.
 
 ## Iteration 4 — (pending)
+
 - Fix shipped: data-driven fallback blurb (rating/reviews/feature
   woven in, marker sentence last; period-safety on feature clause).
 - Plan: generate next article, verify blurb richness visually.
 
 ## Model gauntlet (2026-07-22, 780-820-word window test)
+
 - sonnet-5: 783w ✅ 59 tok/s | gemini-3-flash: 979w ❌ +20% but 116 tok/s
 - qwen3-max 797 ✅ 42 | grok-4.5 799 ✅ 47 | kimi:nitro 817 ✅ 32
 - gpt-5-mini 750 under ⚠️ | deepseek-v4-pro 1156 ❌ | gemini-3-pro absent
