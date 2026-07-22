@@ -187,3 +187,34 @@ describe("buildArticleHtml — missing-why-we-like-blurb regression guard", () =
     expect(html).toMatch(/Why we like this pick:/i);
   });
 });
+
+describe("ensureWhyWeLikeMarker — data-driven fallback enrichment", () => {
+  it("weaves rating, reviews and a feature into the fallback, marker last", () => {
+    const out = ensureWhyWeLikeMarker("", {
+      productName: "Groxkox Cat Carrier for 2 Cats",
+      keyword: "best cat carrier for two cats",
+      ratingValue: 4.5,
+      reviewCount: 1234,
+      features:
+        "Foldable double-compartment design with removable divider | mesh windows"
+    });
+    const sentences = out.split(/(?<=\.)\s+/);
+    expect(out).toContain("Rated 4.5/5 across 1,234 buyer reviews");
+    expect(out).toContain(
+      "Standout detail: Foldable double-compartment design"
+    );
+    expect(
+      sentences[sentences.length - 1].startsWith("Why we like this pick:")
+    ).toBe(true);
+  });
+
+  it("omits enrichment when product data is absent (legacy behavior)", () => {
+    const out = ensureWhyWeLikeMarker("", {
+      productName: "Some Carrier",
+      keyword: "best cat carrier"
+    });
+    expect(out).toBe(
+      "Why we like this pick: the Some Carrier covers what buyers look for in best cat carrier."
+    );
+  });
+});

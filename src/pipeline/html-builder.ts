@@ -42,7 +42,14 @@ const WHY_WE_LIKE_REGEX = /Why\s+we\s+like\s+this\s+pick\s*:/i;
 
 export function ensureWhyWeLikeMarker(
   reasoning: string,
-  context: { label?: string; productName?: string; keyword: string }
+  context: {
+    label?: string;
+    productName?: string;
+    keyword: string;
+    ratingValue?: number;
+    reviewCount?: number;
+    features?: string;
+  }
 ): string {
   const text = reasoning.trim();
   if (WHY_WE_LIKE_REGEX.test(text)) return text;
@@ -66,7 +73,34 @@ export function ensureWhyWeLikeMarker(
   const closingLine = label
     ? `${WHY_WE_LIKE_MARKER} ${subject} is a strong ${label.toLowerCase()} for ${keyword || "this category"}.`
     : `${WHY_WE_LIKE_MARKER} ${subject} covers what buyers look for in ${keyword || "this category"}.`;
-  return text ? `${text} ${closingLine}` : closingLine;
+  // Data-driven enrichment: when the model omitted pickReasons entirely
+  // (observed with both Kimi and Grok), a bare one-liner reads thin next
+  // to the product card. Real rating/review/feature data makes the
+  // fallback editorial instead of templated. The marker sentence stays
+  // LAST — the blurb convention is that the final sentence begins with
+  // "Why we like this pick:".
+  const extras: string[] = [];
+  if (
+    typeof context.ratingValue === "number" &&
+    context.ratingValue > 0 &&
+    typeof context.reviewCount === "number" &&
+    context.reviewCount > 0
+  ) {
+    extras.push(
+      `Rated ${context.ratingValue}/5 across ${context.reviewCount.toLocaleString("en-US")} buyer reviews, it's a proven choice rather than a gamble.`
+    );
+  }
+  const firstFeature = (context.features ?? "").split(/[|;•\n]/)[0]?.trim();
+  if (firstFeature && firstFeature.length >= 20) {
+    const clipped = `${firstFeature.slice(0, 140)}${firstFeature.length > 140 ? "…" : ""}`;
+    extras.push(
+      /[.!?…]$/.test(clipped)
+        ? `Standout detail: ${clipped}`
+        : `Standout detail: ${clipped}.`
+    );
+  }
+  const parts = [text, ...extras, closingLine].filter(Boolean);
+  return parts.join(" ");
 }
 
 /**

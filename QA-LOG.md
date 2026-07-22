@@ -21,10 +21,28 @@ and the deliberate improvement carried into the next iteration.
   (31.8 → 37.8 tok/s; kimi-k3 slower at 5.3x price; kimi-latest not a
   callable ID).
 
-## Iteration 2 — (pending)
+## Iteration 2 — lightweight-cat-carrier-for-elderly-owners
 
 - Fixes shipped this iteration: title pipe-segment dedupe
   (normalizeTitle), blurb arrow → prose connectors (html-builder),
   cat-preferring YouTube pick (writer).
 - Plan: generate next article (expect first Scout-DB claim once runtime
   backlog drains), full 8-point check INCLUDING log health.
+
+- RESULT: ALL 8 CHECKS PASS. Score 97, 7832 words, product_count 1,
+  0 error rows. Title fixes + cat-video fix visually confirmed.
+- NITS: templated fallback blurb (model omitted pickReasons); spammy
+  Amazon display name.
+
+## Iteration 3 — best-cat-carrier-for-two-cats (Grok 4.5 trial)
+- Writer switched to x-ai/grok-4.5 (54798e5 model-aware reasoning +
+  worker secret). ALL 8 CHECKS PASS. Score 95, 3343 words, ~5 min.
+- Title "One Clear Pick" — single-product pattern followed exactly.
+- DIAGNOSED: fallback blurb root cause = model omits pickReasons key
+  entirely (verified via /api/admin/kimi-raw). Affects Kimi AND Grok.
+- User-merged PR #1 (content-quality analyzers) rode along cleanly.
+
+## Iteration 4 — (pending)
+- Fix shipped: data-driven fallback blurb (rating/reviews/feature
+  woven in, marker sentence last; period-safety on feature clause).
+- Plan: generate next article, verify blurb richness visually.
