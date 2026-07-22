@@ -130,4 +130,26 @@ describe("enforceTitleLength — maxChars edge cases", () => {
     const result = enforceTitleLength(t, undefined, 0);
     expect(result).toBe("");
   });
+
+  // Regression: live article 2026-07-22 shipped the title
+  // "2026's Best Top Entry Cat Carrier for Anxious Cats: One" — the
+  // ": One Clear Winner" suffix clause was sheared mid-phrase, leaving a
+  // dangling "One". A truncation that cuts inside a colon-clause must
+  // drop the whole clause.
+  it("drops a colon-suffix clause sheared mid-phrase by truncation", () => {
+    const t =
+      "2026's Best Top Entry Cat Carrier for Anxious Cats: One Clear Winner";
+    const result = enforceTitleLength(
+      t,
+      "top entry cat carrier for anxious cats",
+      60
+    );
+    expect(result).toBe("2026's Best Top Entry Cat Carrier for Anxious Cats");
+  });
+
+  it("keeps a colon-suffix clause that fits entirely", () => {
+    const t = "Best Cat Water Fountain: 2026 Review";
+    const result = enforceTitleLength(t, "best cat water fountain", 60);
+    expect(result).toBe(t);
+  });
 });

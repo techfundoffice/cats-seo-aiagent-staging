@@ -290,7 +290,27 @@ export function enforceTitleLength(
     t = t.slice(0, cut).trim();
   }
   // Strip dangling punctuation from the cut edge.
-  return t.replace(/[\s,:;\-—]+$/g, "");
+  t = t.replace(/[\s,:;\-—]+$/g, "");
+  // If truncation sheared a suffix clause mid-phrase (e.g. ": One Clear
+  // Winner" cut down to ": One"), drop the whole clause rather than ship
+  // a dangling fragment. Only fires when we actually truncated; `t` is
+  // always a prefix of the trimmed original, so indexes align.
+  const original = title.trim();
+  if (t.length < original.length) {
+    const colonIdx = t.lastIndexOf(":");
+    if (colonIdx > 0) {
+      const origAfter = original.slice(colonIdx + 1).trim();
+      const keptAfter = t.slice(colonIdx + 1).trim();
+      if (
+        keptAfter &&
+        keptAfter.length < origAfter.length &&
+        origAfter.toLowerCase().startsWith(keptAfter.toLowerCase())
+      ) {
+        t = t.slice(0, colonIdx).replace(/[\s,:;\-—]+$/g, "");
+      }
+    }
+  }
+  return t;
 }
 
 /**
