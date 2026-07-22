@@ -109,7 +109,9 @@ describe("fetchViaApify (junglee Amazon-crawler)", () => {
     expect(products[1].url).toContain("/dp/B0DZWWPGDN?tag=catsluvus03-20");
 
     // dog-only and invalid ASIN excluded
-    expect(products.every((p) => /^[A-Z0-9]{10}$/.test(p.asin))).toBe(true);
+    expect(products.every((p) => /^[A-Z0-9]{10}$/.test(p.asin ?? ""))).toBe(
+      true
+    );
     expect(products.some((p) => /dog/i.test(p.name))).toBe(false);
   });
 
