@@ -994,6 +994,19 @@ async function generateArticleUnsafe(
         price: undefined,
         priceValue: undefined
       }));
+
+      // Single-product specialization: each article features EXACTLY ONE
+      // product — the top pick after dedupe — and the copy focuses
+      // entirely on it (see the SINGLE-PRODUCT directive in
+      // buildArticlePrompt). Multi-pick roundups are retired on staging.
+      if (products.length > 1) {
+        agent.log(
+          "info",
+          `Amazon: single-product mode — featuring "${(products[0].name ?? "").slice(0, 60)}" (dropping ${products.length - 1} other pick${products.length === 2 ? "" : "s"})`,
+          "productManager"
+        );
+        products = products.slice(0, 1);
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3704,12 +3717,19 @@ function buildArticlePrompt(
   // Rotate through 3 proven high-CTR formats per content type so Google
   // sees variety across the site (avoids duplicate-template footprint).
   const titlePatternSeed = keyword.length % 3; // deterministic, not random
+  const singleProduct = products.length === 1;
   const titlePattern = hasProducts
-    ? [
-        `Best [Keyword] of ${currentYear}: Top ${Math.min(products.length || 7, 10)} Picks Compared`,
-        `Best [Keyword] (${currentYear}): Editor's Comparison & Top Picks`,
-        `${currentYear}'s Best [Keyword]: Top Picks & Buying Guide`
-      ][titlePatternSeed]
+    ? singleProduct
+      ? [
+          `Best [Keyword] of ${currentYear}: Our Top Pick Reviewed`,
+          `Best [Keyword] (${currentYear}): In-Depth Review of the #1 Pick`,
+          `${currentYear}'s Best [Keyword]: One Clear Winner`
+        ][titlePatternSeed]
+      : [
+          `Best [Keyword] of ${currentYear}: Top ${Math.min(products.length || 7, 10)} Picks Compared`,
+          `Best [Keyword] (${currentYear}): Editor's Comparison & Top Picks`,
+          `${currentYear}'s Best [Keyword]: Top Picks & Buying Guide`
+        ][titlePatternSeed]
     : [
         `The Complete [Keyword] Guide (${currentYear}): What You Need to Know`,
         `[Keyword]: The Complete ${currentYear} Guide for Cat Owners`,
@@ -3740,7 +3760,12 @@ WORD COUNT REQUIREMENT (READ FIRST):
 - Each FAQ answer MUST be ${faqMinWords}-${faqMaxWords} words
 - This article will be AUTOMATICALLY REJECTED if it is under ${minRequired} words — count carefully
 
-${productGrounding}
+${productGrounding}${
+    singleProduct
+      ? `
+- SINGLE-PRODUCT SPECIALIZATION: this article features EXACTLY ONE product. Write the entire article as a deep, focused review of that one product for the keyword's use case — no comparisons to other named products, no runner-up or alternatives sections. Every section should build the case for (or honestly qualify) this single pick: who it fits, who it doesn't, real-world usage detail, maintenance, and value.`
+      : ""
+  }
 ${competitorBlock}
 ${competitorHeadingsBlock}
 ${competitorTitles}
