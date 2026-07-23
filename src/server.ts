@@ -5412,6 +5412,31 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // POST /api/admin/gsc-sync — pull the last-28-day Search Console
+      // page report for the production property and write impressions /
+      // clicks / CTR / avg position onto article_ledger rows. Manual
+      // trigger for now (crons stay off on staging); run after enabling
+      // the Search Console API or whenever fresh numbers are wanted.
+      if (url.pathname === "/api/admin/gsc-sync" && request.method === "POST") {
+        const db = this.envBindings.KEYWORDS_DB;
+        if (!db) {
+          return Response.json(
+            { ok: false, error: "KEYWORDS_DB binding missing" },
+            { status: 500 }
+          );
+        }
+        const { runGscSync } = await import("./pipeline/gsc-sync");
+        const result = await runGscSync(this.envBindings, db);
+        this.log(
+          result.ok ? "info" : "warning",
+          result.ok
+            ? `GSC sync: ${result.rows} page rows from ${result.property}; ${result.matched} matched to ledger; totals ${result.totals?.impressions} impressions / ${result.totals?.clicks} clicks (28d)`
+            : `GSC sync failed: ${result.error}`,
+          "analyst"
+        );
+        return Response.json(result, { status: result.ok ? 200 : 502 });
+      }
+
       // POST /api/admin/purge-pending-keywords — delete the runtime
       // keyword backlog (status='pending' rows in the DO-local `keywords`
       // table). These are legacy LLM-invented long-tail variations; the
