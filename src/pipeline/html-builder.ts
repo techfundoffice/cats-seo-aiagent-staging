@@ -306,6 +306,22 @@ export function buildHowToSchema(
  */
 const PICK_IMAGE_SIZE_PX = 120;
 
+/**
+ * "Cats Luv Us Best Pick" award seal for the #1 pick's product image.
+ * Deterministic inline SVG — never AI-generated (diffusion models mangle
+ * written text) — in site colors: navy seal, pink ring, gold award line.
+ * Deliberately year-free so the badge never goes stale. Rendered inside
+ * the affiliate anchor, so clicking the seal is also a purchase link.
+ */
+export const PICK_AWARD_BADGE_SVG =
+  `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cats Luv Us Best Pick award">` +
+  `<circle cx="32" cy="32" r="30" fill="#1d2a5e" stroke="#e91e8c" stroke-width="3"/>` +
+  `<circle cx="32" cy="32" r="25" fill="none" stroke="#ffffff" stroke-width="1" stroke-dasharray="2.5 2.5" opacity="0.55"/>` +
+  `<text x="32" y="25" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="7" font-weight="700" fill="#ffffff" letter-spacing="0.6">CATS LUV US</text>` +
+  `<text x="32" y="38" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10.5" font-weight="800" fill="#ffd166">BEST</text>` +
+  `<text x="32" y="49" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10.5" font-weight="800" fill="#ffd166">PICK</text>` +
+  `</svg>`;
+
 const PRICE_PATTERNS: readonly RegExp[] = [
   // $19, $19.99, $1500, $1,499, $ 19
   /\$\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?\b/g,
@@ -876,15 +892,23 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
         // image above the button in a CTA column. Both anchors share
         // `amazonUrl` so the affiliate tag cannot drift between them.
         // Missing imageUrl → emit the button alone, byte-identical to
-        // the prior render.
+        // the prior render. The #1 pick's image additionally carries the
+        // "Cats Luv Us Best Pick" award seal (deliberately year-free) —
+        // it lives INSIDE the anchor, so the award itself is a purchase
+        // link like the rest of the card.
         let ctaHtml: string;
         if (product.imageUrl) {
           const safeAlt = escapeHtml(productName);
+          const awardHtml =
+            idx === 0
+              ? `<span class="pick-award" aria-hidden="true">${PICK_AWARD_BADGE_SVG}</span>`
+              : "";
           const imageLinkHtml =
             `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" ` +
             `class="pick-image-link" aria-label="View ${safeAlt} on Amazon" tabindex="-1">` +
             `<img class="pick-image" src="${escapeHtml(product.imageUrl)}" alt="${safeAlt}" ` +
             `width="${PICK_IMAGE_SIZE_PX}" height="${PICK_IMAGE_SIZE_PX}" loading="lazy" decoding="async">` +
+            awardHtml +
             `</a>`;
           ctaHtml = `<div class="pick-cta">${imageLinkHtml}${amazonBtnHtml}</div>`;
         } else {
@@ -1347,7 +1371,9 @@ article *{max-width:100%}
 .amazon-btn{display:inline-flex;align-items:center;padding:8px 16px;background:#f0c040;color:#111;border-radius:6px;text-decoration:none;font-weight:700;font-size:13px;white-space:nowrap;word-break:normal;overflow-wrap:normal;flex-shrink:0;transition:background 0.2s}
 .amazon-btn:hover{background:#e6b020}
 .pick-cta{flex-shrink:0;display:flex;flex-direction:column;align-items:stretch;gap:10px;max-width:140px}
-.pick-image-link{display:block;line-height:0;border-radius:6px;overflow:hidden}
+.pick-image-link{display:block;line-height:0;border-radius:6px;position:relative}
+.pick-award{position:absolute;top:-10px;left:-10px;width:54px;height:54px;line-height:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.3));pointer-events:none}
+.pick-award svg{width:100%;height:100%;display:block}
 .pick-image{width:${PICK_IMAGE_SIZE_PX}px;height:${PICK_IMAGE_SIZE_PX}px;object-fit:contain;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:4px;display:block}
 .pick-image-link:hover .pick-image{border-color:#cbd5e0}
 
