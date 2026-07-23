@@ -1047,7 +1047,10 @@ ${products
       // and even mentioning them upstream encourages Kimi to hallucinate
       // dollar amounts in prose. Live prices are only on the affiliate
       // link itself.
-      `${i + 1}. [PRODUCT_${i + 1}] = "${p.displayName}"${p.asin ? ` (ASIN: ${p.asin})` : ""}`
+      // No ASIN — the model never needs it (slot hydration and affiliate
+      // links are attached server-side from product data), and exposing it
+      // teaches the model to parrot "(B0XXXXXXXX)" into visible prose.
+      `${i + 1}. [PRODUCT_${i + 1}] = "${p.displayName}"`
     ];
     if (p.brand) lines.push(`   Brand: ${p.brand}`);
     if (p.rating)
@@ -1061,6 +1064,27 @@ ${products
   .join("\n\n")}
 
 IMPORTANT: Use [PRODUCT_1], [PRODUCT_2], etc. in your article. They will be replaced with real product names.`;
+}
+
+/**
+ * Strip parenthetical ASIN leaks from customer-facing prose. The model
+ * sometimes parrots the product identifier as "(ASIN: B0XXXXXXXX)" or a
+ * bare "(B0XXXXXXXX)" next to a product name — catalog metadata that
+ * belongs on the affiliate link only, never in visible copy.
+ */
+export function stripAsinParentheticals(text: string): {
+  text: string;
+  removed: number;
+} {
+  let removed = 0;
+  const cleaned = text.replace(
+    /\s*\(\s*(?:ASIN[:\s]*)?B0[A-Z0-9]{8}\s*\)/g,
+    () => {
+      removed++;
+      return "";
+    }
+  );
+  return { text: cleaned, removed };
 }
 
 /**

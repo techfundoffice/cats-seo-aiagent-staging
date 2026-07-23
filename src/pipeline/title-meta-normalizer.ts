@@ -209,14 +209,26 @@ function padTitleToMin(
       : "Best Picks";
   // Iteratively append pads of decreasing specificity until ≥ MIN.
   // Each pad is in title-case + ends without trailing punct so the
-  // composed string is naturally readable.
-  const pads = [
-    ` | Best Picks ${year}`,
-    ` — Complete Buyer's Guide`,
-    ` for Every Cat Owner`,
-    ` — Curated Recommendations`,
-    ` ${year}`
-  ];
+  // composed string is naturally readable. When the base already leads
+  // with Best/Top, the " | Best Picks" pad would recreate the exact
+  // double-"Best" spam segment dedupeTitleSegments (keyword-utils)
+  // exists to strip — pad those titles with an informative segment
+  // instead ("Buying Guide" is the canonical keeper there).
+  const leadsWithBest = /^(?:best|top)\b/i.test(candidate.trim());
+  const pads = leadsWithBest
+    ? [
+        ` — Buying Guide ${year}`,
+        ` for Every Cat Owner`,
+        ` — Curated Recommendations`,
+        ` ${year}`
+      ]
+    : [
+        ` | Best Picks ${year}`,
+        ` — Complete Buyer's Guide`,
+        ` for Every Cat Owner`,
+        ` — Curated Recommendations`,
+        ` ${year}`
+      ];
   for (const p of pads) {
     if (candidate.length >= TITLE_MIN_CHARS) break;
     candidate = `${candidate}${p}`;

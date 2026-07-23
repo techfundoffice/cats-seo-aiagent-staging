@@ -33,6 +33,7 @@ import {
   dedupeProducts,
   buildProductPromptText,
   hydrateProductSlots,
+  stripAsinParentheticals,
   type AmazonProduct
 } from "./amazon";
 import { analyzeSERP, computeTargetWordCount, type SerpData } from "./serp";
@@ -1936,6 +1937,7 @@ async function generateArticleUnsafe(
       "it's important to note"
     ];
     let slopCount = 0;
+    let asinLeakCount = 0;
     const cleanField = (text: string): string => {
       let cleaned = text;
       for (const phrase of slopPhrases) {
@@ -1947,6 +1949,11 @@ async function generateArticleUnsafe(
       // Strip Kimi-fabricated "Editorial Note:" / "Editorial Integrity
       // Note:" blocks (false E-E-A-T claims about physical testing).
       cleaned = stripEditorialNoteFabrication(cleaned);
+      // Strip parenthetical ASIN leaks ("(B0XXXXXXXX)") the model copies
+      // from product grounding into visible prose.
+      const asinStrip = stripAsinParentheticals(cleaned);
+      asinLeakCount += asinStrip.removed;
+      cleaned = asinStrip.text;
       return cleaned.replace(/\s{2,}/g, " ").trim();
     };
 
@@ -1999,13 +2006,23 @@ async function generateArticleUnsafe(
     // "[PRODUCT_1]" to the reader.
     for (const pr of article.pickReasons || []) {
       const result = hydrateProductSlots(pr.reasoning, products);
-      pr.reasoning = result.text;
+      // Pick-card blurbs bypass cleanField above, so strip ASIN leaks here
+      // too — this is exactly where "(B0XXXXXXXX)" reached a live blurb.
+      const asinStrip = stripAsinParentheticals(result.text);
+      asinLeakCount += asinStrip.removed;
+      pr.reasoning = asinStrip.text.replace(/\s{2,}/g, " ").trim();
       totalSlots += result.slotsReplaced;
     }
     if (totalSlots > 0) {
       agent.log(
         "info",
         `Product hydration: ${totalSlots} slots replaced with real names`
+      );
+    }
+    if (asinLeakCount > 0) {
+      agent.log(
+        "info",
+        `ASIN leak strip: removed ${asinLeakCount} parenthetical ASIN(s) from prose`
       );
     }
 

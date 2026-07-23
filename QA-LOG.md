@@ -58,8 +58,37 @@ and the deliberate improvement carried into the next iteration.
   prose tier + 2x Kimi speed). Secret-only switch; revert = 1 change.
 
 ## Model decision (2026-07-23)
+
 - User decision: writer stays moonshotai/kimi-k2.5:nitro (code default;
   OPENROUTER_KIMI_MODEL override secret deleted). Rationale: pipeline QC
   flattens model quality deltas; Kimi is the proven cheapest reliable
   option. Sonnet-5/Grok/Gemini remain one secret change away.
 - Trial ledger: kimi 92/97, grok 95, sonnet-5 97 — all 8-check passes.
+
+## Iteration — 2026-07-23 (loop restart): quiet cat carrier for skittish kittens
+
+- URL: /cat-large-cat-travel-carrier/quiet-cat-carrier-for-skittish-kittens
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed)
+- Checklist: 8/8 PASS. Ledger: score 93, 2094 words, 1 product. 3m48s claim→publish.
+- Notes: first article on the parallel research fan-out (655dba1) — steps 2–6
+  completed in ~6s. OpenRouter timed out mid-write; Workers AI fallback wrote it.
+  Dashboard counter fix proven (2544→2545).
+- Consecutive clean: 1/3.
+
+## Iteration — 2026-07-23: cat carrier backpack for hiking
+
+- URL: /cat-large-cat-travel-carrier/cat-carrier-backpack-for-hiking
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed)
+- Checklist: FAIL on #1 (title) and #7 (content leakage). Ledger: score 94,
+  2521 words, 1 product. 3m28s claim→publish.
+- Defect A: "(B07KHPLFMS)" parroted into visible prose ×15 (incl. pick blurb).
+  Root cause: product grounding block exposed `(ASIN: …)` next to the display
+  name. Fix: ASIN removed from prompt + deterministic stripAsinParentheticals
+  in cleanField and pickReasons pass.
+- Defect B: live title "Best Cat Carrier Backpack for Hiking | Best Picks 2026"
+  — Editorial Agent's padTitleToMin appended a double-"Best" pad that
+  dedupeTitleSegments strips upstream. Fix: Best-aware pad list (uses
+  "— Buying Guide <year>" when the base already leads with Best/Top).
+- Improvement next: regenerate this keyword post-deploy to verify both fixes
+  on the exact article that failed.
+- Consecutive clean: reset to 0/3.
