@@ -974,15 +974,15 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
   }
 
   // ── Image Hero ─────────────────────────────────────────────────────────────
-  // Rendered above the video block when a generated hero exists. Square
-  // source (Workers AI flux) is displayed as a wide editorial crop via
-  // object-fit. fetchpriority=high: it's the LCP candidate above the fold.
+  // Rendered BELOW the video block (the video hero owns the top of the
+  // page by design). Square source (Workers AI flux) is displayed as a
+  // wide editorial crop via object-fit.
 
   let imageHeroHtml = "";
   if (trimmedHeroImageUrl) {
     imageHeroHtml = `
       <figure class="article-hero">
-        <img src="${escapeHtml(trimmedHeroImageUrl)}" alt="${escapeHtml(article.title)}" width="1024" height="1024" fetchpriority="high" decoding="async">
+        <img src="${escapeHtml(trimmedHeroImageUrl)}" alt="${escapeHtml(article.title)}" width="1024" height="1024" loading="lazy" decoding="async">
       </figure>
     `;
   }
@@ -1477,8 +1477,8 @@ input::placeholder{color:#767676 !important}
 <article itemscope itemtype="https://schema.org/Article">
   <h1 itemprop="headline">${escapeHtml(article.title)}</h1>
 
-  ${imageHeroHtml}
   ${videoHeroHtml}
+  ${imageHeroHtml}
 
   <div class="author-box" itemprop="author" itemscope itemtype="https://schema.org/Person">
     <img src="https://catsluvus.com/img/authors/amelia-hartwell.webp" alt="Amelia Hartwell, Cat Care Specialist" itemprop="image" width="100" height="100" fetchpriority="high" loading="eager">
