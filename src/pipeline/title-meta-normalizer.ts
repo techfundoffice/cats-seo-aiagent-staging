@@ -209,26 +209,40 @@ function padTitleToMin(
       : "Best Picks";
   // Iteratively append pads of decreasing specificity until ≥ MIN.
   // Each pad is in title-case + ends without trailing punct so the
-  // composed string is naturally readable. When the base already leads
-  // with Best/Top, the " | Best Picks" pad would recreate the exact
-  // double-"Best" spam segment dedupeTitleSegments (keyword-utils)
-  // exists to strip — pad those titles with an informative segment
-  // instead ("Buying Guide" is the canonical keeper there).
+  // composed string is naturally readable. Two spam traps to avoid:
+  //  - base leads with Best/Top → the " | Best Picks" pad would recreate
+  //    the double-"Best" segment dedupeTitleSegments strips;
+  //  - base already contains a year → a year-bearing pad publishes a
+  //    doubled year ("Best X (2026) — Buying Guide 2026", seen live).
   const leadsWithBest = /^(?:best|top)\b/i.test(candidate.trim());
+  const baseHasYear = /\b20\d{2}\b/.test(candidate);
   const pads = leadsWithBest
-    ? [
-        ` — Buying Guide ${year}`,
-        ` for Every Cat Owner`,
-        ` — Curated Recommendations`,
-        ` ${year}`
-      ]
-    : [
-        ` | Best Picks ${year}`,
-        ` — Complete Buyer's Guide`,
-        ` for Every Cat Owner`,
-        ` — Curated Recommendations`,
-        ` ${year}`
-      ];
+    ? baseHasYear
+      ? [
+          ` — Buying Guide`,
+          ` for Every Cat Owner`,
+          ` — Curated Recommendations`
+        ]
+      : [
+          ` — Buying Guide ${year}`,
+          ` for Every Cat Owner`,
+          ` — Curated Recommendations`,
+          ` ${year}`
+        ]
+    : baseHasYear
+      ? [
+          ` | Best Picks`,
+          ` — Complete Buyer's Guide`,
+          ` for Every Cat Owner`,
+          ` — Curated Recommendations`
+        ]
+      : [
+          ` | Best Picks ${year}`,
+          ` — Complete Buyer's Guide`,
+          ` for Every Cat Owner`,
+          ` — Curated Recommendations`,
+          ` ${year}`
+        ];
   for (const p of pads) {
     if (candidate.length >= TITLE_MIN_CHARS) break;
     candidate = `${candidate}${p}`;

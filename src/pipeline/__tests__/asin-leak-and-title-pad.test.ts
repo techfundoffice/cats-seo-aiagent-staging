@@ -92,3 +92,29 @@ describe("toTitleCase — fallback title template casing", () => {
     expect(toTitleCase("the best cat tree")).toBe("The Best Cat Tree");
   });
 });
+
+describe("enforceTitleSerpWindow — no doubled year in pads", () => {
+  it("omits the year from the pad when the base already contains one", async () => {
+    const { enforceTitleSerpWindow } = await import("../title-meta-normalizer");
+    // Live defect: "Best Flea Treatment for Cats (2026)" (35 chars) was
+    // padded to "… — Buying Guide 2026", publishing the year twice.
+    const r = enforceTitleSerpWindow(
+      "Best Flea Treatment for Cats (2026)",
+      "best flea treatment for cats",
+      new Date("2026-07-23T00:00:00Z")
+    );
+    expect((r.title.match(/\b2026\b/g) ?? []).length).toBe(1);
+    expect(r.title.length).toBeGreaterThanOrEqual(45);
+    expect(r.title.length).toBeLessThanOrEqual(60);
+  });
+
+  it("still includes the year when the base has none", async () => {
+    const { enforceTitleSerpWindow } = await import("../title-meta-normalizer");
+    const r = enforceTitleSerpWindow(
+      "Best Cat Carrier Backpack for Hiking",
+      "cat carrier backpack for hiking",
+      new Date("2026-07-23T00:00:00Z")
+    );
+    expect(r.title).toMatch(/2026/);
+  });
+});
