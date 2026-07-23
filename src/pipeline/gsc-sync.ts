@@ -188,19 +188,41 @@ export async function runGscSync(
             gsc_position = ?4, gsc_last_sync = datetime('now')
       WHERE kv_key = ?5`
   );
+  // Sitewide mirror: persist EVERY page row (old production articles
+  // included), not just pages present in article_ledger — this table
+  // powers the dashboard panel plus CTR-triage and striking-distance
+  // queries across the whole site.
+  const upsertPage = keywordsDb.prepare(
+    `INSERT OR REPLACE INTO gsc_pages
+       (page_url, kv_key, impressions, clicks, ctr, position, synced_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))`
+  );
   for (const row of rows) {
-    const kvKey = pageUrlToKvKey(row.keys?.[0] ?? "");
-    if (!kvKey) continue;
+    const pageUrl = row.keys?.[0] ?? "";
+    if (!pageUrl) continue;
+    const kvKey = pageUrlToKvKey(pageUrl);
     statements.push(
-      update.bind(
+      upsertPage.bind(
+        pageUrl,
+        kvKey,
         Math.round(row.impressions),
         Math.round(row.clicks),
         row.ctr,
-        row.position,
-        kvKey
+        row.position
       )
     );
-    matched++;
+    if (kvKey) {
+      statements.push(
+        update.bind(
+          Math.round(row.impressions),
+          Math.round(row.clicks),
+          row.ctr,
+          row.position,
+          kvKey
+        )
+      );
+      matched++;
+    }
     impressions += row.impressions;
     clicks += row.clicks;
   }

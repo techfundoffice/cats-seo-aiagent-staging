@@ -3789,6 +3789,74 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     // cookies are sent automatically; the panel does NOT carry
     // ADMIN_API_TOKEN — fixes the 401-on-load issue from #5480 review.
     // Clear the errors-only ring buffer. Cookie-authed like the other
+    // GET /api/dashboard/gsc — Search Console panel data: sitewide 28-day
+    // summary, top pages by impressions (CTR triage), and striking-
+    // distance pages (avg position 5-15) from the gsc_pages mirror.
+    if (url.pathname === "/api/dashboard/gsc" && request.method === "GET") {
+      const db = this.envBindings.KEYWORDS_DB;
+      if (!db) {
+        return Response.json(
+          { ok: false, error: "KEYWORDS_DB binding missing" },
+          { status: 500 }
+        );
+      }
+      const [summary, topPages, striking] = await Promise.all([
+        db
+          .prepare(
+            `SELECT COUNT(*) pages, COALESCE(SUM(impressions),0) impressions,
+                    COALESCE(SUM(clicks),0) clicks, MAX(synced_at) last_sync
+               FROM gsc_pages`
+          )
+          .all<Record<string, unknown>>(),
+        db
+          .prepare(
+            `SELECT page_url, impressions, clicks, ROUND(ctr*100,2) ctr_pct,
+                    ROUND(position,1) position
+               FROM gsc_pages ORDER BY impressions DESC LIMIT 20`
+          )
+          .all<Record<string, unknown>>(),
+        db
+          .prepare(
+            `SELECT page_url, impressions, clicks, ROUND(position,1) position
+               FROM gsc_pages
+              WHERE position >= 5 AND position <= 15 AND impressions >= 50
+              ORDER BY impressions DESC LIMIT 20`
+          )
+          .all<Record<string, unknown>>()
+      ]);
+      return Response.json({
+        ok: true,
+        summary: summary.results?.[0] ?? null,
+        topPages: topPages.results ?? [],
+        strikingDistance: striking.results ?? []
+      });
+    }
+
+    // POST /api/dashboard/gsc-sync — refresh Search Console data from the
+    // panel's Sync button (cookie-authed like the other dashboard routes).
+    if (
+      url.pathname === "/api/dashboard/gsc-sync" &&
+      request.method === "POST"
+    ) {
+      const db = this.envBindings.KEYWORDS_DB;
+      if (!db) {
+        return Response.json(
+          { ok: false, error: "KEYWORDS_DB binding missing" },
+          { status: 500 }
+        );
+      }
+      const { runGscSync } = await import("./pipeline/gsc-sync");
+      const result = await runGscSync(this.envBindings, db);
+      this.log(
+        result.ok ? "info" : "warning",
+        result.ok
+          ? `GSC sync (dashboard): ${result.rows} pages from ${result.property}; totals ${result.totals?.impressions} impressions / ${result.totals?.clicks} clicks (28d)`
+          : `GSC sync failed: ${result.error}`,
+        "analyst"
+      );
+      return Response.json(result, { status: result.ok ? 200 : 502 });
+    }
+
     // dashboard routes — the panel's "Clear" button calls this and the
     // state broadcast refreshes every connected client automatically.
     if (

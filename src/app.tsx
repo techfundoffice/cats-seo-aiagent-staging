@@ -1530,6 +1530,9 @@ export default function Dashboard() {
         {/* Published Article Log — structured table of last 50 published articles */}
         <PublishedArticleLogPanel state={state} />
 
+        {/* Google Search Console — sitewide impressions/clicks/positions from the Search Analytics API */}
+        <SearchConsolePanel />
+
         {/* Activity Log Errors — pinned filtered view of every level=error
             entry. Reads from state.activityLogErrors (a separate longer-
             retained buffer) so errors don't get evicted from the rolling
@@ -2497,6 +2500,268 @@ function parseActivityLogKeyword(rawKeywordJson: string): string {
     );
   }
   return normalizeKeywordForDisplay(rawKeywordJson);
+}
+
+// ── Google Search Console Panel ──────────────────────────────────────────────
+//
+// Ground truth from Google: sitewide 28-day impressions/clicks, the top
+// pages by impressions (CTR triage — pages Google shows but nobody
+// clicks), and "striking distance" pages (avg position 5-15) where an
+// optimization pass has the best shot at reaching the clicks. Data comes
+// from GET /api/dashboard/gsc (gsc_pages D1 mirror); the Sync button
+// re-pulls the Search Analytics API via POST /api/dashboard/gsc-sync.
+interface GscPageRow {
+  page_url: string;
+  impressions: number;
+  clicks: number;
+  ctr_pct?: number;
+  position: number;
+}
+interface GscPanelData {
+  ok: boolean;
+  summary: {
+    pages: number;
+    impressions: number;
+    clicks: number;
+    last_sync: string | null;
+  } | null;
+  topPages: GscPageRow[];
+  strikingDistance: GscPageRow[];
+}
+function gscPathOf(pageUrl: string): string {
+  try {
+    return new URL(pageUrl).pathname;
+  } catch {
+    return pageUrl;
+  }
+}
+function SearchConsolePanel() {
+  const [data, setData] = useState<GscPanelData | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    fetch("/api/dashboard/gsc")
+      .then((r) => r.json() as Promise<GscPanelData>)
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
+      .catch((err) => setError(errMsg(err)));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const summary = data?.summary;
+  const ctrPct =
+    summary && summary.impressions > 0
+      ? ((summary.clicks / summary.impressions) * 100).toFixed(2)
+      : null;
+
+  return (
+    <details
+      open
+      style={{
+        background: "#fff",
+        borderRadius: "0.75rem",
+        border: "1px solid #e5e7eb",
+        padding: "1rem",
+        marginBottom: "1rem"
+      }}
+    >
+      <summary
+        style={{
+          cursor: "pointer",
+          userSelect: "none",
+          listStyle: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.75rem"
+        }}
+      >
+        <div>
+          <h2
+            style={{
+              fontSize: "1.125rem",
+              fontWeight: 600,
+              color: "#111827",
+              margin: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem"
+            }}
+          >
+            <span>🔍</span>
+            <span>Google Search Console</span>
+          </h2>
+          <p
+            style={{
+              margin: "0.25rem 0 0",
+              fontSize: "0.8125rem",
+              color: "#6b7280"
+            }}
+          >
+            Google&apos;s actual verdict on catsluvus.com — 28-day impressions,
+            clicks, and positions per page. Synced from the Search Analytics
+            API.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            setSyncing(true);
+            fetch("/api/dashboard/gsc-sync", { method: "POST" })
+              .then(() => load())
+              .catch((err) => setError(errMsg(err)))
+              .finally(() => setSyncing(false));
+          }}
+          disabled={syncing}
+          style={{
+            padding: "0.25rem 0.625rem",
+            background: "#eff6ff",
+            color: "#1d4ed8",
+            borderRadius: "0.375rem",
+            border: "1px solid #bfdbfe",
+            fontSize: "0.75rem",
+            cursor: syncing ? "wait" : "pointer"
+          }}
+        >
+          {syncing ? "Syncing…" : "Sync now"}
+        </button>
+      </summary>
+
+      {error && (
+        <p style={{ color: "#b91c1c", fontSize: "0.8125rem" }}>
+          Search Console fetch failed: {error}
+        </p>
+      )}
+      {!data && !error && (
+        <p style={{ color: "#6b7280", fontSize: "0.8125rem" }}>Loading…</p>
+      )}
+      {summary && (
+        <div
+          style={{
+            display: "flex",
+            gap: "1.5rem",
+            flexWrap: "wrap",
+            margin: "0.75rem 0"
+          }}
+        >
+          {[
+            ["Impressions (28d)", summary.impressions.toLocaleString()],
+            ["Clicks (28d)", summary.clicks.toLocaleString()],
+            ["CTR", ctrPct != null ? `${ctrPct}%` : "—"],
+            ["Pages tracked", summary.pages.toLocaleString()],
+            [
+              "Last sync",
+              summary.last_sync ? `${summary.last_sync} UTC` : "never"
+            ]
+          ].map(([label, value]) => (
+            <div key={label}>
+              <div style={{ fontSize: "0.6875rem", color: "#6b7280" }}>
+                {label}
+              </div>
+              <div
+                style={{
+                  fontSize: "1.125rem",
+                  fontWeight: 600,
+                  color: "#111827"
+                }}
+              >
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {data && data.topPages.length > 0 && (
+        <GscPagesTable
+          title="Top pages by impressions (CTR triage)"
+          rows={data.topPages}
+        />
+      )}
+      {data && data.strikingDistance.length > 0 && (
+        <GscPagesTable
+          title="Striking distance (position 5–15, ≥50 impressions)"
+          rows={data.strikingDistance}
+        />
+      )}
+      {data && data.topPages.length === 0 && !error && (
+        <p style={{ color: "#6b7280", fontSize: "0.8125rem" }}>
+          No page data yet — press &quot;Sync now&quot; (Search Console data
+          lags ~2 days behind live traffic).
+        </p>
+      )}
+    </details>
+  );
+}
+function GscPagesTable({ title, rows }: { title: string; rows: GscPageRow[] }) {
+  return (
+    <div style={{ marginTop: "0.75rem" }}>
+      <h3
+        style={{
+          fontSize: "0.8125rem",
+          fontWeight: 600,
+          color: "#374151",
+          margin: "0 0 0.375rem"
+        }}
+      >
+        {title}
+      </h3>
+      <div style={{ maxHeight: "16rem", overflowY: "auto" }}>
+        <table
+          style={{
+            width: "100%",
+            fontSize: "0.75rem",
+            borderCollapse: "collapse"
+          }}
+        >
+          <thead>
+            <tr style={{ textAlign: "left", color: "#6b7280" }}>
+              <th style={{ padding: "0.25rem 0.5rem" }}>Page</th>
+              <th style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                Impr.
+              </th>
+              <th style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                Clicks
+              </th>
+              <th style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                Pos.
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.page_url} style={{ borderTop: "1px solid #f3f4f6" }}>
+                <td style={{ padding: "0.25rem 0.5rem" }}>
+                  <a
+                    href={row.page_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "#1d4ed8", textDecoration: "none" }}
+                  >
+                    {gscPathOf(row.page_url)}
+                  </a>
+                </td>
+                <td style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                  {row.impressions.toLocaleString()}
+                </td>
+                <td style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                  {row.clicks.toLocaleString()}
+                </td>
+                <td style={{ padding: "0.25rem 0.5rem", textAlign: "right" }}>
+                  {row.position}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 // ── GitHub Repo Agent Panel ───────────────────────────────────────────────────
