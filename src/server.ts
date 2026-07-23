@@ -16,6 +16,10 @@ import { runObserverTick } from "./pipeline/observer-agent";
 import { runLiveQualityProbe } from "./pipeline/live-quality-probe";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
 import {
+  classifyUserAgent,
+  promoteArticleToProduction
+} from "./pipeline/promotion";
+import {
   isCodebaseSearchEnabled,
   searchCodebase,
   type CodebaseSearchEnv
@@ -5411,6 +5415,88 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // POST /api/admin/promote — move an incubated staging article to the
+      // production domain. Body: { kvKey: string, dryRun?: boolean }.
+      // Rewrites host references, writes prod ARTICLES_KV via the CF REST
+      // API, replaces the staging copy with a 301 tombstone, marks the
+      // ledger row promoted. dryRun previews without writing.
+      if (url.pathname === "/api/admin/promote" && request.method === "POST") {
+        const body = await readJsonObject();
+        const kvKey = typeof body.kvKey === "string" ? body.kvKey.trim() : "";
+        if (!kvKey) {
+          return Response.json(
+            { ok: false, error: "kvKey required (categorySlug:slug)" },
+            { status: 400 }
+          );
+        }
+        const result = await promoteArticleToProduction(
+          this.envBindings,
+          this.envBindings.ARTICLES_KV,
+          this.envBindings.KEYWORDS_DB,
+          kvKey,
+          body.dryRun === true
+        );
+        this.log(
+          result.ok ? "info" : "warning",
+          result.ok
+            ? `Promotion: ${kvKey} → ${result.prodUrl}${result.dryRun ? " (dry run)" : ""} (${result.replacements} host refs rewritten)`
+            : `Promotion FAILED for ${kvKey}: ${result.error}`,
+          "repoAgent"
+        );
+        return Response.json(result, { status: result.ok ? 200 : 500 });
+      }
+
+      // GET /api/admin/promotion-candidates — the incubation scoreboard.
+      // Query params: minCrawls (default 3), minViews (default 10),
+      // minAgeDays (default 7). Rows are returned sorted by crawl+view
+      // signal with a `qualified` flag per row; nothing is auto-promoted.
+      if (
+        url.pathname === "/api/admin/promotion-candidates" &&
+        request.method === "GET"
+      ) {
+        const db = this.envBindings.KEYWORDS_DB;
+        if (!db) {
+          return Response.json(
+            { ok: false, error: "KEYWORDS_DB binding missing" },
+            { status: 500 }
+          );
+        }
+        const minCrawls = Number(url.searchParams.get("minCrawls") ?? 3);
+        const minViews = Number(url.searchParams.get("minViews") ?? 10);
+        const minAgeDays = Number(url.searchParams.get("minAgeDays") ?? 7);
+        const rows = await db
+          .prepare(
+            `SELECT kv_key, keyword, url, seo_score, word_count,
+                    googlebot_hits, human_views, last_crawled_at,
+                    published_at, promotion_status, prod_url
+               FROM article_ledger
+              WHERE promotion_status != 'promoted'
+              ORDER BY googlebot_hits DESC, human_views DESC, published_at ASC
+              LIMIT 100`
+          )
+          .all<Record<string, unknown>>();
+        const now = Date.now();
+        const candidates = (rows.results ?? []).map((r) => {
+          const publishedAt = Date.parse(String(r.published_at ?? "")) || now;
+          const ageDays = (now - publishedAt) / 86400000;
+          return {
+            ...r,
+            ageDays: Math.round(ageDays * 10) / 10,
+            qualified:
+              Number(r.googlebot_hits) >= minCrawls &&
+              Number(r.human_views) >= minViews &&
+              ageDays >= minAgeDays
+          };
+        });
+        return Response.json({
+          ok: true,
+          thresholds: { minCrawls, minViews, minAgeDays },
+          count: candidates.length,
+          qualified: candidates.filter((c) => c.qualified).length,
+          candidates
+        });
+      }
+
       // POST /api/admin/reset-zero-score-completed — bulk-recover keywords
       // that were marked status='completed' with seo_score=0 by a buggy
       // skip path (notably the search-volume gate removed in #240). Resets
@@ -8014,10 +8100,66 @@ function isArticleSlugPath(pathname: string): boolean {
   return m !== null && m[1] !== "api" && m[1] !== "agents";
 }
 
+/**
+ * Serve-time promotion-funnel tracking: count Googlebot crawls and human
+ * views per article into KEYWORDS_DB `article_ledger`, powering
+ * GET /api/admin/promotion-candidates. Other bots are ignored. Fire-and-
+ * forget via waitUntil so the article response is never delayed.
+ */
+function trackArticleServe(
+  env: Env,
+  ctx: ExecutionContext,
+  kvKey: string,
+  request: Request
+): void {
+  const db = (env as { KEYWORDS_DB?: D1Database }).KEYWORDS_DB;
+  if (!db) return;
+  const kind = classifyUserAgent(request.headers.get("user-agent") ?? "");
+  if (kind === "other-bot") return;
+  const stmt =
+    kind === "googlebot"
+      ? db.prepare(
+          `UPDATE article_ledger
+              SET googlebot_hits = googlebot_hits + 1,
+                  last_crawled_at = datetime('now')
+            WHERE kv_key = ?1`
+        )
+      : db.prepare(
+          `UPDATE article_ledger
+              SET human_views = human_views + 1
+            WHERE kv_key = ?1`
+        );
+  ctx.waitUntil(
+    stmt
+      .bind(kvKey)
+      .run()
+      .then(
+        () => undefined,
+        () => undefined
+      )
+  );
+}
+
 // ── Worker fetch handler ─────────────────────────────────────────────────────
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+
+    // Real robots.txt (the SPA shell used to swallow this path). The
+    // staging domain is DELIBERATELY indexable — the incubation strategy
+    // lets Google crawl staging articles and vote with impressions before
+    // winners are promoted to production via /api/admin/promote.
+    if (url.pathname === "/robots.txt") {
+      return new Response(
+        `User-agent: *\nAllow: /\n\nSitemap: https://${env.DOMAIN}/sitemap.xml\n`,
+        {
+          headers: {
+            "Content-Type": "text/plain; charset=UTF-8",
+            "Cache-Control": "public, max-age=3600"
+          }
+        }
+      );
+    }
 
     if (isSkillsRoute(url.pathname)) {
       return await handleSkillsRoute(request, env);
@@ -8258,6 +8400,8 @@ export default {
       const kvKey = `${categorySlug}:${slug}`;
       const articleHtml = await env.ARTICLES_KV.get(kvKey);
       if (articleHtml !== null) {
+        // Promotion-funnel signals: Googlebot crawls + human views.
+        trackArticleServe(env, ctx, kvKey, request);
         // Staging/clone: inject Cats Luv Us Universal Chrome (header/nav/menus).
         // No-op on production DOMAIN (catsluvus.com) — live consumer owns chrome.
         const body = wrapWithSiteChrome(articleHtml, env.DOMAIN);
@@ -8265,6 +8409,13 @@ export default {
           status: 200,
           headers: createArticleResponseHeaders()
         });
+      }
+      // Promoted articles leave a `redirect:<kvKey>` tombstone pointing at
+      // the production URL — 301 so Google transfers the staging page's
+      // accumulated signals to catsluvus.com.
+      const redirectTarget = await env.ARTICLES_KV.get(`redirect:${kvKey}`);
+      if (redirectTarget) {
+        return Response.redirect(redirectTarget, 301);
       }
       // KV miss — not a generated article.  Fall through so the Assets
       // binding (SPA handler / WordPress origin) can handle the path.

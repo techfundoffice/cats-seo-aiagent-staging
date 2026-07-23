@@ -93,6 +93,11 @@
     "AMAZON_AFFILIATE_TAG": "catsluvus03-20",
     "DOMAIN": "cats-seo-aiagent-staging.webmaster-bc8.workers.dev",
     "CLOUDFLARE_ZONE_ID": "646da2c86dbbe1dff196c155381b0704",
-    "CLOUDFLARE_ACCOUNT_ID": "bc8e15f958dc350e00c0e39d80ca6941"
+    "CLOUDFLARE_ACCOUNT_ID": "bc8e15f958dc350e00c0e39d80ca6941",
+    // Staging → production promotion pipeline (POST /api/admin/promote):
+    // where promoted articles are written and which host replaces the
+    // staging host in their HTML.
+    "PROMOTION_TARGET_DOMAIN": "catsluvus.com",
+    "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30"
   }
 }
