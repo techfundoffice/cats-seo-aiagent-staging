@@ -4926,6 +4926,23 @@ interface YouTubeResult {
 
 const YOUTUBE_SEARCH_TIMEOUT_MS = 12_000;
 
+/**
+ * Decode a raw JSON string literal body captured by regex from YouTube's
+ * inline JSON. The scrape captures the string EXACTLY as it appears in
+ * source, so escape sequences survive undecoded — a live video caption
+ * once rendered the channel name with a literal backslash-u0026 where
+ * an ampersand belonged. Round-trip through
+ * JSON.parse; fall back to the raw text if it isn't a valid literal.
+ */
+function decodeJsonStringLiteral(raw: string): string {
+  try {
+    const parsed = JSON.parse(`"${raw}"`) as unknown;
+    return typeof parsed === "string" ? parsed : raw;
+  } catch {
+    return raw;
+  }
+}
+
 async function searchYouTubeVideo(
   keyword: string,
   onWarn?: (msg: string) => void
@@ -4963,7 +4980,7 @@ async function searchYouTubeVideo(
     for (const m of html.matchAll(pairRe)) {
       if (candidates.length >= 10) break;
       if (!candidates.some((c) => c.id === m[1])) {
-        candidates.push({ id: m[1], title: m[2] });
+        candidates.push({ id: m[1], title: decodeJsonStringLiteral(m[2]) });
       }
     }
     const catFirst =
@@ -4987,7 +5004,7 @@ async function searchYouTubeVideo(
       )
     );
     if (titleMatch) {
-      title = titleMatch[1];
+      title = decodeJsonStringLiteral(titleMatch[1]);
     } else {
       // Fallback: look for title in accessible text
       const altTitleMatch = html.match(
@@ -4996,7 +5013,7 @@ async function searchYouTubeVideo(
         )
       );
       if (altTitleMatch) {
-        title = altTitleMatch[1];
+        title = decodeJsonStringLiteral(altTitleMatch[1]);
       }
     }
 
@@ -5008,7 +5025,7 @@ async function searchYouTubeVideo(
       )
     );
     if (channelMatch) {
-      channel = channelMatch[1];
+      channel = decodeJsonStringLiteral(channelMatch[1]);
     }
 
     // Skip YouTube Shorts, very short results, or non-English
@@ -5026,5 +5043,6 @@ async function searchYouTubeVideo(
 // exercise the real implementation rather than a copied-and-pasted
 // duplicate. See src/pipeline/__tests__/editorial-note-fabrication.test.ts.
 export const __testHelpers = {
-  stripEditorialNoteFabrication
+  stripEditorialNoteFabrication,
+  decodeJsonStringLiteral
 };
