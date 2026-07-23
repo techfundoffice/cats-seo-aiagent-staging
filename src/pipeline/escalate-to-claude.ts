@@ -159,7 +159,7 @@ export interface EscalationInput {
 
 /** Repo coordinates are hard-wired — this is a single-repo Worker. */
 const REPO_OWNER = "techfundoffice";
-const REPO_NAME = "cats-seo-aiagent-cloudflare";
+const REPO_NAME = "cats-seo-aiagent-staging";
 const ADMIN_BASE = "https://cats-seo-aiagent.webmaster-bc8.workers.dev";
 
 /**

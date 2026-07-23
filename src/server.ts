@@ -4007,7 +4007,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           pullRequests: []
         });
       }
-      const repo = `${this.envBindings.REPO_OWNER?.trim() || "techfundoffice"}/${this.envBindings.REPO_NAME?.trim() || "cats-seo-aiagent-cloudflare"}`;
+      const repo = `${this.envBindings.REPO_OWNER?.trim() || "techfundoffice"}/${this.envBindings.REPO_NAME?.trim() || "cats-seo-aiagent-staging"}`;
       const events = await fetchGitHubEvents(repo, ghToken, limit);
       return Response.json({
         ok: true,
@@ -6989,7 +6989,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       // repoName, "agent-publish-article.yml", ...)` to fire a
       // workflow_dispatch on the backup repo for speculative CI
       // verification. That call always 404s because the workflow file
-      // lives in `cats-seo-aiagent-cloudflare`, not in
+      // lives in `cats-seo-aiagent-staging`, not in
       // `catsluvus-cloudflare-kv-backup`, and no consumer of the
       // dispatched run ever existed. Removed because (a) it added a
       // noisy warning to every successful backup, and (b) the backup

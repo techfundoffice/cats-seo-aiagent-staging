@@ -7,7 +7,7 @@ import { resolveAgentskillSlugForPipelineStepLabel } from "./activityLogPipeline
 import { isActivityLogErrorLevel } from "./activityLogLevels";
 import { getSeoScorecardCheckNames } from "./pipeline/seo-score";
 
-export const ACTIVITY_LOG_SHEET_TAB_NAME = "cats-seo-aiagent-cloudflare";
+export const ACTIVITY_LOG_SHEET_TAB_NAME = "cats-seo-aiagent-staging";
 
 /**
  * Dashboard URL written to the mirrored activity-log sheet on every row (next to
@@ -441,7 +441,7 @@ export const ACTIVITY_LOG_SHEET_HEADER_AGENT_CONTEXT_MD = "AGENT_CONTEXT.MD";
  * file for AI agents working on this repo. Written into every activity log row.
  */
 export const ACTIVITY_LOG_AGENT_CONTEXT_MD_URL =
-  "https://github.com/techfundoffice/cats-seo-aiagent-cloudflare/blob/main/AGENT_CONTEXT.md";
+  "https://github.com/techfundoffice/cats-seo-aiagent-staging/blob/main/AGENT_CONTEXT.md";
 
 // ── Column Labels: Status (3 cols) — after middle + spacer; default letters shift with prefix width ─
 
