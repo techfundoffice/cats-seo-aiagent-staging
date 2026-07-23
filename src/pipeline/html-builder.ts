@@ -974,9 +974,10 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
   }
 
   // ── Image Hero ─────────────────────────────────────────────────────────────
-  // Rendered BELOW the video block (the video hero owns the top of the
-  // page by design). Square source (Workers AI flux) is displayed as a
-  // wide editorial crop via object-fit.
+  // Injected mid-article (after the middle section — see sectionsHtml).
+  // The video hero owns the top of the page by design. Square source
+  // (Workers AI flux) is displayed as a wide editorial crop via
+  // object-fit.
 
   let imageHeroHtml = "";
   if (trimmedHeroImageUrl) {
@@ -1114,6 +1115,14 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
     const filteredSections = article.sections.filter(
       (section) => !isExcludedFromRenderedSections(section.heading)
     );
+    // The generated hero image breaks up the body mid-article: it is
+    // injected after the middle section (operator call — the video hero
+    // owns the top of the page, and a mid-page photo re-engages readers
+    // deep in the text).
+    const heroInsertAfterIndex = Math.max(
+      0,
+      Math.ceil(filteredSections.length / 2) - 1
+    );
     sectionsHtml = filteredSections
       .map(
         (section, index) => `
@@ -1121,6 +1130,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
           <h2>${escapeHtml(section.heading)}</h2>
           ${section.content}
         </section>
+      ${index === heroInsertAfterIndex ? imageHeroHtml : ""}
       `
       )
       .join("");
@@ -1478,7 +1488,6 @@ input::placeholder{color:#767676 !important}
   <h1 itemprop="headline">${escapeHtml(article.title)}</h1>
 
   ${videoHeroHtml}
-  ${imageHeroHtml}
 
   <div class="author-box" itemprop="author" itemscope itemtype="https://schema.org/Person">
     <img src="https://catsluvus.com/img/authors/amelia-hartwell.webp" alt="Amelia Hartwell, Cat Care Specialist" itemprop="image" width="100" height="100" fetchpriority="high" loading="eager">
