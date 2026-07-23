@@ -6,7 +6,12 @@ describe("PICK_AWARD_BADGE_SVG", () => {
     expect(PICK_AWARD_BADGE_SVG).toContain("CATS LUV US");
     expect(PICK_AWARD_BADGE_SVG).toContain("BEST");
     expect(PICK_AWARD_BADGE_SVG).toContain("PICK");
-    expect(PICK_AWARD_BADGE_SVG).not.toMatch(/\b20\d{2}\b/);
+    // Year check applies to VISIBLE text nodes only — the SVG xmlns URL
+    // legitimately contains "2000".
+    const visibleText = (PICK_AWARD_BADGE_SVG.match(/>([^<>]+)</g) ?? []).join(
+      " "
+    );
+    expect(visibleText).not.toMatch(/\b20\d{2}\b/);
   });
 
   it("is a self-contained accessible SVG", () => {
