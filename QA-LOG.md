@@ -136,3 +136,34 @@ and the deliberate improvement carried into the next iteration.
 - Second thin blurb in a row (model variance) — queued as next deliberate
   improvement if it recurs.
 - Consecutive clean: reset to 0/3.
+
+## Iteration — 2026-07-23: ventilated cat carrier for summer travel (regen on 2f738e3)
+
+- Score 97, 5695 words, ~3 min. Title now "Best Ventilated Cat Carrier for
+  Summer Travel (2026)" — properly cased. Survived the Polish pass unchanged.
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed). All 8 checks PASS.
+- Consecutive clean: 1/3.
+
+## Iteration — 2026-07-23: cat carrier with litter box attachment
+
+- Score 94, 2317 words, ~3 min. "2026's Best Cat Carrier with Litter Box
+  Attachment". Photo present, 0 leaks, 0 error rows.
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed). All 8 checks PASS.
+- Consecutive clean: 2/3.
+
+## Iteration — 2026-07-23: luxury cat carrier with plush bedding
+
+- Score 94, 2412 words, ~3 min. "Luxury Cat Carrier with Plush Bedding |
+  Best Picks 2026" — the "| Best Picks" pad is legitimate here (base does
+  not lead with Best; no double-Best framing).
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed). All 8 checks PASS.
+- Consecutive clean: 3/3 — **LOOP SUCCESS CONDITION REACHED.**
+
+## Loop summary — 2026-07-23
+
+8 iterations, 4 permanent fixes (ASIN prose leak, double-Best title pad,
+product-image continuity cache, fallback title casing), each verified on the
+live page that exposed it. Publish time 3–5 min/article on the parallel
+research fan-out. Ops hardening: idle pre-check before firing, D1 ledger
+polling over held sockets, 90s DO settle after deploys. Generator remains
+paused throughout.
