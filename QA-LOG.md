@@ -92,3 +92,20 @@ and the deliberate improvement carried into the next iteration.
 - Improvement next: regenerate this keyword post-deploy to verify both fixes
   on the exact article that failed.
 - Consecutive clean: reset to 0/3.
+
+## Iteration — 2026-07-23: cat carrier backpack for hiking (regeneration on be90aa8)
+
+- URL: /cat-large-cat-travel-carrier/cat-carrier-backpack-for-hiking (same slug, KV purged)
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed)
+- Fix verification: PASS — 0 parenthetical ASINs in prose (was 15); title
+  "Best Cat Carrier Backpack for Hiking — Buying Guide 2026" (Best-aware pad).
+- Checklist: FAIL on #2 — product card rendered without an image. This run's
+  Amazon tier returned the Texsens pick without imageUrl (iteration 2's tier
+  included it). html-builder correctly emits button-only, but the card reads
+  as a missing photo.
+- Also noted: all SERP sources failed this run (dataforseo included) — article
+  still scored 93; watch next run for DataForSEO recurrence.
+- Fix: ASIN→image KV cache (product-image:<asin>) — writes on every sighted
+  image, backfills when a tier returns the same ASIN imageless. Seeded
+  B07KHPLFMS from iteration 2's captured HTML.
+- Consecutive clean: 0/3.

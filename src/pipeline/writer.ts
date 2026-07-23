@@ -1024,6 +1024,48 @@ async function generateArticleUnsafe(
           );
           products = products.slice(0, 1);
         }
+
+        // Product-image continuity: the same ASIN can arrive with or
+        // without an imageUrl depending on which tier served it
+        // (Creators API includes images; some PA API/Apify responses
+        // don't). Cache the last-seen image per ASIN in KV and backfill
+        // a missing one, so a product that has ever rendered with an
+        // image never publishes imageless again.
+        const pick = products[0];
+        if (pick?.asin) {
+          const imageCacheKey = `product-image:${pick.asin}`;
+          try {
+            if (pick.imageUrl) {
+              await agent.envBindings.ARTICLES_KV.put(
+                imageCacheKey,
+                pick.imageUrl
+              );
+            } else {
+              const cachedImage =
+                await agent.envBindings.ARTICLES_KV.get(imageCacheKey);
+              if (cachedImage) {
+                pick.imageUrl = cachedImage;
+                agent.log(
+                  "info",
+                  `Amazon: backfilled missing product image for ${pick.asin} from KV cache`,
+                  "productManager"
+                );
+              } else {
+                agent.log(
+                  "warning",
+                  `Amazon: product ${pick.asin} has no imageUrl and no cached image — pick card will render without a photo`,
+                  "productManager"
+                );
+              }
+            }
+          } catch (imgCacheErr: unknown) {
+            agent.log(
+              "warning",
+              `Amazon: product-image KV cache error for ${pick.asin}: ${errMsg(imgCacheErr)}`,
+              "productManager"
+            );
+          }
+        }
       }
 
       return products;
