@@ -109,3 +109,30 @@ and the deliberate improvement carried into the next iteration.
   image, backfills when a tier returns the same ASIN imageless. Seeded
   B07KHPLFMS from iteration 2's captured HTML.
 - Consecutive clean: 0/3.
+
+## Iteration — 2026-07-23: cat carrier backpack for hiking (2nd regen, image cache live)
+
+- Aborted once: fired generate-one too close to the deploy boundary — DO reset
+  mid-run ("Durable Object reset because its code was updated"); a second fire
+  was rejected by the single-flight guard and my /api/stop killed the
+  self-recovered run. Lessons: wait ~60s after canary flip; never fire without
+  status=idle pre-check.
+- Clean rerun: score 94, 4756 words, 1 product, 8m38s.
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed). Pick photo restored via
+  product-image KV cache (seeded URL served). All 8 checks PASS.
+- Consecutive clean: 1/3.
+
+## Iteration — 2026-07-23: ventilated cat carrier for summer travel
+
+- Score 96, 7900 words, 1 product, ~10.5 min (HTTP 900s timeout outlived; run
+  completed server-side — poll ledger next time instead of holding the socket).
+- Screenshots: desktop ✅ product ✅ mobile ✅ (viewed). Image present (GAPZER,
+  fresh ASIN → now cached).
+- Checklist: FAIL #1 — title/H1 published sentence-case: "Best ventilated cat
+  carrier for summer travel: Top Picks". Kimi returned no usable title, and the
+  fallback template inserted the raw lowercase keyword.
+- Fix: toTitleCase() in keyword-utils (stopword-aware) applied to the fallback
+  title template. Regression tests added.
+- Second thin blurb in a row (model variance) — queued as next deliberate
+  improvement if it recurs.
+- Consecutive clean: reset to 0/3.

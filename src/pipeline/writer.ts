@@ -21,6 +21,7 @@ import {
   deriveEntityNoun,
   deriveEntityNounPlural,
   deriveEntityPhrase,
+  toTitleCase,
   deriveMetaDescriptionFromIntro,
   enforceTitleLength,
   normalizeHtmlWhitespace,
@@ -4081,7 +4082,8 @@ function parseArticleJson(raw: string, keyword: string): ArticleData {
   // SERP cap (keyword-preserving). Each pass is independent; the order
   // matters because length enforcement must be last.
   const rawTitle = String(
-    obj.title || `Best ${entityPhrase}: Top Picks ${new Date().getFullYear()}`
+    obj.title ||
+      `Best ${toTitleCase(entityPhrase)}: Top Picks ${new Date().getFullYear()}`
   );
   const cleanedTitle = stripSchemaLeakFromField(
     truncateToWordBoundary(rawTitle, 70),

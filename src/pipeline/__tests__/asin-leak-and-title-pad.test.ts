@@ -78,3 +78,17 @@ describe("enforceTitleSerpWindow — Best-aware short-title pad", () => {
     expect(r.title.length).toBeLessThanOrEqual(60);
   });
 });
+
+describe("toTitleCase — fallback title template casing", () => {
+  it("title-cases a lowercase keyword with small words kept lowercase", async () => {
+    const { toTitleCase } = await import("../keyword-utils");
+    expect(toTitleCase("ventilated cat carrier for summer travel")).toBe(
+      "Ventilated Cat Carrier for Summer Travel"
+    );
+  });
+
+  it("capitalizes small words at phrase edges", async () => {
+    const { toTitleCase } = await import("../keyword-utils");
+    expect(toTitleCase("the best cat tree")).toBe("The Best Cat Tree");
+  });
+});

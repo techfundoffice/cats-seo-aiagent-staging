@@ -183,6 +183,49 @@ export function deriveEntityPhrase(keyword: string): string {
 }
 
 /**
+ * Headline-style title case for template-synthesized titles. Keywords
+ * arrive lowercase ("ventilated cat carrier for summer travel"), and
+ * dropping them raw into a title template publishes a visibly
+ * sentence-cased headline next to Title-Cased ones sitewide. Small
+ * connective words stay lowercase unless they open or close the phrase.
+ */
+const TITLE_CASE_SMALL_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "but",
+  "by",
+  "for",
+  "from",
+  "in",
+  "nor",
+  "of",
+  "on",
+  "or",
+  "per",
+  "the",
+  "to",
+  "via",
+  "vs",
+  "with"
+]);
+
+export function toTitleCase(phrase: string): string {
+  const words = (phrase || "").trim().split(/\s+/).filter(Boolean);
+  return words
+    .map((word, i) => {
+      const isEdge = i === 0 || i === words.length - 1;
+      if (!isEdge && TITLE_CASE_SMALL_WORDS.has(word.toLowerCase())) {
+        return word.toLowerCase();
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+}
+
+/**
  * Derive a clean SINGULAR noun phrase from a keyword for use in question
  * templates that need a grammatical singular form ("What is the best
  * ${noun}?"). Strips leading superlatives AND trailing audience/year/
