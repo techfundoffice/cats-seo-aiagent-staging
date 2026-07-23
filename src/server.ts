@@ -2707,9 +2707,27 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           VALUES (${slug}, ${category}, ${keyword}, ${result.kvKey ?? ""}, ${result.url ?? ""}, ${result.seoScore ?? 0}, ${result.wordCount ?? 0})`;
         this
           .sql`UPDATE categories SET article_count = article_count + 1 WHERE slug=${category}`;
+        // Feed the dashboard's Published Article Log — same row shape the
+        // autonomous loop appends. Without this, generateOne articles
+        // incremented the counter but never appeared in the panel.
+        const publishedRow = {
+          slug,
+          keyword,
+          categorySlug: category,
+          url: result.url ?? "",
+          kvKey: result.kvKey ?? "",
+          seoScore: result.seoScore ?? 0,
+          wordCount: result.wordCount ?? 0,
+          publishedAt: Date.now()
+        };
+        const nextRecentPublished = [
+          publishedRow,
+          ...(this.state.recentPublishedArticles ?? [])
+        ].slice(0, 50);
         this.setState({
           ...this.state,
-          articlesGenerated: this.state.articlesGenerated + 1
+          articlesGenerated: this.state.articlesGenerated + 1,
+          recentPublishedArticles: nextRecentPublished
         });
       }
       await this.updateScoutKeywordOutcome(
@@ -5503,6 +5521,56 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           "analyst"
         );
         return Response.json(result, { status: result.ok ? 200 : 502 });
+      }
+
+      // POST /api/admin/backfill-published-log — merge article_ledger
+      // rows (D1) into the dashboard's recentPublishedArticles state,
+      // deduped by kvKey. One-shot repair for articles published before
+      // generateOne learned to append to the panel feed.
+      if (
+        url.pathname === "/api/admin/backfill-published-log" &&
+        request.method === "POST"
+      ) {
+        const db = this.envBindings.KEYWORDS_DB;
+        if (!db) {
+          return Response.json(
+            { ok: false, error: "KEYWORDS_DB binding missing" },
+            { status: 500 }
+          );
+        }
+        const ledger = await db
+          .prepare(
+            `SELECT kv_key, keyword, url, seo_score, word_count, published_at
+               FROM article_ledger ORDER BY published_at DESC LIMIT 50`
+          )
+          .all<Record<string, unknown>>();
+        const existing = this.state.recentPublishedArticles ?? [];
+        const seen = new Set(existing.map((r) => r.kvKey));
+        let added = 0;
+        const merged = [...existing];
+        for (const row of ledger.results ?? []) {
+          const kvKey = String(row.kv_key ?? "");
+          if (!kvKey || seen.has(kvKey)) continue;
+          const m = kvKey.match(/^([^:]+):(.+)$/);
+          merged.push({
+            slug: m?.[2] ?? kvKey,
+            keyword: String(row.keyword ?? ""),
+            categorySlug: m?.[1] ?? "",
+            url: String(row.url ?? ""),
+            kvKey,
+            seoScore: Number(row.seo_score ?? 0),
+            wordCount: Number(row.word_count ?? 0),
+            publishedAt: Date.parse(`${row.published_at}Z`) || Date.now()
+          });
+          seen.add(kvKey);
+          added++;
+        }
+        merged.sort((a, b) => b.publishedAt - a.publishedAt);
+        this.setState({
+          ...this.state,
+          recentPublishedArticles: merged.slice(0, 50)
+        });
+        return Response.json({ ok: true, added, total: merged.length });
       }
 
       // POST /api/admin/purge-pending-keywords — delete the runtime
