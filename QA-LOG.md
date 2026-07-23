@@ -167,3 +167,16 @@ live page that exposed it. Publish time 3–5 min/article on the parallel
 research fan-out. Ops hardening: idle pre-check before firing, D1 ledger
 polling over held sockets, 90s DO settle after deploys. Generator remains
 paused throughout.
+
+## Direction change — 2026-07-23: direct-to-production publishing
+
+Operator call: the incubation/promote flow is removed. catsluvus.com is
+the money site; articles ship there directly when — and only when — they
+clear the quality bar. New final pipeline step: score ≥
+PROD_PUBLISH_MIN_SCORE (default 90) → host rewrite → prod ARTICLES_KV →
+category/global index registration → staging 301 tombstone. Below the
+bar → article stays staging-only for revision; production never receives
+a failed article. /api/admin/promote and /api/admin/promotion-candidates
+removed; crawl/view tracking, robots.txt, and 301 tombstone serving kept.
+Existing staging backlog is NOT bulk-pushed — only articles generated
+through the full gated pipeline reach production.

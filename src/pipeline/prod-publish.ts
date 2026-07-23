@@ -1,21 +1,21 @@
 import { errMsg, getEnvBinding } from "./http-utils";
 
 /**
- * promotion.ts — the staging → production article promotion pipeline.
+ * prod-publish.ts — direct-to-production article publishing.
  *
- * Strategy (site operator's incubation funnel): every article publishes
- * first on the staging workers.dev domain, deliberately indexable. Google
- * crawls it and votes with impressions/clicks. Articles that earn real
- * engagement get PROMOTED: their HTML is rewritten for the production
- * domain, written into the production ARTICLES_KV namespace (which
- * catsluvus.com serves), and the staging URL becomes a 301 redirect so
- * Google transfers the page's accumulated signals to the production URL.
+ * catsluvus.com is the money site; the staging workers.dev domain is a
+ * workshop. Every article that clears the quality bar
+ * (PROD_PUBLISH_MIN_SCORE, default 90) ships to production as the final
+ * pipeline step: its HTML is rewritten for the production domain,
+ * written into the production ARTICLES_KV namespace (which catsluvus.com
+ * serves), registered in the production category + global indexes, and
+ * the staging URL becomes a 301 so the two domains never compete.
+ * Articles below the bar stay staging-only for revision — catsluvus.com
+ * never receives an article that failed the bar.
  *
- * Signals tracked per article in KEYWORDS_DB `article_ledger`
- * (incremented by the Worker fetch handler on every article serve):
- *   - googlebot_hits / last_crawled_at — proof Google is crawling it
- *   - human_views                     — non-bot traffic proxy
- * Promotion state machine: incubating → promoted (promotion_status).
+ * article_ledger columns googlebot_hits / human_views / last_crawled_at
+ * (incremented by the Worker fetch handler on staging serves) remain as
+ * observability; promotion_status records 'published-prod' on ship.
  */
 
 /** Default production target when PROMOTION_TARGET_DOMAIN is unset. */
@@ -68,7 +68,7 @@ export function classifyUserAgent(
   return "human";
 }
 
-export interface PromotionResult {
+export interface ProdPublishResult {
   ok: boolean;
   kvKey: string;
   prodUrl?: string;
@@ -152,7 +152,7 @@ export function mergeGlobalIndex(
 }
 
 /**
- * Promote one staging article to production:
+ * Publish one staging article to production:
  *  1. read staging HTML from ARTICLES_KV
  *  2. rewrite staging host → production host
  *  3. PUT into the production ARTICLES_KV namespace via the CF REST API
@@ -162,13 +162,13 @@ export function mergeGlobalIndex(
  *
  * `dryRun` performs steps 1-2 only and reports what would happen.
  */
-export async function promoteArticleToProduction(
+export async function publishArticleToProduction(
   env: unknown,
   articlesKv: KVNamespace,
   keywordsDb: D1Database | undefined,
   kvKey: string,
   dryRun: boolean
-): Promise<PromotionResult> {
+): Promise<ProdPublishResult> {
   const m = kvKey.match(/^([^:]+):([^:]+)$/);
   if (!m) {
     return { ok: false, kvKey, error: "kvKey must be categorySlug:slug" };
@@ -245,7 +245,7 @@ export async function promoteArticleToProduction(
   // and site-wide listings from `v2_articles_index`). Without this a
   // promoted article is an orphan page. Best-effort read-modify-write:
   // a concurrent index write from the production generator could race,
-  // but promotions are low-frequency and the loser self-heals on the
+  // but prod-publishes are low-frequency and the loser self-heals on the
   // next prod publish.
   const kvApiBase = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${prodNamespaceId}/values`;
   const authHeaders = { Authorization: `Bearer ${apiToken}` };
@@ -293,13 +293,13 @@ export async function promoteArticleToProduction(
   await articlesKv.put(`redirect:${kvKey}`, prodUrl);
   await articlesKv.delete(kvKey);
 
-  // 5. Ledger bookkeeping (best-effort — promotion already happened).
+  // 5. Ledger bookkeeping (best-effort — the publish already happened).
   if (keywordsDb) {
     try {
       await keywordsDb
         .prepare(
           `UPDATE article_ledger
-              SET promotion_status = 'promoted',
+              SET promotion_status = 'published-prod',
                   promoted_at = datetime('now'),
                   prod_url = ?1
             WHERE kv_key = ?2`

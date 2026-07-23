@@ -3752,6 +3752,63 @@ async function generateArticleUnsafe(
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Final: Production Publish — catsluvus.com is the money site; the
+    // staging domain is only the workshop. Every article that clears the
+    // quality bar ships to production NOW: host references rewritten,
+    // HTML written to the production ARTICLES_KV, category + global
+    // indexes registered, and the staging URL replaced with a 301 so the
+    // two domains never compete in search. Articles below the bar stay
+    // staging-only for revision — production never receives an article
+    // that failed the bar.
+    // ═══════════════════════════════════════════════════════════════════════════
+    agent.updateStep("Final: Production Publish");
+    const prodPublishMinScoreRaw = getEnvBinding(
+      agent.envBindings,
+      "PROD_PUBLISH_MIN_SCORE"
+    );
+    const prodPublishMinScore = Number.isFinite(Number(prodPublishMinScoreRaw))
+      ? Number(prodPublishMinScoreRaw ?? 90)
+      : 90;
+    if (seoResult.score >= prodPublishMinScore) {
+      try {
+        const { publishArticleToProduction } = await import("./prod-publish");
+        const prodPublish = await publishArticleToProduction(
+          agent.envBindings,
+          agent.envBindings.ARTICLES_KV,
+          agent.envBindings.KEYWORDS_DB,
+          kvKey,
+          false
+        );
+        if (prodPublish.ok) {
+          agent.log(
+            "info",
+            `✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
+            "marketing",
+            { kanbanStage: "done" }
+          );
+        } else {
+          agent.log(
+            "warning",
+            `Production publish FAILED for ${kvKey}: ${prodPublish.error} — article remains staging-only`,
+            "marketing"
+          );
+        }
+      } catch (prodErr: unknown) {
+        agent.log(
+          "warning",
+          `Production publish threw (non-fatal): ${errMsg(prodErr)} — article remains staging-only`,
+          "marketing"
+        );
+      }
+    } else {
+      agent.log(
+        "warning",
+        `Production publish SKIPPED: score ${seoResult.score} < ${prodPublishMinScore} — article stays staging-only for revision`,
+        "marketing"
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // ⚠️  ADD NEW PIPELINE STEPS ABOVE THIS LINE — NOT BELOW IT
     //
     // finalizeArticle() owns the crawler handoff sequence in a fixed order:

@@ -15,10 +15,7 @@ import { GoogleSheetsDirectClient } from "./pipeline/google-sheets-direct";
 import { runObserverTick } from "./pipeline/observer-agent";
 import { runLiveQualityProbe } from "./pipeline/live-quality-probe";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
-import {
-  classifyUserAgent,
-  promoteArticleToProduction
-} from "./pipeline/promotion";
+import { classifyUserAgent } from "./pipeline/prod-publish";
 import {
   isCodebaseSearchEnabled,
   searchCodebase,
@@ -5412,88 +5409,6 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           previousKvKey,
           slugChanged,
           purgedKv: body.purgeKv === true
-        });
-      }
-
-      // POST /api/admin/promote — move an incubated staging article to the
-      // production domain. Body: { kvKey: string, dryRun?: boolean }.
-      // Rewrites host references, writes prod ARTICLES_KV via the CF REST
-      // API, replaces the staging copy with a 301 tombstone, marks the
-      // ledger row promoted. dryRun previews without writing.
-      if (url.pathname === "/api/admin/promote" && request.method === "POST") {
-        const body = await readJsonObject();
-        const kvKey = typeof body.kvKey === "string" ? body.kvKey.trim() : "";
-        if (!kvKey) {
-          return Response.json(
-            { ok: false, error: "kvKey required (categorySlug:slug)" },
-            { status: 400 }
-          );
-        }
-        const result = await promoteArticleToProduction(
-          this.envBindings,
-          this.envBindings.ARTICLES_KV,
-          this.envBindings.KEYWORDS_DB,
-          kvKey,
-          body.dryRun === true
-        );
-        this.log(
-          result.ok ? "info" : "warning",
-          result.ok
-            ? `Promotion: ${kvKey} → ${result.prodUrl}${result.dryRun ? " (dry run)" : ""} (${result.replacements} host refs rewritten)`
-            : `Promotion FAILED for ${kvKey}: ${result.error}`,
-          "repoAgent"
-        );
-        return Response.json(result, { status: result.ok ? 200 : 500 });
-      }
-
-      // GET /api/admin/promotion-candidates — the incubation scoreboard.
-      // Query params: minCrawls (default 3), minViews (default 10),
-      // minAgeDays (default 7). Rows are returned sorted by crawl+view
-      // signal with a `qualified` flag per row; nothing is auto-promoted.
-      if (
-        url.pathname === "/api/admin/promotion-candidates" &&
-        request.method === "GET"
-      ) {
-        const db = this.envBindings.KEYWORDS_DB;
-        if (!db) {
-          return Response.json(
-            { ok: false, error: "KEYWORDS_DB binding missing" },
-            { status: 500 }
-          );
-        }
-        const minCrawls = Number(url.searchParams.get("minCrawls") ?? 3);
-        const minViews = Number(url.searchParams.get("minViews") ?? 10);
-        const minAgeDays = Number(url.searchParams.get("minAgeDays") ?? 7);
-        const rows = await db
-          .prepare(
-            `SELECT kv_key, keyword, url, seo_score, word_count,
-                    googlebot_hits, human_views, last_crawled_at,
-                    published_at, promotion_status, prod_url
-               FROM article_ledger
-              WHERE promotion_status != 'promoted'
-              ORDER BY googlebot_hits DESC, human_views DESC, published_at ASC
-              LIMIT 100`
-          )
-          .all<Record<string, unknown>>();
-        const now = Date.now();
-        const candidates = (rows.results ?? []).map((r) => {
-          const publishedAt = Date.parse(String(r.published_at ?? "")) || now;
-          const ageDays = (now - publishedAt) / 86400000;
-          return {
-            ...r,
-            ageDays: Math.round(ageDays * 10) / 10,
-            qualified:
-              Number(r.googlebot_hits) >= minCrawls &&
-              Number(r.human_views) >= minViews &&
-              ageDays >= minAgeDays
-          };
-        });
-        return Response.json({
-          ok: true,
-          thresholds: { minCrawls, minViews, minAgeDays },
-          count: candidates.length,
-          qualified: candidates.filter((c) => c.qualified).length,
-          candidates
         });
       }
 

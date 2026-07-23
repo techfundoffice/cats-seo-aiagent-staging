@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyUserAgent, rewriteHtmlForDomain } from "../promotion";
+import { classifyUserAgent, rewriteHtmlForDomain } from "../prod-publish";
 
 const STAGING = "cats-seo-aiagent-staging.webmaster-bc8.workers.dev";
 const PROD = "catsluvus.com";
@@ -81,7 +81,7 @@ describe("classifyUserAgent", () => {
 
 describe("index merge helpers", () => {
   it("appends a new slug to a category index and dedupes repeats", async () => {
-    const { mergeCategoryIndex } = await import("../promotion");
+    const { mergeCategoryIndex } = await import("../prod-publish");
     const first = mergeCategoryIndex(`["a-slug"]`, "b-slug");
     expect(JSON.parse(first.json)).toEqual(["a-slug", "b-slug"]);
     expect(first.changed).toBe(true);
@@ -90,13 +90,13 @@ describe("index merge helpers", () => {
   });
 
   it("starts a fresh category index when the key is missing or corrupt", async () => {
-    const { mergeCategoryIndex } = await import("../promotion");
+    const { mergeCategoryIndex } = await import("../prod-publish");
     expect(JSON.parse(mergeCategoryIndex(null, "x").json)).toEqual(["x"]);
     expect(JSON.parse(mergeCategoryIndex("not json", "x").json)).toEqual(["x"]);
   });
 
   it("appends to the global index deduped by slug+category", async () => {
-    const { mergeGlobalIndex } = await import("../promotion");
+    const { mergeGlobalIndex } = await import("../prod-publish");
     const entry = {
       slug: "s",
       url: "/c/s",
@@ -112,7 +112,7 @@ describe("index merge helpers", () => {
 
 describe("extractArticleTitleForIndex", () => {
   it("prefers the H1 text", async () => {
-    const { extractArticleTitleForIndex } = await import("../promotion");
+    const { extractArticleTitleForIndex } = await import("../prod-publish");
     const html = `<title>Meta Title | Best Picks 2026</title><h1 class="x">Luxury Cat Carrier with <em>Plush</em> Bedding</h1>`;
     expect(extractArticleTitleForIndex(html, "slug")).toBe(
       "Luxury Cat Carrier with Plush Bedding"
@@ -120,7 +120,7 @@ describe("extractArticleTitleForIndex", () => {
   });
 
   it("falls back to the title tag minus its pipe suffix, then the slug", async () => {
-    const { extractArticleTitleForIndex } = await import("../promotion");
+    const { extractArticleTitleForIndex } = await import("../prod-publish");
     expect(
       extractArticleTitleForIndex(
         `<title>Great Cat Beds | Best Picks 2026</title>`,
