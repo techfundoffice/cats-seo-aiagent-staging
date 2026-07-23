@@ -5412,6 +5412,38 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // POST /api/admin/purge-pending-keywords — delete the runtime
+      // keyword backlog (status='pending' rows in the DO-local `keywords`
+      // table). These are legacy LLM-invented long-tail variations; the
+      // operator's directive is that keywords come from the Scout DB
+      // (real demand data) and are never invented. With the runtime
+      // queue empty, generate-one and the autonomous loop claim from
+      // scout_keywords instead. Body: { dryRun?: boolean }.
+      if (
+        url.pathname === "/api/admin/purge-pending-keywords" &&
+        request.method === "POST"
+      ) {
+        const body = await readJsonObject();
+        const pending = this.sql<{ keyword: string }>`
+          SELECT keyword FROM keywords WHERE status='pending' ORDER BY keyword`;
+        const sample = pending.slice(0, 25).map((r) => r.keyword);
+        if (body.dryRun === true) {
+          return Response.json({
+            ok: true,
+            dryRun: true,
+            wouldDelete: pending.length,
+            sample
+          });
+        }
+        this.sql`DELETE FROM keywords WHERE status='pending'`;
+        this.log(
+          "info",
+          `Purged ${pending.length} pending runtime keyword(s) — Scout DB is now the only keyword source`,
+          "repoAgent"
+        );
+        return Response.json({ ok: true, deleted: pending.length, sample });
+      }
+
       // POST /api/admin/reset-zero-score-completed — bulk-recover keywords
       // that were marked status='completed' with seo_score=0 by a buggy
       // skip path (notably the search-volume gate removed in #240). Resets
