@@ -6056,14 +6056,31 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         let attempts = 0;
         while (attempts < MAX_PENDING_SCAN) {
           attempts++;
-          const rows = this
+          let rows = this
             .sql<PendingRow>`SELECT keyword, slug, category_slug FROM keywords WHERE status='pending' ORDER BY ROWID LIMIT 1`;
+          if (rows.length === 0) {
+            // Runtime queue empty — claim the next keyword from the Scout
+            // DB (the only sanctioned keyword source: real demand data,
+            // never invented). Same claim path the autonomous loop uses.
+            const claimed = await this.claimNextScoutKeyword();
+            if (claimed) {
+              this.enqueueClaimedScoutKeyword(claimed);
+              this.log(
+                "info",
+                `generate-one: claimed "${claimed.keyword}" (${claimed.category_slug}) from the Scout DB`,
+                "analyst",
+                { categorySlug: claimed.category_slug, kanbanStage: "queue" }
+              );
+              rows = this
+                .sql<PendingRow>`SELECT keyword, slug, category_slug FROM keywords WHERE status='pending' ORDER BY ROWID LIMIT 1`;
+            }
+          }
           if (rows.length === 0) {
             return Response.json(
               {
                 ok: false,
                 error:
-                  "No pending keywords found. Run Scout Now first to discover keywords."
+                  "No pending keywords and Scout DB is empty — import keywords via POST /api/admin/keywords/import."
               },
               { status: 422 }
             );
