@@ -655,446 +655,492 @@ async function generateArticleUnsafe(
 
   return withArticleCompetitorUrlSession(agent, async () => {
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 2/24: Amazon Products
+    // Steps 2–6/24: Research fan-out. Amazon products (2), the SERP →
+    // competitor-capture chain (3–4, internally sequential), the PAA
+    // autocomplete prefetch (5), and internal links (6) have no data
+    // dependencies on each other, so they run concurrently and the pipeline
+    // waits only for the slowest task instead of the sum of all five.
+    // Error semantics match the sequential version: each task handles its
+    // own failures internally except analyzeSERP, whose throw remains fatal
+    // to the run.
     // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("2/24: Amazon Products");
-    let products: AmazonProduct[] = [];
+    agent.updateStep("2-6/24: Research (parallel)");
 
-    // Strip content-marketing suffixes ("reviews", "buying guide", year, etc.)
-    // so queries match real Amazon product titles. Keywords like
-    // "disposable litter box for travel reviews" return zero real products
-    // because product titles never include the word "reviews".
-    // Strip search-intent prose that never appears in Amazon product
-    // titles. Without this, long-tail keywords like
-    // "where to buy cat treat dispensing puzzle" or
-    // "best cat slow feeder under 25 dollars reviews" return zero real
-    // products because Amazon catalog matching is title-based.
-    //
-    // Order matters — strip prefix phrases (whole-string anchored) before
-    // suffix words, then comparison phrases (everything after `vs`/`versus`
-    // is dropped because Amazon cannot search two products at once).
-    const amazonSearchKeyword = keyword
-      // Question / intent prefixes — only meaningful at start of phrase.
-      .replace(
-        /^(?:where\s+(?:to|can\s+(?:i|you))\s+(?:buy|find|get|purchase)|how\s+(?:to|do\s+(?:i|you))\s+(?:choose|pick|use|clean|train|find|buy)|what(?:'s|\s+is)\s+(?:the\s+best|a\s+good)|is\s+(?:a\s+)?|does\s+(?:a\s+)?|are\s+|do\s+)\s+/i,
-        ""
-      )
-      // Trailing review/guide noise.
-      .replace(
-        /\s+(reviews?|comparison|buying\s+guide|top\s+picks?|best\s+of|guide|tutorial|tips?)\b/gi,
-        ""
-      )
-      // Modifier adjectives that rarely appear in product titles.
-      .replace(
-        /\b(?:affordable|inexpensive|cheap|budget(?:-friendly)?)\s+/gi,
-        ""
-      )
-      // Year tokens.
-      .replace(/\s+(20\d{2})\b/g, "")
-      // Drop everything after `vs` / `versus` — Amazon catalog can't match
-      // two distinct products in one query, and the prefix half is always
-      // the more searchable noun.
-      .replace(/\s+(?:vs\.?|versus)\s+.+$/i, "")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    if (amazonSearchKeyword !== keyword) {
+    const amazonTask = (async (): Promise<AmazonProduct[]> => {
+      let products: AmazonProduct[] = [];
+
+      // Strip content-marketing suffixes ("reviews", "buying guide", year, etc.)
+      // so queries match real Amazon product titles. Keywords like
+      // "disposable litter box for travel reviews" return zero real products
+      // because product titles never include the word "reviews".
+      // Strip search-intent prose that never appears in Amazon product
+      // titles. Without this, long-tail keywords like
+      // "where to buy cat treat dispensing puzzle" or
+      // "best cat slow feeder under 25 dollars reviews" return zero real
+      // products because Amazon catalog matching is title-based.
+      //
+      // Order matters — strip prefix phrases (whole-string anchored) before
+      // suffix words, then comparison phrases (everything after `vs`/`versus`
+      // is dropped because Amazon cannot search two products at once).
+      const amazonSearchKeyword = keyword
+        // Question / intent prefixes — only meaningful at start of phrase.
+        .replace(
+          /^(?:where\s+(?:to|can\s+(?:i|you))\s+(?:buy|find|get|purchase)|how\s+(?:to|do\s+(?:i|you))\s+(?:choose|pick|use|clean|train|find|buy)|what(?:'s|\s+is)\s+(?:the\s+best|a\s+good)|is\s+(?:a\s+)?|does\s+(?:a\s+)?|are\s+|do\s+)\s+/i,
+          ""
+        )
+        // Trailing review/guide noise.
+        .replace(
+          /\s+(reviews?|comparison|buying\s+guide|top\s+picks?|best\s+of|guide|tutorial|tips?)\b/gi,
+          ""
+        )
+        // Modifier adjectives that rarely appear in product titles.
+        .replace(
+          /\b(?:affordable|inexpensive|cheap|budget(?:-friendly)?)\s+/gi,
+          ""
+        )
+        // Year tokens.
+        .replace(/\s+(20\d{2})\b/g, "")
+        // Drop everything after `vs` / `versus` — Amazon catalog can't match
+        // two distinct products in one query, and the prefix half is always
+        // the more searchable noun.
+        .replace(/\s+(?:vs\.?|versus)\s+.+$/i, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      if (amazonSearchKeyword !== keyword) {
+        agent.log(
+          "info",
+          `Amazon: searching "${amazonSearchKeyword}" (sanitized from "${keyword}")`,
+          "productManager",
+          { kanbanStage: "queue" }
+        );
+      }
+
+      // Tier 1: Amazon Creators API (real ASINs, prices, images).
+      //
+      // Cognito OAuth2 client_id = Creators API "Application ID" (AMAZON_APP_ID),
+      // NOT the legacy "Credential ID" (AMAZON_CREDENTIAL_ID). Cognito issues a
+      // bearer token for any well-formed client pair, but `searchItems` rejects
+      // tokens whose underlying app isn't provisioned for the Creators API,
+      // surfacing as `UnauthorizedException / InvalidToken`. We were using
+      // CREDENTIAL_ID by mistake — fall back to it only if APP_ID isn't set.
+      const amazonAppId = getEnvBinding(agent.envBindings, "AMAZON_APP_ID");
+      const amazonCredId = getEnvBinding(
+        agent.envBindings,
+        "AMAZON_CREDENTIAL_ID"
+      );
+      const primaryId = (amazonAppId || amazonCredId || "").trim();
+      const primarySecret =
+        getEnvBinding(agent.envBindings, "AMAZON_API_SECRET") ?? "";
+      const primaryLabel = amazonAppId
+        ? "AMAZON_APP_ID"
+        : amazonCredId
+          ? "AMAZON_CREDENTIAL_ID (legacy fallback)"
+          : "NOT SET";
+      const fallbackId =
+        getEnvBinding(agent.envBindings, "AMAZON_APP_ID_FALLBACK") ?? "";
+      const fallbackSecret =
+        getEnvBinding(agent.envBindings, "AMAZON_API_SECRET_FALLBACK") ?? "";
       agent.log(
         "info",
-        `Amazon: searching "${amazonSearchKeyword}" (sanitized from "${keyword}")`,
+        `Amazon: Creators API primary ${primaryId ? `from ${primaryLabel} (${primaryId.slice(0, 8)}...)` : "NOT SET"}; fallback ${fallbackId ? `(${fallbackId.slice(0, 8)}...)` : "NOT SET"}`,
         "productManager",
         { kanbanStage: "queue" }
       );
-    }
 
-    // Tier 1: Amazon Creators API (real ASINs, prices, images).
-    //
-    // Cognito OAuth2 client_id = Creators API "Application ID" (AMAZON_APP_ID),
-    // NOT the legacy "Credential ID" (AMAZON_CREDENTIAL_ID). Cognito issues a
-    // bearer token for any well-formed client pair, but `searchItems` rejects
-    // tokens whose underlying app isn't provisioned for the Creators API,
-    // surfacing as `UnauthorizedException / InvalidToken`. We were using
-    // CREDENTIAL_ID by mistake — fall back to it only if APP_ID isn't set.
-    const amazonAppId = getEnvBinding(agent.envBindings, "AMAZON_APP_ID");
-    const amazonCredId = getEnvBinding(
-      agent.envBindings,
-      "AMAZON_CREDENTIAL_ID"
-    );
-    const primaryId = (amazonAppId || amazonCredId || "").trim();
-    const primarySecret =
-      getEnvBinding(agent.envBindings, "AMAZON_API_SECRET") ?? "";
-    const primaryLabel = amazonAppId
-      ? "AMAZON_APP_ID"
-      : amazonCredId
-        ? "AMAZON_CREDENTIAL_ID (legacy fallback)"
-        : "NOT SET";
-    const fallbackId =
-      getEnvBinding(agent.envBindings, "AMAZON_APP_ID_FALLBACK") ?? "";
-    const fallbackSecret =
-      getEnvBinding(agent.envBindings, "AMAZON_API_SECRET_FALLBACK") ?? "";
-    agent.log(
-      "info",
-      `Amazon: Creators API primary ${primaryId ? `from ${primaryLabel} (${primaryId.slice(0, 8)}...)` : "NOT SET"}; fallback ${fallbackId ? `(${fallbackId.slice(0, 8)}...)` : "NOT SET"}`,
-      "productManager",
-      { kanbanStage: "queue" }
-    );
-
-    // Warn when only one of a credential pair is set — partial config would
-    // otherwise silently skip the tier with no operator-visible signal.
-    if ((primaryId || primarySecret) && !(primaryId && primarySecret)) {
-      const missingPrimary = !primaryId
-        ? "AMAZON_APP_ID (or AMAZON_CREDENTIAL_ID)"
-        : "AMAZON_API_SECRET";
-      agent.log(
-        "warning",
-        `Amazon (Creators API) primary skipped: missing ${missingPrimary}; set both AMAZON_APP_ID and AMAZON_API_SECRET to enable Creators API primary`,
-        "productManager"
-      );
-    }
-    if ((fallbackId || fallbackSecret) && !(fallbackId && fallbackSecret)) {
-      const missingFallback = !fallbackId
-        ? "AMAZON_APP_ID_FALLBACK"
-        : "AMAZON_API_SECRET_FALLBACK";
-      agent.log(
-        "warning",
-        `Amazon (Creators API) fallback skipped: missing ${missingFallback}; set both AMAZON_APP_ID_FALLBACK and AMAZON_API_SECRET_FALLBACK to enable Creators API fallback`,
-        "productManager"
-      );
-    }
-
-    // Try primary creds, then fallback creds. Each credential has its own
-    // circuit breaker in amazon.ts so a 401 on the primary doesn't block
-    // the fallback attempt within the same DO isolate.
-    const credPairs: Array<{ id: string; secret: string; label: string }> = [];
-    if (primaryId && primarySecret) {
-      credPairs.push({
-        id: primaryId,
-        secret: primarySecret,
-        label: "primary"
-      });
-    }
-    if (fallbackId && fallbackSecret) {
-      credPairs.push({
-        id: fallbackId,
-        secret: fallbackSecret,
-        label: "fallback"
-      });
-    }
-    for (const { id, secret, label } of credPairs) {
-      if (products.length > 0) break;
-      // Retry each candidate cred with progressively simpler forms of the
-      // keyword. Many long-tail keywords (`where to buy cat treat
-      // dispensing puzzle`) survive the prefix sanitizer above but still
-      // contain too many adjectives for Amazon's title-based catalog
-      // matcher. Falling back to the trailing 3-word noun phrase
-      // recovers products on otherwise-empty searches.
-      const candidates = buildAmazonSearchCandidates(amazonSearchKeyword);
-      let lastErr: unknown;
-      for (const candidate of candidates) {
-        try {
-          const found = await fetchViaCreatorsApi(
-            candidate,
-            id,
-            secret,
-            tag,
-            (msg) =>
-              agent.log(
-                "warning",
-                `Amazon (Creators API ${label}): ${msg}`,
-                "productManager"
-              )
-          );
-          if (found.length > 0) {
-            products = found;
-            agent.log(
-              "info",
-              `Amazon (Creators API ${label}): ${found.length} products with ASINs for "${candidate}"${candidate !== amazonSearchKeyword ? ` (search fallback from "${amazonSearchKeyword}")` : ""}`
-            );
-            break;
-          }
-        } catch (err: unknown) {
-          lastErr = err;
-        }
-      }
-      if (products.length === 0 && lastErr) {
-        agent.log(
-          "warning",
-          `Amazon (Creators API ${label}) error: ${errMsg(lastErr)}`
-        );
-      }
-    }
-    if (products.length === 0 && credPairs.length > 0) {
-      agent.log(
-        "warning",
-        `Amazon (Creators API): 0 products after ${credPairs.length} credential pair${credPairs.length === 1 ? "" : "s"} for "${amazonSearchKeyword}" — falling through to PA API v5`
-      );
-    }
-
-    // Tier 2: Amazon Product Advertising API v5 (AWS SigV4). Uses the
-    // classic Associates program credentials independent of the
-    // Creators API. Tries the primary access/secret pair first, then the
-    // fallback pair (AMAZON_ACCESS_KEY_FALLBACK / AMAZON_SECRET_KEY_FALLBACK)
-    // before falling through to Apify (Tier 3). Useful when the primary
-    // access key gets throttled, deauthorized, or the Associates account
-    // is suspended — the fallback keeps Tier 2 alive.
-    if (products.length === 0) {
-      const paPrimaryKey =
-        getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY") ?? "";
-      const paPrimarySecret =
-        getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY") ?? "";
-      const paFallbackKey =
-        getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY_FALLBACK") ?? "";
-      const paFallbackSecret =
-        getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY_FALLBACK") ?? "";
-      agent.log(
-        "info",
-        `Amazon: PA API v5 primary ${paPrimaryKey && paPrimarySecret ? `available (${paPrimaryKey.slice(0, 8)}...)` : "NOT SET"}; fallback ${paFallbackKey && paFallbackSecret ? `(${paFallbackKey.slice(0, 8)}...)` : "NOT SET"}`
-      );
       // Warn when only one of a credential pair is set — partial config would
       // otherwise silently skip the tier with no operator-visible signal.
-      if (
-        (paPrimaryKey || paPrimarySecret) &&
-        !(paPrimaryKey && paPrimarySecret)
-      ) {
-        const missingPrimary = [
-          !paPrimaryKey ? "AMAZON_ACCESS_KEY" : null,
-          !paPrimarySecret ? "AMAZON_SECRET_KEY" : null
-        ]
-          .filter((v): v is string => Boolean(v))
-          .join(", ");
+      if ((primaryId || primarySecret) && !(primaryId && primarySecret)) {
+        const missingPrimary = !primaryId
+          ? "AMAZON_APP_ID (or AMAZON_CREDENTIAL_ID)"
+          : "AMAZON_API_SECRET";
         agent.log(
           "warning",
-          `Amazon (PA API v5) primary skipped: missing ${missingPrimary}; set both AMAZON_ACCESS_KEY and AMAZON_SECRET_KEY to enable PA API v5 primary`
+          `Amazon (Creators API) primary skipped: missing ${missingPrimary}; set both AMAZON_APP_ID and AMAZON_API_SECRET to enable Creators API primary`,
+          "productManager"
         );
       }
-      if (
-        (paFallbackKey || paFallbackSecret) &&
-        !(paFallbackKey && paFallbackSecret)
-      ) {
-        const missingFallback = [
-          !paFallbackKey ? "AMAZON_ACCESS_KEY_FALLBACK" : null,
-          !paFallbackSecret ? "AMAZON_SECRET_KEY_FALLBACK" : null
-        ]
-          .filter((v): v is string => Boolean(v))
-          .join(", ");
+      if ((fallbackId || fallbackSecret) && !(fallbackId && fallbackSecret)) {
+        const missingFallback = !fallbackId
+          ? "AMAZON_APP_ID_FALLBACK"
+          : "AMAZON_API_SECRET_FALLBACK";
         agent.log(
           "warning",
-          `Amazon (PA API v5) fallback skipped: missing ${missingFallback}; set both AMAZON_ACCESS_KEY_FALLBACK and AMAZON_SECRET_KEY_FALLBACK to enable PA API v5 fallback`
+          `Amazon (Creators API) fallback skipped: missing ${missingFallback}; set both AMAZON_APP_ID_FALLBACK and AMAZON_API_SECRET_FALLBACK to enable Creators API fallback`,
+          "productManager"
         );
       }
 
-      const paPairs: Array<{ key: string; secret: string; label: string }> = [];
-      if (paPrimaryKey && paPrimarySecret) {
-        paPairs.push({
-          key: paPrimaryKey,
-          secret: paPrimarySecret,
+      // Try primary creds, then fallback creds. Each credential has its own
+      // circuit breaker in amazon.ts so a 401 on the primary doesn't block
+      // the fallback attempt within the same DO isolate.
+      const credPairs: Array<{ id: string; secret: string; label: string }> =
+        [];
+      if (primaryId && primarySecret) {
+        credPairs.push({
+          id: primaryId,
+          secret: primarySecret,
           label: "primary"
         });
       }
-      if (paFallbackKey && paFallbackSecret) {
-        paPairs.push({
-          key: paFallbackKey,
-          secret: paFallbackSecret,
+      if (fallbackId && fallbackSecret) {
+        credPairs.push({
+          id: fallbackId,
+          secret: fallbackSecret,
           label: "fallback"
         });
       }
-      for (const { key, secret, label } of paPairs) {
+      for (const { id, secret, label } of credPairs) {
         if (products.length > 0) break;
-        try {
-          products = await fetchViaPaApi(
-            amazonSearchKeyword,
-            key,
-            secret,
-            tag,
-            (msg) =>
+        // Retry each candidate cred with progressively simpler forms of the
+        // keyword. Many long-tail keywords (`where to buy cat treat
+        // dispensing puzzle`) survive the prefix sanitizer above but still
+        // contain too many adjectives for Amazon's title-based catalog
+        // matcher. Falling back to the trailing 3-word noun phrase
+        // recovers products on otherwise-empty searches.
+        const candidates = buildAmazonSearchCandidates(amazonSearchKeyword);
+        let lastErr: unknown;
+        for (const candidate of candidates) {
+          try {
+            const found = await fetchViaCreatorsApi(
+              candidate,
+              id,
+              secret,
+              tag,
+              (msg) =>
+                agent.log(
+                  "warning",
+                  `Amazon (Creators API ${label}): ${msg}`,
+                  "productManager"
+                )
+            );
+            if (found.length > 0) {
+              products = found;
+              agent.log(
+                "info",
+                `Amazon (Creators API ${label}): ${found.length} products with ASINs for "${candidate}"${candidate !== amazonSearchKeyword ? ` (search fallback from "${amazonSearchKeyword}")` : ""}`
+              );
+              break;
+            }
+          } catch (err: unknown) {
+            lastErr = err;
+          }
+        }
+        if (products.length === 0 && lastErr) {
+          agent.log(
+            "warning",
+            `Amazon (Creators API ${label}) error: ${errMsg(lastErr)}`
+          );
+        }
+      }
+      if (products.length === 0 && credPairs.length > 0) {
+        agent.log(
+          "warning",
+          `Amazon (Creators API): 0 products after ${credPairs.length} credential pair${credPairs.length === 1 ? "" : "s"} for "${amazonSearchKeyword}" — falling through to PA API v5`
+        );
+      }
+
+      // Tier 2: Amazon Product Advertising API v5 (AWS SigV4). Uses the
+      // classic Associates program credentials independent of the
+      // Creators API. Tries the primary access/secret pair first, then the
+      // fallback pair (AMAZON_ACCESS_KEY_FALLBACK / AMAZON_SECRET_KEY_FALLBACK)
+      // before falling through to Apify (Tier 3). Useful when the primary
+      // access key gets throttled, deauthorized, or the Associates account
+      // is suspended — the fallback keeps Tier 2 alive.
+      if (products.length === 0) {
+        const paPrimaryKey =
+          getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY") ?? "";
+        const paPrimarySecret =
+          getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY") ?? "";
+        const paFallbackKey =
+          getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY_FALLBACK") ?? "";
+        const paFallbackSecret =
+          getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY_FALLBACK") ?? "";
+        agent.log(
+          "info",
+          `Amazon: PA API v5 primary ${paPrimaryKey && paPrimarySecret ? `available (${paPrimaryKey.slice(0, 8)}...)` : "NOT SET"}; fallback ${paFallbackKey && paFallbackSecret ? `(${paFallbackKey.slice(0, 8)}...)` : "NOT SET"}`
+        );
+        // Warn when only one of a credential pair is set — partial config would
+        // otherwise silently skip the tier with no operator-visible signal.
+        if (
+          (paPrimaryKey || paPrimarySecret) &&
+          !(paPrimaryKey && paPrimarySecret)
+        ) {
+          const missingPrimary = [
+            !paPrimaryKey ? "AMAZON_ACCESS_KEY" : null,
+            !paPrimarySecret ? "AMAZON_SECRET_KEY" : null
+          ]
+            .filter((v): v is string => Boolean(v))
+            .join(", ");
+          agent.log(
+            "warning",
+            `Amazon (PA API v5) primary skipped: missing ${missingPrimary}; set both AMAZON_ACCESS_KEY and AMAZON_SECRET_KEY to enable PA API v5 primary`
+          );
+        }
+        if (
+          (paFallbackKey || paFallbackSecret) &&
+          !(paFallbackKey && paFallbackSecret)
+        ) {
+          const missingFallback = [
+            !paFallbackKey ? "AMAZON_ACCESS_KEY_FALLBACK" : null,
+            !paFallbackSecret ? "AMAZON_SECRET_KEY_FALLBACK" : null
+          ]
+            .filter((v): v is string => Boolean(v))
+            .join(", ");
+          agent.log(
+            "warning",
+            `Amazon (PA API v5) fallback skipped: missing ${missingFallback}; set both AMAZON_ACCESS_KEY_FALLBACK and AMAZON_SECRET_KEY_FALLBACK to enable PA API v5 fallback`
+          );
+        }
+
+        const paPairs: Array<{ key: string; secret: string; label: string }> =
+          [];
+        if (paPrimaryKey && paPrimarySecret) {
+          paPairs.push({
+            key: paPrimaryKey,
+            secret: paPrimarySecret,
+            label: "primary"
+          });
+        }
+        if (paFallbackKey && paFallbackSecret) {
+          paPairs.push({
+            key: paFallbackKey,
+            secret: paFallbackSecret,
+            label: "fallback"
+          });
+        }
+        for (const { key, secret, label } of paPairs) {
+          if (products.length > 0) break;
+          try {
+            products = await fetchViaPaApi(
+              amazonSearchKeyword,
+              key,
+              secret,
+              tag,
+              (msg) =>
+                agent.log(
+                  "warning",
+                  `Amazon (PA API v5 ${label}): ${msg}`,
+                  "productManager"
+                )
+            );
+            if (products.length > 0) {
+              agent.log(
+                "info",
+                `Amazon (PA API v5 ${label}): ${products.length} products with ASINs for "${amazonSearchKeyword}"`
+              );
+            } else {
               agent.log(
                 "warning",
-                `Amazon (PA API v5 ${label}): ${msg}`,
-                "productManager"
-              )
-          );
-          if (products.length > 0) {
-            agent.log(
-              "info",
-              `Amazon (PA API v5 ${label}): ${products.length} products with ASINs for "${amazonSearchKeyword}"`
-            );
-          } else {
+                `Amazon (PA API v5 ${label}): 0 products returned for "${amazonSearchKeyword}"`
+              );
+            }
+          } catch (err: unknown) {
             agent.log(
               "warning",
-              `Amazon (PA API v5 ${label}): 0 products returned for "${amazonSearchKeyword}"`
+              `Amazon (PA API v5 ${label}) error: ${errMsg(err)}`
             );
           }
-        } catch (err: unknown) {
-          agent.log(
-            "warning",
-            `Amazon (PA API v5 ${label}) error: ${errMsg(err)}`
-          );
         }
       }
-    }
 
-    // Tier 3: Apify Amazon scraper (real product data)
-    if (products.length === 0) {
-      const apifyToken = getEnvBinding(agent.envBindings, "APIFY_TOKEN");
-      agent.log(
-        "info",
-        `Amazon: Apify token ${apifyToken ? `available (${apifyToken.slice(0, 12)}...)` : "NOT SET"}`
-      );
-      if (apifyToken) {
-        try {
-          products = await fetchViaApify(
-            amazonSearchKeyword,
-            apifyToken,
-            tag,
-            (msg) =>
-              agent.log("warning", `Amazon (Apify): ${msg}`, "productManager")
-          );
-          if (products.length > 0) {
-            agent.log(
-              "info",
-              `Amazon (Apify): ${products.length} scraped products for "${amazonSearchKeyword}"`
+      // Tier 3: Apify Amazon scraper (real product data)
+      if (products.length === 0) {
+        const apifyToken = getEnvBinding(agent.envBindings, "APIFY_TOKEN");
+        agent.log(
+          "info",
+          `Amazon: Apify token ${apifyToken ? `available (${apifyToken.slice(0, 12)}...)` : "NOT SET"}`
+        );
+        if (apifyToken) {
+          try {
+            products = await fetchViaApify(
+              amazonSearchKeyword,
+              apifyToken,
+              tag,
+              (msg) =>
+                agent.log("warning", `Amazon (Apify): ${msg}`, "productManager")
             );
-          } else {
+            if (products.length > 0) {
+              agent.log(
+                "info",
+                `Amazon (Apify): ${products.length} scraped products for "${amazonSearchKeyword}"`
+              );
+            } else {
+              agent.log(
+                "warning",
+                `Amazon (Apify): 0 products returned for "${amazonSearchKeyword}"`
+              );
+            }
+          } catch (err: unknown) {
             agent.log(
               "warning",
-              `Amazon (Apify): 0 products returned for "${amazonSearchKeyword}"`
+              `Amazon (Apify) error for "${amazonSearchKeyword}": ${errMsg(err)}`
             );
           }
-        } catch (err: unknown) {
-          agent.log(
-            "warning",
-            `Amazon (Apify) error for "${amazonSearchKeyword}": ${errMsg(err)}`
-          );
         }
       }
-    }
 
-    // If no real product source returned anything, skip the Top Picks
-    // section entirely rather than render keyword-as-name placeholders
-    // that read as fake product recommendations. The rest of the article
-    // (intro, sections, FAQs, conclusion) still generates — it just
-    // doesn't pretend to have editorially-reviewed picks it doesn't
-    // have.
-    if (products.length === 0) {
-      agent.log(
-        "info",
-        `Amazon: all tiers returned 0 products — suppressing Our Top Picks section for "${keyword}"`
-      );
-    } else {
-      const before = products.length;
-      products = dedupeProducts(products);
-      if (products.length < before) {
+      // If no real product source returned anything, skip the Top Picks
+      // section entirely rather than render keyword-as-name placeholders
+      // that read as fake product recommendations. The rest of the article
+      // (intro, sections, FAQs, conclusion) still generates — it just
+      // doesn't pretend to have editorially-reviewed picks it doesn't
+      // have.
+      if (products.length === 0) {
         agent.log(
           "info",
-          `Amazon: deduped ${before - products.length} near-duplicate product${before - products.length === 1 ? "" : "s"} (${before} → ${products.length})`,
-          "productManager"
-        );
-      }
-
-      // Strip any prices populated upstream by PA API / Creators API.
-      // Amazon Associates compliance: we never display prices on the page,
-      // and seeing them upstream encourages Kimi to hallucinate dollar
-      // amounts in prose. Live prices live on the affiliate link only.
-      products = products.map((p) => ({
-        ...p,
-        price: undefined,
-        priceValue: undefined
-      }));
-
-      // Single-product specialization: each article features EXACTLY ONE
-      // product — the top pick after dedupe — and the copy focuses
-      // entirely on it (see the SINGLE-PRODUCT directive in
-      // buildArticlePrompt). Multi-pick roundups are retired on staging.
-      if (products.length > 1) {
-        agent.log(
-          "info",
-          `Amazon: single-product mode — featuring "${(products[0].name ?? "").slice(0, 60)}" (dropping ${products.length - 1} other pick${products.length === 2 ? "" : "s"})`,
-          "productManager"
-        );
-        products = products.slice(0, 1);
-      }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Step 3/24: SERP analysis (URLs + titles only — word target set after
-    // competitor capture below, once we know the real competitor word count)
-    // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("3/24: SERP Analysis");
-    const serpData: SerpData = await analyzeSERP(
-      agent,
-      keyword,
-      agent.envBindings,
-      0 // competitorWordCount placeholder — patched below after capture
-    );
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Step 4/24: Competitor Capture
-    // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("4/24: Competitor Capture");
-    let competitorData: CompetitorData | null = null;
-    if (serpData.topUrls && serpData.topUrls.length > 0) {
-      const ranked = rankSerpUrlsForEditorialCompetitor(
-        serpData.topUrls,
-        serpData.topTitles
-      );
-      if (ranked.length === 0) {
-        agent.log(
-          "info",
-          "Competitor: top organic URLs look like storefronts/marketplaces only — none to capture",
-          "strategist",
-          { kanbanStage: "inProgress" }
+          `Amazon: all tiers returned 0 products — suppressing Our Top Picks section for "${keyword}"`
         );
       } else {
-        const maxAttempts = Math.min(10, ranked.length);
-        for (let i = 0; i < maxAttempts; i++) {
-          const url = ranked[i];
-          competitorData = await captureCompetitor(agent, url, keyword);
-          if (competitorData) break;
+        const before = products.length;
+        products = dedupeProducts(products);
+        if (products.length < before) {
+          agent.log(
+            "info",
+            `Amazon: deduped ${before - products.length} near-duplicate product${before - products.length === 1 ? "" : "s"} (${before} → ${products.length})`,
+            "productManager"
+          );
         }
-        if (competitorData) {
+
+        // Strip any prices populated upstream by PA API / Creators API.
+        // Amazon Associates compliance: we never display prices on the page,
+        // and seeing them upstream encourages Kimi to hallucinate dollar
+        // amounts in prose. Live prices live on the affiliate link only.
+        products = products.map((p) => ({
+          ...p,
+          price: undefined,
+          priceValue: undefined
+        }));
+
+        // Single-product specialization: each article features EXACTLY ONE
+        // product — the top pick after dedupe — and the copy focuses
+        // entirely on it (see the SINGLE-PRODUCT directive in
+        // buildArticlePrompt). Multi-pick roundups are retired on staging.
+        if (products.length > 1) {
           agent.log(
             "info",
-            `Competitor (editorial): "${competitorData.title.slice(0, 50)}..." (${competitorData.url}) — ${competitorData.wordCount} words`,
-            "strategist",
-            { kanbanStage: "inProgress" }
+            `Amazon: single-product mode — featuring "${(products[0].name ?? "").slice(0, 60)}" (dropping ${products.length - 1} other pick${products.length === 2 ? "" : "s"})`,
+            "productManager"
           );
-          // Patch targetWordCount now that we have real competitor word count.
-          // Delegate to the canonical helper so the formula stays in one place.
-          serpData.competitorWordCount = competitorData.wordCount;
-          serpData.targetWordCount = computeTargetWordCount(
-            competitorData.wordCount
-          );
-          agent.log(
-            "info",
-            `Word target set: ${serpData.targetWordCount} words (competitor ${competitorData.wordCount} × 1.10, cap 5000)`
-          );
-        } else {
-          agent.log(
-            "info",
-            `Competitor: no capturable editorial-style page in first ${maxAttempts} ranked organic results`,
-            "strategist",
-            { kanbanStage: "inProgress" }
-          );
+          products = products.slice(0, 1);
         }
       }
-    }
 
-    agent.setCurrentCompetitorUrl(
-      competitorData?.url && competitorData.url.trim() !== ""
-        ? competitorData.url.trim()
-        : null
+      return products;
+    })();
+
+    // Steps 3–4: SERP analysis (URLs + titles only), then competitor capture
+    // chained on its organic URLs — the word target is set once the real
+    // competitor word count is known.
+    const serpCompetitorTask = (async (): Promise<{
+      serpData: SerpData;
+      competitorData: CompetitorData | null;
+    }> => {
+      const serpData: SerpData = await analyzeSERP(
+        agent,
+        keyword,
+        agent.envBindings,
+        0 // competitorWordCount placeholder — patched below after capture
+      );
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // Step 4/24: Competitor Capture
+      // ═══════════════════════════════════════════════════════════════════════════
+      let competitorData: CompetitorData | null = null;
+      if (serpData.topUrls && serpData.topUrls.length > 0) {
+        const ranked = rankSerpUrlsForEditorialCompetitor(
+          serpData.topUrls,
+          serpData.topTitles
+        );
+        if (ranked.length === 0) {
+          agent.log(
+            "info",
+            "Competitor: top organic URLs look like storefronts/marketplaces only — none to capture",
+            "strategist",
+            { kanbanStage: "inProgress" }
+          );
+        } else {
+          const maxAttempts = Math.min(10, ranked.length);
+          for (let i = 0; i < maxAttempts; i++) {
+            const url = ranked[i];
+            competitorData = await captureCompetitor(agent, url, keyword);
+            if (competitorData) break;
+          }
+          if (competitorData) {
+            agent.log(
+              "info",
+              `Competitor (editorial): "${competitorData.title.slice(0, 50)}..." (${competitorData.url}) — ${competitorData.wordCount} words`,
+              "strategist",
+              { kanbanStage: "inProgress" }
+            );
+            // Patch targetWordCount now that we have real competitor word count.
+            // Delegate to the canonical helper so the formula stays in one place.
+            serpData.competitorWordCount = competitorData.wordCount;
+            serpData.targetWordCount = computeTargetWordCount(
+              competitorData.wordCount
+            );
+            agent.log(
+              "info",
+              `Word target set: ${serpData.targetWordCount} words (competitor ${competitorData.wordCount} × 1.10, cap 5000)`
+            );
+          } else {
+            agent.log(
+              "info",
+              `Competitor: no capturable editorial-style page in first ${maxAttempts} ranked organic results`,
+              "strategist",
+              { kanbanStage: "inProgress" }
+            );
+          }
+        }
+      }
+
+      agent.setCurrentCompetitorUrl(
+        competitorData?.url && competitorData.url.trim() !== ""
+          ? competitorData.url.trim()
+          : null
+      );
+
+      return { serpData, competitorData };
+    })();
+
+    // Step 5 prefetch: autocomplete PAA questions are fetched concurrently
+    // (a handful of free Google autocomplete GETs) and merged below only
+    // when the SERP surfaced fewer than 3 questions — the same merge rule
+    // the sequential pipeline used. fetchGoogleAutocompletePAA never
+    // throws; per-prefix failures are reported via the warn callback.
+    const paaPrefetchTask = fetchGoogleAutocompletePAA(keyword, (msg) =>
+      agent.log("warning", `Writer PAA step (${keyword}): ${msg}`)
     );
 
+    // Step 6: internal links — semantic AI Search (Tier 0) or SQLite
+    // (Tier 1); every tier handles its own errors.
+    const internalLinksTask = fetchSemanticInternalLinks(
+      agent,
+      keyword,
+      categorySlug,
+      slug,
+      domain
+    );
+
+    const [
+      products,
+      { serpData, competitorData },
+      prefetchedPaa,
+      internalLinks
+    ] = await Promise.all([
+      amazonTask,
+      serpCompetitorTask,
+      paaPrefetchTask,
+      internalLinksTask
+    ]);
+
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 5/24: PAA (People Also Ask) questions via Google autocomplete
+    // Step 5/24: PAA (People Also Ask) — merge the prefetched autocomplete
+    // questions into the SERP-provided set when the SERP came up short.
     // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("5/24: PAA Questions");
     let paaQuestions: string[] = serpData.paaQuestions || [];
     if (paaQuestions.length < 3) {
-      const additional = await fetchGoogleAutocompletePAA(keyword, (msg) =>
-        agent.log("warning", `Writer PAA step (${keyword}): ${msg}`)
-      );
       const existingSet = new Set(paaQuestions.map((q) => q.toLowerCase()));
-      for (const q of additional) {
+      for (const q of prefetchedPaa) {
         if (!existingSet.has(q.toLowerCase())) {
           paaQuestions.push(q);
           existingSet.add(q.toLowerCase());
@@ -1140,18 +1186,6 @@ async function generateArticleUnsafe(
       );
       intentGapResult = undefined;
     }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Step 6/24: Internal links — semantic AI Search (Tier 0) or SQLite (Tier 1)
-    // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("6/24: Internal Links");
-    const internalLinks = await fetchSemanticInternalLinks(
-      agent,
-      keyword,
-      categorySlug,
-      slug,
-      domain
-    );
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Step 7/24: AI content generation (structured JSON)
