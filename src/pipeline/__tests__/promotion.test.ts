@@ -78,3 +78,57 @@ describe("classifyUserAgent", () => {
     ).toBe("human");
   });
 });
+
+describe("index merge helpers", () => {
+  it("appends a new slug to a category index and dedupes repeats", async () => {
+    const { mergeCategoryIndex } = await import("../promotion");
+    const first = mergeCategoryIndex(`["a-slug"]`, "b-slug");
+    expect(JSON.parse(first.json)).toEqual(["a-slug", "b-slug"]);
+    expect(first.changed).toBe(true);
+    const again = mergeCategoryIndex(first.json, "b-slug");
+    expect(again.changed).toBe(false);
+  });
+
+  it("starts a fresh category index when the key is missing or corrupt", async () => {
+    const { mergeCategoryIndex } = await import("../promotion");
+    expect(JSON.parse(mergeCategoryIndex(null, "x").json)).toEqual(["x"]);
+    expect(JSON.parse(mergeCategoryIndex("not json", "x").json)).toEqual(["x"]);
+  });
+
+  it("appends to the global index deduped by slug+category", async () => {
+    const { mergeGlobalIndex } = await import("../promotion");
+    const entry = {
+      slug: "s",
+      url: "/c/s",
+      title: "T",
+      category: "c",
+      image: null
+    };
+    const first = mergeGlobalIndex("[]", entry);
+    expect(first.changed).toBe(true);
+    expect(mergeGlobalIndex(first.json, entry).changed).toBe(false);
+  });
+});
+
+describe("extractArticleTitleForIndex", () => {
+  it("prefers the H1 text", async () => {
+    const { extractArticleTitleForIndex } = await import("../promotion");
+    const html = `<title>Meta Title | Best Picks 2026</title><h1 class="x">Luxury Cat Carrier with <em>Plush</em> Bedding</h1>`;
+    expect(extractArticleTitleForIndex(html, "slug")).toBe(
+      "Luxury Cat Carrier with Plush Bedding"
+    );
+  });
+
+  it("falls back to the title tag minus its pipe suffix, then the slug", async () => {
+    const { extractArticleTitleForIndex } = await import("../promotion");
+    expect(
+      extractArticleTitleForIndex(
+        `<title>Great Cat Beds | Best Picks 2026</title>`,
+        "slug"
+      )
+    ).toBe("Great Cat Beds");
+    expect(extractArticleTitleForIndex("", "great-cat-beds")).toBe(
+      "Great Cat Beds"
+    );
+  });
+});

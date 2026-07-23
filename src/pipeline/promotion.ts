@@ -75,7 +75,80 @@ export interface PromotionResult {
   replacements?: number;
   bytes?: number;
   dryRun?: boolean;
+  indexes?: { category: boolean; global: boolean };
   error?: string;
+}
+
+/**
+ * Extract the article's display title for the production index: the H1
+ * text when present, else the <title> minus its " | …" / " — …" suffix.
+ */
+export function extractArticleTitleForIndex(
+  html: string,
+  fallbackSlug: string
+): string {
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const raw = h1
+    ? h1[1]
+    : (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
+  const text = raw
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+  const cleaned = h1 ? text : text.replace(/\s*[|—–]\s+[^|—–]*$/, "").trim();
+  return (
+    cleaned ||
+    fallbackSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+  );
+}
+
+/** Append a slug to a per-category index array, deduped; null input = new. */
+export function mergeCategoryIndex(
+  existingJson: string | null,
+  slug: string
+): { json: string; changed: boolean } {
+  let arr: string[] = [];
+  try {
+    const parsed = existingJson ? JSON.parse(existingJson) : [];
+    if (Array.isArray(parsed))
+      arr = parsed.filter((s) => typeof s === "string");
+  } catch {
+    arr = [];
+  }
+  if (arr.includes(slug)) return { json: JSON.stringify(arr), changed: false };
+  arr.push(slug);
+  return { json: JSON.stringify(arr), changed: true };
+}
+
+export interface GlobalIndexEntry {
+  slug: string;
+  url: string;
+  title: string;
+  category: string;
+  image: string | null;
+}
+
+/** Append an entry to the global v2_articles_index, deduped by slug+category. */
+export function mergeGlobalIndex(
+  existingJson: string | null,
+  entry: GlobalIndexEntry
+): { json: string; changed: boolean } {
+  let arr: GlobalIndexEntry[] = [];
+  try {
+    const parsed = existingJson ? JSON.parse(existingJson) : [];
+    if (Array.isArray(parsed)) arr = parsed as GlobalIndexEntry[];
+  } catch {
+    arr = [];
+  }
+  const exists = arr.some(
+    (e) => e && e.slug === entry.slug && e.category === entry.category
+  );
+  if (exists) return { json: JSON.stringify(arr), changed: false };
+  arr.push(entry);
+  return { json: JSON.stringify(arr), changed: true };
 }
 
 /**
@@ -166,6 +239,54 @@ export async function promoteArticleToProduction(
     };
   }
 
+  // 3b. Register the article in the production indexes so catsluvus.com
+  // links to it from category pages and includes it in the category
+  // sitemap (petinsurance builds both from `articles-index:<category>`,
+  // and site-wide listings from `v2_articles_index`). Without this a
+  // promoted article is an orphan page. Best-effort read-modify-write:
+  // a concurrent index write from the production generator could race,
+  // but promotions are low-frequency and the loser self-heals on the
+  // next prod publish.
+  const kvApiBase = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${prodNamespaceId}/values`;
+  const authHeaders = { Authorization: `Bearer ${apiToken}` };
+  const indexes = { category: false, global: false };
+  try {
+    const catKey = `${kvApiBase}/${encodeURIComponent(`articles-index:${categorySlug}`)}`;
+    const catRes = await fetch(catKey, { headers: authHeaders });
+    const catJson = catRes.ok ? await catRes.text() : null;
+    const catMerge = mergeCategoryIndex(catJson, slug);
+    if (catMerge.changed) {
+      const putCat = await fetch(catKey, {
+        method: "PUT",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: catMerge.json
+      });
+      indexes.category = putCat.ok;
+    }
+
+    const globalKey = `${kvApiBase}/${encodeURIComponent("v2_articles_index")}`;
+    const globalRes = await fetch(globalKey, { headers: authHeaders });
+    const globalJson = globalRes.ok ? await globalRes.text() : null;
+    const globalMerge = mergeGlobalIndex(globalJson, {
+      slug,
+      url: `/${categorySlug}/${slug}`,
+      title: extractArticleTitleForIndex(rewritten, slug),
+      category: categorySlug,
+      image: null
+    });
+    if (globalMerge.changed) {
+      const putGlobal = await fetch(globalKey, {
+        method: "PUT",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: globalMerge.json
+      });
+      indexes.global = putGlobal.ok;
+    }
+  } catch {
+    // Index registration is best-effort — the article itself is already
+    // live; a failed index write only delays internal-link discovery.
+  }
+
   // 4. Tombstone: staging URL now 301s to production. Order matters —
   // write the redirect BEFORE deleting the HTML so there is no window
   // where the staging URL 404s.
@@ -192,10 +313,18 @@ export async function promoteArticleToProduction(
         prodUrl,
         replacements,
         bytes: rewritten.length,
+        indexes,
         error: `promoted, but ledger update failed: ${errMsg(err)}`
       };
     }
   }
 
-  return { ok: true, kvKey, prodUrl, replacements, bytes: rewritten.length };
+  return {
+    ok: true,
+    kvKey,
+    prodUrl,
+    replacements,
+    bytes: rewritten.length,
+    indexes
+  };
 }
