@@ -98,6 +98,10 @@
     // where promoted articles are written and which host replaces the
     // staging host in their HTML.
     "PROMOTION_TARGET_DOMAIN": "catsluvus.com",
+    // Managed public domain of the seo-images-staging R2 bucket — hero
+    // images are referenced from here so URLs survive the staging →
+    // production host rewrite.
+    "IMAGES_PUBLIC_BASE_URL": "https://pub-d005467c78ef4809ab585678182662c8.r2.dev",
     "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30"
   }
 }

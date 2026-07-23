@@ -949,6 +949,23 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       `</div>`;
   }
 
+  // ── Image Hero ─────────────────────────────────────────────────────────────
+  // Rendered above the video block when a generated hero exists. Square
+  // source (Workers AI flux) is displayed as a wide editorial crop via
+  // object-fit. fetchpriority=high: it's the LCP candidate above the fold.
+
+  let imageHeroHtml = "";
+  if (trimmedHeroImageUrl) {
+    imageHeroHtml = `
+      <figure class="article-hero">
+        <img src="${escapeHtml(trimmedHeroImageUrl)}" alt="${escapeHtml(article.title)}" width="1024" height="1024" fetchpriority="high" decoding="async">
+      </figure>
+    `;
+  }
+  const imageHeroStyle = trimmedHeroImageUrl
+    ? `<style>.article-hero{margin:1.25rem 0}.article-hero img{width:100%;height:auto;max-height:430px;object-fit:cover;border-radius:12px;display:block}</style>`
+    : "";
+
   // ── Video Hero ─────────────────────────────────────────────────────────────
 
   let videoHeroHtml = "";
@@ -1221,6 +1238,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       localBusinessSchema
     ]
   })}</script>
+${imageHeroStyle}
 ${liteYoutubeStyle}
 <style>
 /* CSS Custom Properties */
@@ -1433,6 +1451,7 @@ input::placeholder{color:#767676 !important}
 <article itemscope itemtype="https://schema.org/Article">
   <h1 itemprop="headline">${escapeHtml(article.title)}</h1>
 
+  ${imageHeroHtml}
   ${videoHeroHtml}
 
   <div class="author-box" itemprop="author" itemscope itemtype="https://schema.org/Person">

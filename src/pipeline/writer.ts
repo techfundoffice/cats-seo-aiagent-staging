@@ -37,6 +37,7 @@ import {
   stripAsinParentheticals,
   type AmazonProduct
 } from "./amazon";
+import { generateAndStoreHeroImage } from "./article-image";
 import { analyzeSERP, computeTargetWordCount, type SerpData } from "./serp";
 import {
   probeUrlHttpStatus,
@@ -2090,6 +2091,20 @@ async function generateArticleUnsafe(
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Step 10.5/24: Hero image — Workers AI flux → R2 public bucket.
+    // Scene-based prompt (never product packaging: diffusion text comes
+    // out as gibberish). Non-fatal: null just means no hero on the page.
+    // ═══════════════════════════════════════════════════════════════════════════
+    agent.updateStep("10.5/24: Hero Image");
+    const heroImageUrl = await generateAndStoreHeroImage(
+      agent,
+      keyword,
+      categoryName,
+      categorySlug,
+      slug
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Step (removed): Image generation — REMOVED (broken R2 URLs, Our Top Picks above fold is better)
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2131,7 +2146,7 @@ async function generateArticleUnsafe(
       domain,
       tag,
       products,
-      heroImageUrl: undefined,
+      heroImageUrl: heroImageUrl ?? undefined,
       videoId: video?.videoId,
       videoTitle: video?.title,
       videoChannel: video?.channel,

@@ -302,7 +302,10 @@ export function calculateSEOScore(
     id: 15,
     pillar: P1,
     name: "Non-stock images (AI-generated)",
-    passed: html.includes("pub.catsluvus.com") || html.includes("seo-images"),
+    passed:
+      html.includes("pub.catsluvus.com") ||
+      html.includes("seo-images") ||
+      html.includes(".r2.dev/"),
     detail: "Custom images"
   });
   checks.push({
