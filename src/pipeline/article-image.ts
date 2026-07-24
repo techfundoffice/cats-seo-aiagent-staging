@@ -238,6 +238,42 @@ export function productImageR2Key(
   return `articles/${categorySlug}/${slug}-product-${productIndex}.jpg`;
 }
 
+/**
+ * FLUX.2 models reject the AI binding's JSON input ("required properties
+ * at '/' are 'multipart'", schema change observed 2026-07-24) — they only
+ * accept multipart/form-data, which the binding cannot send. Call the
+ * Workers AI REST endpoint directly for those models.
+ */
+const MULTIPART_ONLY_MODELS = new Set([BLOG_IMAGE_MODEL, PRODUCT_IMAGE_MODEL]);
+
+async function runImageModelMultipart(
+  env: unknown,
+  model: string,
+  prompt: string
+): Promise<string | null> {
+  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
+  if (!accountId || !apiToken) {
+    throw new Error("CF API creds missing for multipart image model call");
+  }
+  const form = new FormData();
+  form.append("prompt", prompt);
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiToken}` },
+      body: form
+    }
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${detail.slice(0, 160)}`);
+  }
+  const json = (await res.json()) as { result?: { image?: unknown } };
+  return typeof json.result?.image === "string" ? json.result.image : null;
+}
+
 async function generateSingleImage(
   agent: SEOArticleAgent,
   prompt: string,
@@ -248,22 +284,27 @@ async function generateSingleImage(
       AI?: { run: (model: string, inputs: unknown) => Promise<unknown> };
     }
   ).AI;
-  if (!ai) return null;
   const models = [model, FALLBACK_MODEL];
 
   for (const m of models) {
     try {
-      const result = await ai.run(m, { prompt });
-      if (
-        result &&
-        typeof result === "object" &&
-        "image" in (result as Record<string, unknown>) &&
-        typeof (result as Record<string, unknown>).image === "string"
-      ) {
-        return Uint8Array.from(
-          atob((result as Record<string, string>).image),
-          (c) => c.charCodeAt(0)
-        );
+      let base64: string | null = null;
+      if (MULTIPART_ONLY_MODELS.has(m)) {
+        base64 = await runImageModelMultipart(agent.envBindings, m, prompt);
+      } else {
+        if (!ai) continue;
+        const result = await ai.run(m, { prompt });
+        if (
+          result &&
+          typeof result === "object" &&
+          "image" in (result as Record<string, unknown>) &&
+          typeof (result as Record<string, unknown>).image === "string"
+        ) {
+          base64 = (result as Record<string, string>).image;
+        }
+      }
+      if (base64) {
+        return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
       }
     } catch (err: unknown) {
       agent.log("warning", `Image model ${m} failed: ${errMsg(err)}`);

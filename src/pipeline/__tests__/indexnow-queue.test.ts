@@ -105,27 +105,29 @@ describe("drainIndexNowPending", () => {
     expect(fetchInvocations).toBe(0);
   });
 
-  it("drains up to `max` URLs; succeeded ones disappear, failed ones stay", async () => {
+  it("drains per host-batch; the succeeded batch disappears, the failed batch stays", async () => {
     const kv: KvStore = new Map();
-    // Pre-populate the queue with 5 URLs.
+    // 3 prod URLs + 2 staging URLs. Same-host URLs submit as ONE
+    // batched urlList POST, so success/failure is per host-batch.
     kv.set(
       "indexnow-pending-queue",
-      JSON.stringify(
-        [1, 2, 3, 4, 5].map((i) => ({
+      JSON.stringify([
+        ...[1, 2, 3].map((i) => ({
           url: `https://catsluvus.com/${i}`,
           queuedAt: "2026-05-30T00:00:00.000Z"
+        })),
+        ...[4, 5].map((i) => ({
+          url: `https://staging.example.com/${i}`,
+          queuedAt: "2026-05-30T00:00:00.000Z"
         }))
-      )
+      ])
     );
-    // Fetch impl: succeed on urls ending /1, /2, /3, fail on /4, /5.
-    // The production call is fetch(url, { body: JSON.stringify(...) }),
-    // so we read urlList from the second-arg `init.body`.
+    // Fetch impl: the catsluvus.com batch succeeds, the staging batch 503s.
     const { agent } = makeFakeAgent(
       kv,
       async (_input: RequestInfo | URL, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body ?? "{}"));
-        const u: string = body.urlList?.[0] ?? "";
-        const ok = /\/(1|2|3)$/.test(u);
+        const ok = body.host === "catsluvus.com";
         return new Response(ok ? "ok" : "fail", { status: ok ? 200 : 503 });
       }
     );
@@ -136,12 +138,12 @@ describe("drainIndexNowPending", () => {
     // Failed URLs are still in the queue.
     const parsed = JSON.parse(kv.get("indexnow-pending-queue") as string);
     const remainingUrls = parsed.map((e: { url: string }) => e.url);
-    expect(remainingUrls).toContain("https://catsluvus.com/4");
-    expect(remainingUrls).toContain("https://catsluvus.com/5");
+    expect(remainingUrls).toContain("https://staging.example.com/4");
+    expect(remainingUrls).toContain("https://staging.example.com/5");
     expect(remainingUrls).not.toContain("https://catsluvus.com/1");
   });
 
-  it("respects the batch cap (default 3) — only 3 URLs attempted even if 10 queued", async () => {
+  it("respects the batch cap (default 3) and submits them as ONE urlList POST", async () => {
     const kv: KvStore = new Map();
     kv.set(
       "indexnow-pending-queue",
@@ -153,15 +155,23 @@ describe("drainIndexNowPending", () => {
       )
     );
     let fetchInvocations = 0;
-    const { agent } = makeFakeAgent(kv, async () => {
-      fetchInvocations++;
-      return new Response("ok", { status: 200 });
-    });
+    let lastUrlListLength = 0;
+    const { agent } = makeFakeAgent(
+      kv,
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        fetchInvocations++;
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        lastUrlListLength = body.urlList?.length ?? 0;
+        return new Response("ok", { status: 200 });
+      }
+    );
     const r = await drainIndexNowPending(agent);
     expect(r.attempted).toBe(3);
     expect(r.succeeded).toBe(3);
     expect(r.remaining).toBe(7);
-    expect(fetchInvocations).toBe(3);
+    // Batched: 3 queued URLs cost one request, not three.
+    expect(fetchInvocations).toBe(1);
+    expect(lastUrlListLength).toBe(3);
   });
 });
 
@@ -186,8 +196,7 @@ describe("queue invariant — no URL lost across a degraded → recovered cycle"
       init?: RequestInit
     ) => {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      const u: string = body.urlList?.[0] ?? "";
-      seen.add(u);
+      for (const u of body.urlList ?? []) seen.add(u as string);
       return new Response("ok", { status: 200 });
     };
     // Drain repeatedly until empty.

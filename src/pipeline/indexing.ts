@@ -43,6 +43,15 @@ const INDEXNOW_DRAIN_BATCH = 3;
 const INDEXNOW_403_BACKOFF_KEY = "indexnow-403-backoff";
 const INDEXNOW_403_BACKOFF_TTL_SECONDS = 6 * 60 * 60;
 
+/**
+ * Backoff after a 429 TooManyRequests. Shorter than the 403 backoff —
+ * rate limits clear on their own. Without this every publish keeps
+ * hammering the API (1 submit + drain batch), compounding the 429s.
+ * URLs stay queued and drain once the backoff lapses.
+ */
+const INDEXNOW_429_BACKOFF_KEY = "indexnow-429-backoff";
+const INDEXNOW_429_BACKOFF_TTL_SECONDS = 60 * 60;
+
 type IndexNowQueueEntry = { url: string; queuedAt: string };
 
 async function readIndexNowQueue(
@@ -119,12 +128,24 @@ export async function drainIndexNowPending(
   const tail = queue.slice(max);
   const stillPending: IndexNowQueueEntry[] = [];
   let succeeded = 0;
+  // One batched urlList POST per host — IndexNow accepts up to 10k URLs
+  // per submission, so N queued URLs cost 1 request instead of N.
+  const byHost = new Map<string, IndexNowQueueEntry[]>();
   for (const entry of head) {
-    const ok = await notifyIndexNowDirect(agent, entry.url);
+    const host = normalizeIndexNowHost(entry.url);
+    const group = byHost.get(host) ?? [];
+    group.push(entry);
+    byHost.set(host, group);
+  }
+  for (const group of byHost.values()) {
+    const ok = await notifyIndexNowDirect(
+      agent,
+      group.map((e) => e.url)
+    );
     if (ok) {
-      succeeded++;
+      succeeded += group.length;
     } else {
-      stillPending.push(entry);
+      stillPending.push(...group);
     }
   }
   const next = [...stillPending, ...tail];
@@ -168,21 +189,25 @@ function normalizeIndexNowHost(rawDomain: string | undefined): string {
  */
 async function notifyIndexNowDirect(
   agent: SEOArticleAgent,
-  url: string
+  urlOrUrls: string | string[]
 ): Promise<boolean> {
-  // Skip silently while the 403 backoff is active — the activation log
-  // line was written when the backoff was set, and the URL stays queued.
+  const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
+  if (urls.length === 0) return true;
+  const url = urls[0];
+  // Skip silently while a backoff is active — the activation log line
+  // was written when the backoff was set, and the URLs stay queued.
   try {
-    const backedOff = await agent.envBindings.ARTICLES_KV.get(
-      INDEXNOW_403_BACKOFF_KEY
-    );
+    const backedOff =
+      (await agent.envBindings.ARTICLES_KV.get(INDEXNOW_403_BACKOFF_KEY)) ||
+      (await agent.envBindings.ARTICLES_KV.get(INDEXNOW_429_BACKOFF_KEY));
     if (backedOff) return false;
   } catch {
     /* best-effort; fall through */
   }
-  const domain = normalizeIndexNowHost(
-    getEnvBinding(agent.envBindings, "DOMAIN")
-  );
+  // Host comes from the submitted URLs, not the worker's DOMAIN var:
+  // articles that cleared the quality gate live on catsluvus.com, and
+  // IndexNow rejects a urlList whose URLs don't belong to `host`.
+  const domain = normalizeIndexNowHost(url);
   // Default to the IndexNow key that is actually deployed and verifiable:
   // https://catsluvus.com/5d2a70a712524fe39b9dda29ab79e6ee.txt returns 200
   // (served by this worker's ASSETS binding from public/, via the
@@ -208,7 +233,7 @@ async function notifyIndexNowDirect(
     const defaultKeyLocation = `https://${domain}/${key}.txt`;
     const effectiveKeyLocation = keyLocation || defaultKeyLocation;
 
-    const body: Record<string, unknown> = { host: domain, key, urlList: [url] };
+    const body: Record<string, unknown> = { host: domain, key, urlList: urls };
     if (keyLocation) body.keyLocation = keyLocation;
 
     const resp = await fetch("https://api.indexnow.org/indexnow", {
@@ -229,7 +254,10 @@ async function notifyIndexNowDirect(
       return false;
     }
     if (resp.ok || resp.status === 202) {
-      agent.log("info", `IndexNow: ${resp.status} for ${url}`);
+      agent.log(
+        "info",
+        `IndexNow: ${resp.status} for ${urls.length > 1 ? `${urls.length} URLs (first: ${url})` : url}`
+      );
       return true;
     }
     const statusDetail = normalizeSingleLine(resp.statusText ?? "");
@@ -257,6 +285,27 @@ async function notifyIndexNowDirect(
       agent.log(
         "warning",
         `IndexNow: 403 for ${url}${detailSuffix} — site verification failed; backing off 6h (URLs stay queued). Re-verify the key file on catsluvus.com.`
+      );
+      return false;
+    }
+    if (resp.status === 429) {
+      // Rate limited — stop submitting for an hour instead of adding a
+      // 429 warning line for every publish + drain attempt. URLs stay
+      // queued and drain in one batched POST once the backoff lapses.
+      try {
+        await agent.envBindings.ARTICLES_KV.put(
+          INDEXNOW_429_BACKOFF_KEY,
+          new Date(
+            Date.now() + INDEXNOW_429_BACKOFF_TTL_SECONDS * 1000
+          ).toISOString(),
+          { expirationTtl: INDEXNOW_429_BACKOFF_TTL_SECONDS }
+        );
+      } catch {
+        /* best-effort */
+      }
+      agent.log(
+        "warning",
+        `IndexNow: 429 rate-limited — backing off 1h (URLs stay queued and drain in batches once it lapses)`
       );
       return false;
     }

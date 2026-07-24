@@ -3801,6 +3801,12 @@ async function generateArticleUnsafe(
             "marketing",
             { kanbanStage: "done" }
           );
+          // Tell IndexNow about the URL that actually matters — the live
+          // catsluvus.com page (the staging URL only 301s there now).
+          if (prodPublish.prodUrl) {
+            const { notifyIndexNow } = await import("./indexing");
+            await notifyIndexNow(agent, prodPublish.prodUrl);
+          }
         } else {
           agent.log(
             "warning",
