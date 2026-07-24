@@ -1489,6 +1489,8 @@ input::placeholder{color:#767676 !important}
 
   ${videoHeroHtml}
 
+  ${comparisonTableHtml}
+
   <div class="author-box" itemprop="author" itemscope itemtype="https://schema.org/Person">
     <img src="https://catsluvus.com/img/authors/amelia-hartwell.webp" alt="Amelia Hartwell, Cat Care Specialist" itemprop="image" width="100" height="100" fetchpriority="high" loading="eager">
     <div class="author-info">
@@ -1510,8 +1512,6 @@ input::placeholder{color:#767676 !important}
   `
       : ""
   }
-
-  ${comparisonTableHtml}
 
   ${
     article.keyTakeaways && article.keyTakeaways.length > 0
