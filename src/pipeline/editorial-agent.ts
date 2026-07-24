@@ -23,6 +23,7 @@
 
 import { parseObjectLike } from "../objectLike";
 import type { SEOArticleAgent } from "../server";
+import { DEFAULT_PROMOTION_TARGET_DOMAIN, prodKvRestApi } from "./prod-publish";
 import { extractKeywordPriceTokens, stripPricesFromHtml } from "./html-builder";
 import { runKimiWithPoll } from "./kimi-model";
 import {
@@ -38,6 +39,7 @@ import {
 import {
   errMsg,
   escXml,
+  getEnvBinding,
   isKimiCreditsExhausted,
   keywordToSlug,
   unescapeHtml
@@ -272,11 +274,37 @@ export async function runEditorialAgent(
   const wireframe = await loadOrIngestWireframe(agent, referenceUrl);
 
   // ── Step 1: read + text audit ─────────────────────────────────────────────
-  const html = await agent.envBindings.ARTICLES_KV.get(kvKey);
+  // Articles that cleared the ≥90 gate are moved to the PRODUCTION KV
+  // namespace (served from catsluvus.com) and the staging copy is
+  // replaced with a `redirect:<kvKey>` tombstone. On a staging miss,
+  // follow the tombstone and read the live prod copy via REST.
+  let html = await agent.envBindings.ARTICLES_KV.get(kvKey);
+  let prodPublished = false;
+  if (!html) {
+    const tombstone = await agent.envBindings.ARTICLES_KV.get(
+      `redirect:${kvKey}`
+    );
+    const prodApi = tombstone ? prodKvRestApi(agent.envBindings) : null;
+    if (prodApi) {
+      const prodRes = await fetch(
+        `${prodApi.base}/${encodeURIComponent(kvKey)}`,
+        { headers: prodApi.headers }
+      );
+      if (prodRes.ok) {
+        html = await prodRes.text();
+        prodPublished = true;
+        agent.log(
+          "info",
+          `Editorial Agent: ${kvKey} was published to production — auditing the live catsluvus.com copy`,
+          "editorialAgent"
+        );
+      }
+    }
+  }
   if (!html) {
     agent.log(
       "error",
-      `Editorial Agent: kvKey ${kvKey} not found in ARTICLES_KV`,
+      `Editorial Agent: kvKey ${kvKey} not found in ARTICLES_KV (and no production copy behind its redirect tombstone)`,
       "editorialAgent"
     );
     return { success: false, error: "article not found in KV" };
@@ -302,7 +330,14 @@ export async function runEditorialAgent(
   );
 
   // ── Step 2: browser screenshots ───────────────────────────────────────────
-  const publicUrl = kvKeyToPublicUrl(agent, kvKey);
+  const publicUrl = prodPublished
+    ? kvKeyToPublicUrl(
+        agent,
+        kvKey,
+        getEnvBinding(agent.envBindings, "PROMOTION_TARGET_DOMAIN") ??
+          DEFAULT_PROMOTION_TARGET_DOMAIN
+      )
+    : kvKeyToPublicUrl(agent, kvKey);
   agent.log(
     "info",
     `Editorial Agent [step 2/4]: dispatching Browser Rendering to screenshot ${publicUrl}`,
@@ -931,8 +966,32 @@ export async function runEditorialAgent(
   }
   // Overwrite the live article. `kvKey` is the canonical published URL
   // backing the page on catsluvus.com — the next request after this
-  // write serves the improved version.
-  await agent.envBindings.ARTICLES_KV.put(kvKey, cleanedRewrite.cleaned);
+  // write serves the improved version. Prod-published articles live in
+  // the production namespace, reachable only via REST.
+  if (prodPublished) {
+    const prodApi = prodKvRestApi(agent.envBindings);
+    const putRes = prodApi
+      ? await fetch(`${prodApi.base}/${encodeURIComponent(kvKey)}`, {
+          method: "PUT",
+          headers: {
+            ...prodApi.headers,
+            "Content-Type": "text/plain; charset=UTF-8"
+          },
+          body: cleanedRewrite.cleaned
+        })
+      : null;
+    if (!putRes?.ok) {
+      agent.log(
+        "error",
+        `Editorial Agent [step 4/4]: prod KV write failed for ${kvKey} (HTTP ${putRes?.status ?? "no creds"}) — live article unchanged`,
+        "editorialAgent"
+      );
+      await incrementEditorialStat(agent, "fail", "prod-kv-write-failed");
+      return { success: false, report, error: "prod KV write failed" };
+    }
+  } else {
+    await agent.envBindings.ARTICLES_KV.put(kvKey, cleanedRewrite.cleaned);
+  }
   // Persist updated report. `variantBKey` is intentionally left unset
   // because there is no variant B anymore — the rewrite IS the live
   // article. Kept in the type as optional for backwards compatibility
@@ -962,8 +1021,12 @@ function extractBodyText(html: string): string {
     .trim();
 }
 
-function kvKeyToPublicUrl(agent: SEOArticleAgent, kvKey: string): string {
-  const domain = agent.envBindings.DOMAIN || "catsluvus.com";
+function kvKeyToPublicUrl(
+  agent: SEOArticleAgent,
+  kvKey: string,
+  domainOverride?: string
+): string {
+  const domain = domainOverride || agent.envBindings.DOMAIN || "catsluvus.com";
   // KV key format varies; if it's `<category>:<slug>` map to
   // https://<domain>/<category>/<slug>. For additional `:` segments in the
   // slug part, preserve them as `-` so we still build a valid article URL.

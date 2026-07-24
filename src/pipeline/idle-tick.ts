@@ -5,7 +5,7 @@ import {
   enforceMetaSerpWindow,
   enforceTitleSerpWindow
 } from "./title-meta-normalizer";
-import { DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID } from "./prod-publish";
+import { prodKvRestApi } from "./prod-publish";
 
 /**
  * idle-tick.ts — productive use of the quiet minutes between article
@@ -45,22 +45,6 @@ interface CtrCandidate {
   impressions: number;
   clicks: number;
   position: number;
-}
-
-function prodKvApi(env: unknown): {
-  base: string;
-  headers: Record<string, string>;
-} | null {
-  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
-  const ns =
-    getEnvBinding(env, "PROD_ARTICLES_KV_NAMESPACE_ID") ??
-    DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID;
-  if (!accountId || !apiToken) return null;
-  return {
-    base: `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${ns}/values`,
-    headers: { Authorization: `Bearer ${apiToken}` }
-  };
 }
 
 /** Extract current title + meta description from a full HTML document. */
@@ -107,7 +91,7 @@ async function ctrTriageRewrite(
   const env = agent.envBindings;
   const db = env.KEYWORDS_DB;
   if (!db) return { ok: false, task: "ctr-rewrite", detail: "no KEYWORDS_DB" };
-  const api = prodKvApi(env);
+  const api = prodKvRestApi(env);
   if (!api) {
     return { ok: false, task: "ctr-rewrite", detail: "CF API creds missing" };
   }

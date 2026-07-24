@@ -132,3 +132,35 @@ describe("extractArticleTitleForIndex", () => {
     );
   });
 });
+
+describe("prodKvRestApi", () => {
+  it("builds the REST base + auth header from env bindings", async () => {
+    const { prodKvRestApi } = await import("../prod-publish");
+    const api = prodKvRestApi({
+      CLOUDFLARE_ACCOUNT_ID: "acct123",
+      CLOUDFLARE_API_TOKEN: "tok456",
+      PROD_ARTICLES_KV_NAMESPACE_ID: "ns789"
+    });
+    expect(api).not.toBeNull();
+    expect(api?.base).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct123/storage/kv/namespaces/ns789/values"
+    );
+    expect(api?.headers.Authorization).toBe("Bearer tok456");
+  });
+
+  it("falls back to the default prod namespace id", async () => {
+    const { prodKvRestApi, DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID } =
+      await import("../prod-publish");
+    const api = prodKvRestApi({
+      CLOUDFLARE_ACCOUNT_ID: "acct123",
+      CLOUDFLARE_API_TOKEN: "tok456"
+    });
+    expect(api?.base).toContain(DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID);
+  });
+
+  it("returns null when credentials are missing", async () => {
+    const { prodKvRestApi } = await import("../prod-publish");
+    expect(prodKvRestApi({})).toBeNull();
+    expect(prodKvRestApi({ CLOUDFLARE_ACCOUNT_ID: "acct123" })).toBeNull();
+  });
+});

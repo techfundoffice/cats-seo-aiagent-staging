@@ -30,6 +30,29 @@ export const DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID =
   "bd3b856b2ae147ada9a8d236dd4baf30";
 
 /**
+ * REST access to the production ARTICLES_KV namespace. Cross-namespace
+ * reads/writes are impossible through bindings (staging only binds its
+ * own KV), so post-publish consumers (Editorial Agent, idle-tick CTR
+ * rewrites) go through the Cloudflare API. Returns null when the worker
+ * is missing CF credentials.
+ */
+export function prodKvRestApi(env: unknown): {
+  base: string;
+  headers: Record<string, string>;
+} | null {
+  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
+  const ns =
+    getEnvBinding(env, "PROD_ARTICLES_KV_NAMESPACE_ID") ??
+    DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID;
+  if (!accountId || !apiToken) return null;
+  return {
+    base: `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${ns}/values`,
+    headers: { Authorization: `Bearer ${apiToken}` }
+  };
+}
+
+/**
  * Rewrite every reference to the staging host into the production host:
  * canonical link, og:url, JSON-LD @id/url fields, internal links,
  * breadcrumbs — anything carrying the old origin. Scheme-qualified and
