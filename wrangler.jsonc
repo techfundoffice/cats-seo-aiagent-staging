@@ -55,11 +55,10 @@
       }
     ]
   },
-  // Cron intentionally OFF on staging. Flip to ["* * * * *"] only when you want
-  // this worker to autonomously scout + generate + publish (and, if
-  // GITHUB_TOKEN_SECRET is set, open GitHub issues). Leave empty for a quiet
-  // staging site you drive manually via POST /api/generate-one.
-  "triggers": { "crons": [] },
+  // Every 10 minutes: crawl tick, analytics tick, and the idle tick
+  // (GSC sync + CTR snippet rewrites). None of these start the article
+  // generator — generation remains manual via POST /api/generate-one.
+  "triggers": { "crons": ["*/10 * * * *"] },
   "r2_buckets": [
     {
       "binding": "IMAGES_R2",

@@ -5862,6 +5862,14 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       return Response.json({ ok: true, ...result });
     }
 
+    // Idle tick — cron-fired between-generations maintenance (GSC sync,
+    // CTR snippet rewrites). Hard-skips when the pipeline is busy.
+    if (url.pathname === "/api/idle-tick" && request.method === "POST") {
+      const { runIdleTick } = await import("./pipeline/idle-tick");
+      const result = await runIdleTick(this);
+      return Response.json(result);
+    }
+
     // ── Browser analytics endpoints — same DO SQL queries as the Bearer-
     //    protected /api/admin/analytics/* surface, but exposed to the
     //    cookie-walled dashboard so the Rankings panel can fetch directly
@@ -8577,6 +8585,21 @@ export default {
     ctx: ExecutionContext
   ) {
     ctx.waitUntil(runCrawlTick(env).then(() => undefined));
+    // Idle tick — between-generations SEO maintenance. The DO route
+    // skips itself when a generation is running.
+    ctx.waitUntil(
+      (async () => {
+        const id = env.SEOArticleAgent.idFromName("default");
+        const stub = env.SEOArticleAgent.get(id);
+        try {
+          await stub.fetch(
+            new Request("https://internal/api/idle-tick", { method: "POST" })
+          );
+        } catch (err: unknown) {
+          console.warn(`Idle tick dispatch failed: ${errMsg(err)}`);
+        }
+      })()
+    );
     // Analytics tick — pulls DataForSEO Labs ranked-keywords for a small
     // batch of stale published articles and persists results into the DO's
     // `article_rankings` table. Self-paced: each cron tick picks up the
