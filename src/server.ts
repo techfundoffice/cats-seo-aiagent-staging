@@ -3205,28 +3205,75 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       );
       return null;
     }
-    try {
-      const res = await db
-        .prepare(
-          `UPDATE scout_keywords
+    // Cannibalization guard: a claimed keyword whose (entity, intent) is
+    // already owned by a live article is marked `duplicate` and skipped
+    // rather than generated. Bounded retries so a run of duplicates
+    // can't spin — the loop simply picks up again on the next tick.
+    const MAX_DUPLICATE_SKIPS = 5;
+    for (let attempt = 0; attempt <= MAX_DUPLICATE_SKIPS; attempt++) {
+      let claimed: {
+        keyword: string;
+        slug: string;
+        category_slug: string;
+        category_title: string;
+      } | null;
+      try {
+        const res = await db
+          .prepare(
+            `UPDATE scout_keywords
               SET status = 'generating', claimed_at = datetime('now')
             WHERE id = (SELECT id FROM scout_keywords
                          WHERE status = 'pending'
                          ORDER BY priority DESC, volume DESC, id ASC
                          LIMIT 1)
             RETURNING keyword, slug, category_slug, category_title`
-        )
-        .all<{
-          keyword: string;
-          slug: string;
-          category_slug: string;
-          category_title: string;
-        }>();
-      return res.results?.[0] ?? null;
-    } catch (err: unknown) {
-      this.log("warning", `Scout DB claim failed: ${errMsg(err)}`, "analyst");
-      return null;
+          )
+          .all<{
+            keyword: string;
+            slug: string;
+            category_slug: string;
+            category_title: string;
+          }>();
+        claimed = res.results?.[0] ?? null;
+      } catch (err: unknown) {
+        this.log("warning", `Scout DB claim failed: ${errMsg(err)}`, "analyst");
+        return null;
+      }
+      if (!claimed) return null;
+
+      const { checkKeywordOwnership } =
+        await import("./pipeline/entity-ownership");
+      const verdict = await checkKeywordOwnership(db, claimed.keyword, {
+        categorySlug: claimed.category_slug
+      });
+      if (!verdict.duplicate) return claimed;
+
+      // Release the claim as a duplicate and try the next keyword.
+      try {
+        await db
+          .prepare(
+            `UPDATE scout_keywords
+                SET status = 'duplicate', error = ?1,
+                    finished_at = datetime('now')
+              WHERE slug = ?2 AND status = 'generating'`
+          )
+          .bind(
+            `duplicate-of:${verdict.ownerKvKey ?? ""}`.slice(0, 500),
+            claimed.slug
+          )
+          .run();
+      } catch {
+        /* best-effort — the row stays 'generating' and the stuck-keyword
+           sweep will reclaim it */
+      }
+      this.log(
+        "info",
+        `Cannibalization guard: skipped "${claimed.keyword}" — ${verdict.entityId} (${verdict.intent}) already owned by ${verdict.ownerUrl || verdict.ownerKvKey}`,
+        "analyst",
+        { kanbanStage: "queue", categorySlug: claimed.category_slug }
+      );
     }
+    return null;
   }
 
   /**

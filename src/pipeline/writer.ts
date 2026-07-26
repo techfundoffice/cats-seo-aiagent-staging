@@ -2870,6 +2870,34 @@ async function generateArticleUnsafe(
             competitorData?.url ?? ""
           )
           .run();
+
+        // Entity ownership: claim this (entity, intent) so the next
+        // keyword resolving to the same product can't be generated as a
+        // near-duplicate. Best-effort — a failure here must never fail
+        // the publish, it only means the guard misses this one article.
+        try {
+          const { recordKeywordOwnership } = await import("./entity-ownership");
+          const owned = await recordKeywordOwnership(ledgerDb, {
+            keyword,
+            keywordSlug: slug,
+            kvKey,
+            url,
+            asin: products[0]?.asin,
+            categorySlug
+          });
+          if (owned.ok) {
+            agent.log(
+              "info",
+              `Entity ownership: ${owned.entityId} claimed by ${kvKey}`,
+              "analyst"
+            );
+          }
+        } catch (ownErr: unknown) {
+          agent.log(
+            "warning",
+            `Entity ownership write skipped for ${kvKey}: ${errMsg(ownErr)}`
+          );
+        }
       }
     } catch (ledgerErr: unknown) {
       agent.log(
