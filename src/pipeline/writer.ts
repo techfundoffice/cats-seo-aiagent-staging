@@ -3805,6 +3805,22 @@ async function generateArticleUnsafe(
     // that failed the bar.
     // ═══════════════════════════════════════════════════════════════════════════
     agent.updateStep("Final: Production Publish");
+    // Refresh the ledger score. The row is inserted mid-pipeline, before
+    // the QC and Polish steps reassign `seoResult`, so it otherwise keeps
+    // a stale PRE-polish score — the dashboard and every score report
+    // then understate real quality (observed: a ledger 89 on an article
+    // that passed the >=90 gate on its true post-polish score).
+    if (agent.envBindings.KEYWORDS_DB) {
+      try {
+        await agent.envBindings.KEYWORDS_DB.prepare(
+          `UPDATE article_ledger SET seo_score = ?1 WHERE kv_key = ?2`
+        )
+          .bind(seoResult.score, kvKey)
+          .run();
+      } catch {
+        /* best-effort — the ledger is reporting, not control flow */
+      }
+    }
     const prodPublishMinScoreRaw = getEnvBinding(
       agent.envBindings,
       "PROD_PUBLISH_MIN_SCORE"
@@ -3834,6 +3850,23 @@ async function generateArticleUnsafe(
           if (prodPublish.prodUrl) {
             const { notifyIndexNow } = await import("./indexing");
             await notifyIndexNow(agent, prodPublish.prodUrl);
+          }
+          // Point the ownership row at the live production URL. It was
+          // written beside the ledger row, before this step ran, so it
+          // still carries the staging URL that now only 301s here.
+          // Guard correctness is unaffected (matching is on entity+intent),
+          // but the cannibalization report must cite real live URLs.
+          if (prodPublish.prodUrl && agent.envBindings.KEYWORDS_DB) {
+            try {
+              await agent.envBindings.KEYWORDS_DB.prepare(
+                `UPDATE keyword_ownership SET owning_url = ?1
+                  WHERE owning_kv_key = ?2 AND status = 'owned'`
+              )
+                .bind(prodPublish.prodUrl, kvKey)
+                .run();
+            } catch {
+              /* best-effort — cosmetic only */
+            }
           }
         } else {
           agent.log(
