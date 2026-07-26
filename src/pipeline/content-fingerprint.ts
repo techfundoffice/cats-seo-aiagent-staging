@@ -12,6 +12,8 @@ export interface ContentFingerprintCheckOptions {
   render: () => Promise<ContentFingerprintAttempt>;
   maxAttempts?: number;
   retryDelayMs?: number;
+  /** Multiplier applied per retry (default 2 = exponential backoff). */
+  retryBackoffFactor?: number;
   sleep?: (ms: number) => Promise<void>;
   onWarning?: (message: string) => void;
 }
@@ -45,7 +47,8 @@ export function normalizeForFingerprint(s: string): string {
  * DOM. Normalizes both the expected fingerprints and the rendered HTML via
  * `normalizeForFingerprint`, then does substring matching.
  *
- * Retries up to `maxAttempts` times (default 3) with `retryDelayMs`
+ * Retries up to `maxAttempts` times (default 5) with exponential
+ * backoff starting at `retryDelayMs`
  * between attempts (default 2 s) to tolerate CDN propagation lag. A custom
  * `sleep` function can be injected for tests so they run without real
  * delays.
@@ -70,11 +73,21 @@ export async function checkContentFingerprint({
   bodyFingerprint,
   bodyFingerprintSource,
   render,
-  maxAttempts = 3,
+  // 5 attempts with exponential backoff (2s, 4s, 8s, 16s = ~30s of
+  // waiting) instead of the original 3 × fixed 2s (~4s). A KV write is
+  // not instantly visible at every edge, and the original window was
+  // far too short: on 2026-07-26 a 97-scoring article failed this gate
+  // and was stranded on staging, yet the same URL served the correct
+  // content minutes later. A mismatch should mean "wrong content is
+  // serving", never "the edge hadn't caught up yet".
+  maxAttempts = 5,
   retryDelayMs = 2_000,
+  retryBackoffFactor = 2,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onWarning
 }: ContentFingerprintCheckOptions): Promise<ContentFingerprintCheckResult> {
+  const delayForAttempt = (attempt: number) =>
+    retryDelayMs * Math.pow(retryBackoffFactor, attempt - 1);
   let lastRenderError: string | undefined;
   let lastMismatch: { missing: string; renderedLength: number } | undefined;
 
@@ -86,7 +99,7 @@ export async function checkContentFingerprint({
         `Content fingerprint render attempt ${attempt} failed: ${rendered.error ?? "unknown"}`
       );
       if (attempt < maxAttempts) {
-        await sleep(retryDelayMs);
+        await sleep(delayForAttempt(attempt));
       }
       continue;
     }
@@ -111,7 +124,7 @@ export async function checkContentFingerprint({
       `Content fingerprint attempt ${attempt} rendered HTML missing [${missing}]`
     );
     if (attempt < maxAttempts) {
-      await sleep(retryDelayMs);
+      await sleep(delayForAttempt(attempt));
     }
   }
 

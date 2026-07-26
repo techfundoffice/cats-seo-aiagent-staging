@@ -72,7 +72,7 @@ describe("checkContentFingerprint", () => {
       missing: "title,body:intro",
       renderedLength: expect.any(Number)
     });
-    expect(render).toHaveBeenCalledTimes(3);
+    expect(render).toHaveBeenCalledTimes(5); // default budget raised to 5
   });
 
   it("skips the gate when rendering never returns html", async () => {
@@ -94,6 +94,58 @@ describe("checkContentFingerprint", () => {
       skipped: true,
       lastRenderError: "HTTP 502"
     });
-    expect(render).toHaveBeenCalledTimes(3);
+    expect(render).toHaveBeenCalledTimes(5); // default budget raised to 5
+  });
+});
+
+// Regression: 2026-07-26. A 97-scoring article failed this gate and was
+// stranded on staging, yet the same URL served correct content minutes
+// later — the retry window (3 x fixed 2s ~= 4s) was shorter than real KV
+// edge propagation. The gate must survive a slow edge.
+describe("checkContentFingerprint — edge-propagation tolerance", () => {
+  it("succeeds when the edge only catches up on the 5th attempt", async () => {
+    let attempt = 0;
+    const slept: number[] = [];
+    const result = await checkContentFingerprint({
+      titleFingerprint: "yunique soft-sided cat carrier",
+      bodyFingerprint:
+        "airline approved carrier for pets up to fifteen pounds total",
+      bodyFingerprintSource: "intro",
+      render: async () => {
+        attempt++;
+        // Stale empty shell until the 5th render.
+        return attempt < 5
+          ? { html: "<html><body>loading</body></html>" }
+          : {
+              html:
+                "<title>YUNIQUE Soft-Sided Cat Carrier</title>" +
+                "<p>Airline approved carrier for pets up to fifteen pounds total.</p>"
+            };
+      },
+      sleep: async (ms) => {
+        slept.push(ms);
+      }
+    });
+    expect(result.ok).toBe(true);
+    expect(attempt).toBe(5);
+    // Exponential, not fixed: 2s, 4s, 8s, 16s.
+    expect(slept).toEqual([2000, 4000, 8000, 16000]);
+  });
+
+  it("still reports a genuine mismatch after exhausting all attempts", async () => {
+    const result = await checkContentFingerprint({
+      titleFingerprint: "this article's title",
+      bodyFingerprint: "this article's body text which is long enough",
+      bodyFingerprintSource: "intro",
+      render: async () => ({
+        html: "<title>A completely different article</title><p>Other content.</p>"
+      }),
+      sleep: async () => {}
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && !result.skipped) {
+      expect(result.missing).toContain("title");
+      expect(result.missing).toContain("body:intro");
+    }
   });
 });
