@@ -72,7 +72,21 @@ export type FabricatedTestingClaimCategory =
    * FTC 16 CFR Part 255 false-endorsement claims even when they don't
    * use the "we tested" verb form.
    */
-  | "self-endorsement-claim";
+  | "self-endorsement-claim"
+  /**
+   * Claimed OBSERVATION of product performance. Added 2026-07-27 after
+   * this shipped live in a "Why You Should Trust Us" block:
+   *
+   *   "Our team observes daily how different tools perform across
+   *    diverse cat breeds and coat types in real boarding environments."
+   *
+   * No testing verb appears, so every existing pattern missed it — yet
+   * it asserts exactly the hands-on product experience Cats Luv Us does
+   * not have. Observing CATS is legitimate and must keep passing; only
+   * claims about watching PRODUCTS perform are fabricated, so these
+   * patterns all require a product noun or a performance verb.
+   */
+  | "observed-performance";
 
 export interface FabricatedTestingClaimFinding {
   /** Which framing category the trigger fell into. */
@@ -236,6 +250,25 @@ const TRIGGERS: Array<{
     category: "self-endorsement-claim",
     pattern:
       /\b(?:hands[-\s]?on|first[-\s]?hand)\s+(?:product\s+|cat[-\s]?care\s+)?(?:facility|boarding)\s+(?:testing|knowledge|experience)\s+(?:with|of)\b/i
+  },
+  // ── observed-performance ────────────────────────────────────────────
+  // "Our team observes daily how different tools perform across diverse
+  // cat breeds and coat types in real boarding environments." No testing
+  // verb, so every pattern above missed it — but it claims sustained
+  // hands-on product experience all the same.
+  //
+  // Both patterns require a PRODUCT noun or a performance verb, because
+  // observing cats is legitimate and must keep passing: "our team
+  // observes how cats behave in boarding" is true and stays.
+  {
+    category: "observed-performance",
+    pattern:
+      /\b(?:we|our\s+team|our\s+staff|our\s+groomers?)\s+(?:observe|observes|observed|watch|watches|watched|see|sees|saw|notice|notices|noticed)\s+(?:\w+\s+){0,3}how\s+(?:\w+\s+){0,3}(?:tools?|products?|brushes?|combs?|litters?|fountains?|carriers?|toys?|models?|brands?|formulas?|units?)\b/i
+  },
+  {
+    category: "observed-performance",
+    pattern:
+      /\bhow\s+(?:different\s+|various\s+|these\s+|competing\s+)?(?:tools?|products?|brands?|models?|formulas?|units?)\s+(?:perform|performs|performed|hold\s+up|holds\s+up|held\s+up|fare|fares|fared|last|lasts|lasted)\b/i
   }
 ];
 

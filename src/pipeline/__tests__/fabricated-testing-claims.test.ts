@@ -611,3 +611,43 @@ describe("removeFabricatedTestingSentences — basic removal", () => {
     expect(out).not.toContain("evaluated every product");
   });
 });
+
+describe("observed-performance — claimed observation of product performance", () => {
+  it("flags the live 'Why You Should Trust Us' sentence found 2026-07-27", () => {
+    const s =
+      "Our team observes daily how different tools perform across diverse cat breeds and coat types in real boarding environments.";
+    const findings = detectFabricatedTestingClaims(s);
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings.some((f) => f.category === "observed-performance")).toBe(
+      true
+    );
+  });
+
+  it("flags equivalent phrasings that use no testing verb", () => {
+    for (const s of [
+      "We watch how various products hold up over months of daily use.",
+      "Our staff notices how these brushes perform on long-haired cats.",
+      "Our team sees firsthand how different litters perform week to week.",
+      "It is obvious how competing models fare against each other."
+    ]) {
+      expect(
+        detectFabricatedTestingClaims(s).length,
+        `missed: ${s}`
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("does NOT flag legitimate observation of CATS, only of products", () => {
+    for (const s of [
+      "Our team observes daily how cats behave during their first night boarding.",
+      "We notice how nervous cats respond to a quieter room.",
+      "Our staff sees how different breeds tolerate handling.",
+      "Amelia observes how kittens socialize with older residents."
+    ]) {
+      expect(
+        detectFabricatedTestingClaims(s).length,
+        `false positive: ${s}`
+      ).toBe(0);
+    }
+  });
+});
