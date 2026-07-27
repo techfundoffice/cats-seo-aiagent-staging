@@ -3281,6 +3281,18 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
    * slug; a row that was never claimed from the DB (e.g. a manual
    * generateOne with a novel keyword) is simply not present and the
    * UPDATE is a no-op. Never throws.
+   *
+   * Accepts 'pending' as well as 'generating'. The autonomous loop
+   * drains the DO's RUNTIME keyword table before it claims anything
+   * from the Scout DB, so an article regenerated via /api/admin/retry
+   * (which resets the runtime row) publishes while its scout row is
+   * still 'pending'. Requiring 'generating' made the write-back
+   * silently no-op in exactly that case: observed 2026-07-27, three
+   * articles published to production at 07:54/08:04/08:15 whose scout
+   * rows kept finished_at NULL, were re-claimed 40 minutes later, and
+   * stuck in 'generating' forever. Left unfixed this also risks
+   * regenerating an already-published keyword — duplicate content.
+   * Terminal states (published/failed/duplicate) are never overwritten.
    */
   private async updateScoutKeywordOutcome(
     slug: string,
@@ -3296,7 +3308,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           `UPDATE scout_keywords
               SET status = ?1, kv_key = ?2, error = ?3,
                   finished_at = datetime('now')
-            WHERE slug = ?4 AND status = 'generating'`
+            WHERE slug = ?4 AND status IN ('generating', 'pending')`
         )
         .bind(status, kvKey, error.slice(0, 500), slug)
         .run();
