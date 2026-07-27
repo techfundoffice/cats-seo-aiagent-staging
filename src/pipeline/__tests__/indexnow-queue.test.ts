@@ -105,10 +105,10 @@ describe("drainIndexNowPending", () => {
     expect(fetchInvocations).toBe(0);
   });
 
-  it("drains per host-batch; the succeeded batch disappears, the failed batch stays", async () => {
+  it("drains per host-batch; prod successes clear; non-promotion hosts drop", async () => {
     const kv: KvStore = new Map();
-    // 3 prod URLs + 2 staging URLs. Same-host URLs submit as ONE
-    // batched urlList POST, so success/failure is per host-batch.
+    // 3 prod URLs + 2 non-promotion hosts. Non-promotion hosts must be
+    // dropped (not re-queued) so they never arm IndexNow 403 backoff.
     kv.set(
       "indexnow-pending-queue",
       JSON.stringify([
@@ -122,7 +122,6 @@ describe("drainIndexNowPending", () => {
         }))
       ])
     );
-    // Fetch impl: the catsluvus.com batch succeeds, the staging batch 503s.
     const { agent } = makeFakeAgent(
       kv,
       async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -133,13 +132,12 @@ describe("drainIndexNowPending", () => {
     );
     const r = await drainIndexNowPending(agent, 5);
     expect(r.attempted).toBe(5);
-    expect(r.succeeded).toBe(3);
-    expect(r.remaining).toBe(2);
-    // Failed URLs are still in the queue.
+    // 3 catsluvus success + 2 non-promotion dropped from queue
+    expect(r.succeeded).toBe(5);
+    expect(r.remaining).toBe(0);
     const parsed = JSON.parse(kv.get("indexnow-pending-queue") as string);
     const remainingUrls = parsed.map((e: { url: string }) => e.url);
-    expect(remainingUrls).toContain("https://staging.example.com/4");
-    expect(remainingUrls).toContain("https://staging.example.com/5");
+    expect(remainingUrls).not.toContain("https://staging.example.com/4");
     expect(remainingUrls).not.toContain("https://catsluvus.com/1");
   });
 

@@ -4902,7 +4902,7 @@ function injectDefaultFaqs(
     },
     {
       question: `What do veterinarians recommend for ${plural}?`,
-      answer: `Veterinarians prioritize non-toxic materials, appropriate sizing, and safety certifications. Avoid anything with small detachable parts a cat could swallow, and choose washable surfaces whenever possible — both points came up in every vet interview we did.`
+      answer: `Veterinarians generally prioritize non-toxic materials, appropriate sizing, and safety certifications. Avoid anything with small detachable parts a cat could swallow, and choose washable surfaces whenever possible — those criteria match common clinical safety guidance for home cat products.`
     }
   ];
 

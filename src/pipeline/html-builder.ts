@@ -939,7 +939,18 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
         const completedReasoning = ensureWhyWeLikeMarker(proseReasoning, {
           label: reasoning?.label,
           productName: product.displayName,
-          keyword
+          keyword,
+          // Wire real product metrics into the thin-blurb fallback so
+          // Kimi/Grok omissions still ship editorial (not templated) copy.
+          ratingValue:
+            typeof product.ratingValue === "number"
+              ? product.ratingValue
+              : undefined,
+          reviewCount:
+            typeof product.reviewCount === "number"
+              ? product.reviewCount
+              : undefined,
+          features: product.features
         });
         const reasoningHtml =
           `<div class="pick-reasoning">` +
@@ -1044,13 +1055,17 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
   //     don't actually have data for.
   // Either way the section prevents the "personal anecdotes" SEO check
   // from tricking the writer into fabricating hands-on claims.
+  const howWePickedLead =
+    products.length === 1
+      ? `We evaluated this ${keyword}${/s$/i.test(keyword) ? "" : " product"} sold on Amazon against public listing data and review signal. We weighed:`
+      : `We compared ${products.length} ${keyword}${/s$/i.test(keyword) ? "" : " products"} sold on Amazon. For each pick we weighed:`;
   const howWeTestedHtml =
     products.length > 0
       ? `
     <section class="wc-methodology" style="margin:32px 0;padding:24px;background:#fff;border:1px solid #e2e8f0;border-radius:8px">
       <h2 style="margin:0 0 12px;font-size:22px">How We Picked</h2>
       <p style="margin:0 0 12px;color:#374151">
-        We compared ${products.length} ${keyword}${/s$/i.test(keyword) ? "" : " products"} sold on Amazon. For each pick we weighed:
+        ${howWePickedLead}
       </p>
       <ul style="margin:0 0 12px 20px;color:#374151;line-height:1.6">
         <li><strong>Manufacturer specifications</strong> — dimensions, materials, and stated durability from the listing page.</li>

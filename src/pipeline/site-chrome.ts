@@ -1351,7 +1351,7 @@ const CHROME_FOOTER = `<footer class="universal-footer">
         </div>
         <div class="footer-reviews-disclosure">
           <div class="footer-heading">Our Cat Product Reviews</div>
-          <p>At CatsLuvUs.com, many of the products we feature are the same ones used every day by our feline guests at Cats Luv Us Boarding Hotel in Laguna Niguel, California, where we've specialized in cat boarding and grooming for over 30 years. Drawing on real-world experience with thousands of cats of different breeds, ages, and personalities, our team focuses on how products actually perform in everyday use, from comfort and enrichment to ease of cleaning and safety. When we've personally tested an item in our facility, we explain how we used it and what we observed, and we regularly update our recommendations as we see what works best for the cats in our care.</p>
+          <p>At CatsLuvUs.com, many of the products we feature are the kinds of gear our feline guests use every day at Cats Luv Us Boarding Hotel in Laguna Niguel, California, where we've specialized in cat boarding and grooming for over 30 years. Drawing on real-world experience caring for thousands of cats of different breeds, ages, and personalities, our team ranks picks using manufacturer specifications, customer review aggregates, and boarding-floor care knowledge — not physical product lab trials. We regularly refresh recommendations as product listings and guest needs change.</p>
         </div>
         <div class="footer-bottom">
           <p>&copy; 2026 <a href="https://catsluvus.com/">CatsLuvUs</a>. All rights reserved. Made with ❤️ for cat lovers.</p>
