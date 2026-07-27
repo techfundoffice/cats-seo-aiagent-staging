@@ -1491,15 +1491,13 @@ input::placeholder{color:#767676 !important}
 
   ${comparisonTableHtml}
 
-  <div class="author-box" itemprop="author" itemscope itemtype="https://schema.org/Person">
-    <img src="https://catsluvus.com/img/authors/amelia-hartwell.webp" alt="Amelia Hartwell, Cat Care Specialist" itemprop="image" width="100" height="100" fetchpriority="high" loading="eager">
-    <div class="author-info">
-      <p class="written-by">Written by Amelia Hartwell &amp; CatGPT</p>
-      <p class="credentials" itemprop="jobTitle">Cat Care Specialist | Certified Feline Behavior Consultant</p>
-      <p class="bio">With over 15 years caring for cats at Cats Luv Us Boarding Hotel &amp; Grooming in Laguna Niguel, CA, Amelia draws on daily boarding-floor experience with thousands of cats. Product picks in these guides are synthesized from public manufacturer specs and customer review aggregates — no physical product trials are conducted by Cats Luv Us.</p>
-      <p class="date-info">Last Updated: <time itemprop="dateModified" datetime="${dateNow}">${dateFormatted}</time></p>
-    </div>
-  </div>
+  <!-- Author box removed 2026-07-27 by operator request. Authorship is
+       still declared to search engines via the JSON-LD Person entity in
+       <head> (authorEntity), so E-E-A-T structured data is unaffected;
+       only the visible byline/credentials/bio block is gone. The
+       last-updated timestamp is kept as a standalone dateModified so the
+       freshness signal survives. -->
+  <p class="date-info">Last Updated: <time itemprop="dateModified" datetime="${dateNow}">${dateFormatted}</time></p>
 
   <!-- affiliate disclosure injected by Worker HTMLRewriter -->
 

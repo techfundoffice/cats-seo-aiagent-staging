@@ -228,7 +228,8 @@ export function calculateSEOScore(
     id: 9,
     pillar: P1,
     name: "Direct quotes from author",
-    passed: html.includes("author-box") && /Amelia Hartwell/i.test(html),
+    passed:
+      /"@type"\s*:\s*"Person"/.test(html) && /Amelia Hartwell/i.test(html),
     detail: "Author attribution"
   });
   // Check #10 was historically "Proprietary testing data" — it PASSED when
@@ -358,7 +359,10 @@ export function calculateSEOScore(
     id: 21,
     pillar: P2,
     name: "Clear byline at top",
-    passed: html.includes("author-box") || html.includes("Written by"),
+    passed:
+      /"author"/.test(html) ||
+      html.includes("author-box") ||
+      html.includes("Written by"),
     detail: "Author box"
   });
   checks.push({

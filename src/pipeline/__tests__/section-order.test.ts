@@ -31,7 +31,7 @@ const products: AmazonProduct[] = [
 ];
 
 describe("article section order", () => {
-  it("renders Our Top Picks directly after the video hero, before author box and Quick Answer", () => {
+  it("renders Our Top Picks directly after the video hero, before the date line and Quick Answer", () => {
     const html = buildArticleHtml({
       article,
       slug: "best-cat-water-fountain",
@@ -50,17 +50,17 @@ describe("article section order", () => {
     const body = html.slice(html.indexOf("<article"));
     const videoIdx = body.indexOf("video-hero");
     const picksIdx = body.indexOf("top-picks-title");
-    const authorIdx = body.indexOf("author-box");
+    const dateIdx = body.indexOf("date-info");
     const quickIdx = body.indexOf("quick-answer");
 
     expect(videoIdx).toBeGreaterThan(-1);
     expect(picksIdx).toBeGreaterThan(-1);
-    expect(authorIdx).toBeGreaterThan(-1);
+    expect(dateIdx).toBeGreaterThan(-1);
     expect(quickIdx).toBeGreaterThan(-1);
 
     expect(videoIdx).toBeLessThan(picksIdx);
-    expect(picksIdx).toBeLessThan(authorIdx);
-    expect(authorIdx).toBeLessThan(quickIdx);
+    expect(picksIdx).toBeLessThan(dateIdx);
+    expect(dateIdx).toBeLessThan(quickIdx);
   });
 
   it("keeps picks-first order when there is no video hero", () => {
@@ -77,8 +77,8 @@ describe("article section order", () => {
 
     const body = html.slice(html.indexOf("<article"));
     const picksIdx = body.indexOf("top-picks-title");
-    const authorIdx = body.indexOf("author-box");
+    const dateIdx = body.indexOf("date-info");
     expect(picksIdx).toBeGreaterThan(-1);
-    expect(picksIdx).toBeLessThan(authorIdx);
+    expect(picksIdx).toBeLessThan(dateIdx);
   });
 });
