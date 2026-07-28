@@ -651,3 +651,41 @@ describe("observed-performance — claimed observation of product performance", 
     }
   });
 });
+
+describe("fabricated-expert — invented / misattributed consultations", () => {
+  it("flags the live 'Why You Should Trust Us' expert block (2026-07-28)", () => {
+    const s =
+      "We consulted with Dr. Sarah Chen, DVM, a veterinary behaviorist who has reviewed our facility protocols, and with Marcus Webb, our Head Animal Care Technician with 18 years of feline husbandry experience.";
+    const f = detectFabricatedTestingClaims(s);
+    expect(f.length).toBeGreaterThan(0);
+    expect(f.some((x) => x.category === "fabricated-expert")).toBe(true);
+  });
+
+  it("flags the other live variants found in the corpus scan", () => {
+    for (const s of [
+      "For this guide, we consulted with Dr. Elena Voss, a feline nutritionist.",
+      "Sarah Chen, DVM, a veterinary parasitologist with 12 years of clinical practice, who reviewed nitenpyram's mechanism of action.",
+      "Marcus Webb, our Head Animal Care Technician, confirmed the fit.",
+      "A licensed veterinarian reviewed our facility protocols before publication."
+    ]) {
+      expect(
+        detectFabricatedTestingClaims(s).length,
+        `missed: ${s}`
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("does NOT flag honest third-party citation of published work", () => {
+    for (const s of [
+      "Research by Dr. Mikel Delgado shows cats prefer wide, shallow bowls.",
+      "A study by Sarah Ellis, PhD, found that scent swapping reduces stress.",
+      "According to Jennifer Coates, DVM, writing for petMD, hairballs are common.",
+      "Amelia Hartwell has cared for thousands of cats at the facility."
+    ]) {
+      expect(
+        detectFabricatedTestingClaims(s).length,
+        `false positive: ${s}`
+      ).toBe(0);
+    }
+  });
+});

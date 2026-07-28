@@ -86,7 +86,29 @@ export type FabricatedTestingClaimCategory =
    * claims about watching PRODUCTS perform are fabricated, so these
    * patterns all require a product noun or a performance verb.
    */
-  | "observed-performance";
+  | "observed-performance"
+  /**
+   * Fabricated or misattributed EXPERT CONSULTATION. Added 2026-07-28
+   * after a corpus scan found this in 98 of 458 published articles:
+   *
+   *   "We consulted with Dr. Sarah Chen, DVM, a veterinary behaviorist
+   *    who has reviewed our facility protocols, and with Marcus Webb,
+   *    our Head Animal Care Technician…"
+   *
+   * Cats Luv Us has no DVM on staff and commissions no expert reviews.
+   * The names are hallucinated — "Sarah Chen, DVM" appeared 23 times
+   * with a DIFFERENT invented specialty each time (parasitologist,
+   * dental medicine, behaviorist). Worse, some are REAL, identifiable
+   * professionals (Jennifer Coates DVM, Marci Koski PhD, Elizabeth
+   * Bales DVM) falsely presented as having reviewed this site's work —
+   * a false-endorsement exposure well beyond 16 CFR Part 255.
+   *
+   * Amelia Hartwell is the site's one real byline and is exempt.
+   * Third-party CITATION framing ("research by", "a study by",
+   * "according to") stays legal and is deliberately not matched — only
+   * first-person consultation/review/staff framing is.
+   */
+  | "fabricated-expert";
 
 export interface FabricatedTestingClaimFinding {
   /** Which framing category the trigger fell into. */
@@ -269,6 +291,40 @@ const TRIGGERS: Array<{
     category: "observed-performance",
     pattern:
       /\bhow\s+(?:different\s+|various\s+|these\s+|competing\s+)?(?:tools?|products?|brands?|models?|formulas?|units?)\s+(?:perform|performs|performed|hold\s+up|holds\s+up|held\s+up|fare|fares|fared|last|lasts|lasted)\b/i
+  },
+  // ── fabricated-expert ───────────────────────────────────────────────
+  // First-person consultation / review / staff framing around a named
+  // person. Citation framing ("research by Dr. X", "a study by X, DVM")
+  // is intentionally NOT matched — quoting published work is honest and
+  // good for E-E-A-T; claiming that person vetted us is not.
+  {
+    category: "fabricated-expert",
+    pattern:
+      // "Dr." also matches ALONE: this module splits sentences on
+      // ". ", so "we consulted with Dr. Elena Voss" arrives already
+      // cut into "…consulted with Dr." + "Elena Voss, …". Requiring a
+      // following name would miss every honorific-prefixed case.
+      /\bwe\s+(?:consulted|spoke|worked|partnered)\s+with\s+(?:Dr\.|[A-Z][a-z]+\s+[A-Z][a-z]+)/
+  },
+  {
+    category: "fabricated-expert",
+    pattern:
+      /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:DVM|VMD|PhD|CVT|RVT|CCBC)\b[\s\S]{0,120}?\bwho\s+(?:reviewed|vetted|verified|evaluated|advised|consulted)\b/
+  },
+  {
+    category: "fabricated-expert",
+    pattern:
+      /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*our\s+(?:Head|Lead|Senior|Chief|Staff)\s+[A-Z]/
+  },
+  {
+    // Orphaned tail of a split "Dr. <Name>, DVM, a <specialty>…"
+    category: "fabricated-expert",
+    pattern: /^[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:DVM|VMD|PhD|CVT|RVT|CCBC)\b/
+  },
+  {
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:reviewed|vetted|verified|approved)\s+(?:our|these|this)\s+(?:facility\s+)?(?:protocols?|assessments?|methodology|recommendations?|guides?)\b/i
   }
 ];
 
