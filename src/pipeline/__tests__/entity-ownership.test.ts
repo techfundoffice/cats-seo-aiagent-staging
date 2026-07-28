@@ -202,3 +202,48 @@ describe("recordKeywordOwnership", () => {
     expect(r.ok).toBe(false);
   });
 });
+
+/**
+ * Namespace symmetry. The claim-time guard runs before products are
+ * fetched, so it can only produce `topic:<tokens>`. If the recorder keyed
+ * ownership off the ASIN instead, the guard could never see it — measured
+ * live on 2026-07-28: 230 `product:` rows vs 193 `topic:` rows, with the
+ * guard matching only the backfilled `topic:` ones.
+ */
+describe("guard/recorder entity-namespace symmetry", () => {
+  it("records under the SAME entity the guard will look up, even with an ASIN", async () => {
+    const db = makeDb();
+    const rec = await recordKeywordOwnership(db, {
+      keyword: "petlibro granary stainless cat feeder review",
+      keywordSlug: "petlibro-granary-stainless-cat-feeder-review",
+      kvKey: "cat-feeding:petlibro-granary",
+      url: "https://catsluvus.com/cat-feeding/petlibro-granary",
+      asin: "B07KHPLFMS" // present at publish time, absent at claim time
+    });
+    expect(rec.ok).toBe(true);
+    expect(rec.entityId.startsWith("topic:")).toBe(true);
+    expect(rec.entityId).not.toContain("B07KHPLFMS");
+
+    // The guard (which never has an ASIN) must now find it.
+    const verdict = await checkKeywordOwnership(
+      db,
+      "stainless petlibro granary cat feeder review"
+    );
+    expect(verdict.duplicate).toBe(true);
+    expect(verdict.ownerKvKey).toBe("cat-feeding:petlibro-granary");
+  });
+
+  it("never emits a product: namespace ownership row", async () => {
+    const db = makeDb();
+    await recordKeywordOwnership(db, {
+      keyword: "some cat toy review",
+      keywordSlug: "some-cat-toy-review",
+      kvKey: "cat-toys:some",
+      url: "https://catsluvus.com/cat-toys/some",
+      asin: "B000ABCDEF"
+    });
+    for (const row of db.rows.values()) {
+      expect(row.entity_id.startsWith("product:")).toBe(false);
+    }
+  });
+});

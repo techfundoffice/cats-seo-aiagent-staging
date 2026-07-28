@@ -87,8 +87,21 @@ export async function recordKeywordOwnership(
     categorySlug?: string;
   }
 ): Promise<{ ok: boolean; entityId: string; error?: string }> {
+  // Resolve WITHOUT the ASIN, deliberately.
+  //
+  // The claim-time guard runs before products are fetched, so it can only
+  // ever compute a `topic:<tokens>` entity. If ownership were recorded
+  // under `product:<ASIN>` the two would live in different namespaces and
+  // the guard would be structurally blind to everything published since
+  // the feature shipped. That is exactly what happened: by 2026-07-28 the
+  // table held 230 `product:` rows against 193 `topic:` rows (the latter
+  // only from the initial backfill), and both guard firings to date had
+  // matched backfilled rows. Coverage was degrading with every publish.
+  //
+  // The ASIN is still the stronger identity, but it is useless to a guard
+  // that cannot see it. Symmetry with the checker beats precision here;
+  // the ASIN is retained on the entities row instead.
   const resolved = resolveKeywordEntity(params.keyword, {
-    asin: params.asin,
     categorySlug: params.categorySlug
   });
   if (!db) return { ok: false, entityId: resolved.entityId, error: "no db" };
