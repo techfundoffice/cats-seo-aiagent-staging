@@ -3913,7 +3913,7 @@ async function generateArticleUnsafe(
         if (prodPublish.ok) {
           agent.log(
             "info",
-            `${(prodPublish.ftcRemoved ?? 0) > 0 ? `⚠️ FTC gate excised ${prodPublish.ftcRemoved} fabricated-claim sentence(s) at the prod boundary — a post-Step-14.7 model rewrite reintroduced them. Sample: "${prodPublish.ftcSample ?? ""}" | ` : ""}✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
+            `${(prodPublish.trustBoxRemoved ?? 0) > 0 ? `⚠️ Removed ${prodPublish.trustBoxRemoved} hallucinated "Why You Should Trust Us" block(s) at the prod boundary — the template no longer emits one. | ` : ""}${(prodPublish.ftcRemoved ?? 0) > 0 ? `⚠️ FTC gate excised ${prodPublish.ftcRemoved} fabricated-claim sentence(s) at the prod boundary — a post-Step-14.7 model rewrite reintroduced them. Sample: "${prodPublish.ftcSample ?? ""}" | ` : ""}✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
             "marketing",
             { kanbanStage: "done" }
           );
@@ -4156,7 +4156,6 @@ YOU MUST RETURN ONLY A JSON OBJECT with this exact schema. No markdown, no backt
     {"heading": "string", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML"},
     {"heading": "string", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML"}
   ],
-  "whyTrustUs": "string, 40-60 words. Cats Luv Us Boarding Hotel, Laguna Niguel CA.",
   "faqs": [
     {"question": "string", "answer": "string, ${faqMinWords}-${faqMaxWords} words, direct answer first then supporting detail"},
     {"question": "string", "answer": "string"},
@@ -4222,7 +4221,6 @@ AI WRITING STYLE:
 
 FIELD GUIDANCE:
 - introduction: ${introMinWords}-${introMinWords + 50} words. ${hasProducts ? "Name top product, brief why." : "Lead with the reader's specific decision, not the keyword."}
-- whyTrustUs: 40-60 words.
 - sections: AT LEAST 8 sections, ${sectionMinWords}-${sectionMaxWords} words each. Do NOT write sections shorter than ${Math.round(sectionMinWords * 0.8)} words. Add more sections if the topic or competitor heading list warrants it.
 - faqs: EXACTLY 5 questions and answers. ${paaQuestions.length > 0 ? `Use these PAA questions: ${paaQuestions.slice(0, 5).join(", ")}` : "Write 5 questions a buyer would actually ask before purchasing."}
 - conclusion: 60-100 words, ${hasProducts ? "name the top pick, explain who it is best for, one actionable next step." : "summarize the 3 key decision criteria, one actionable next step."}.

@@ -1,5 +1,6 @@
 import { errMsg, getEnvBinding } from "./http-utils";
 import { enforceNoFabricatedTestingClaims } from "./fabricated-testing-claims";
+import { removeTrustBox } from "./trust-box-removal";
 
 /**
  * prod-publish.ts — direct-to-production article publishing.
@@ -108,6 +109,12 @@ export interface ProdPublishResult {
   ftcRemoved?: number;
   /** Sample of the first excised sentence, for the alert log. */
   ftcSample?: string;
+  /**
+   * "Why You Should Trust Us" blocks removed at the prod boundary.
+   * Non-zero means a model rewrite reinvented a block the template no
+   * longer emits — worth alerting on.
+   */
+  trustBoxRemoved?: number;
   error?: string;
 }
 
@@ -232,8 +239,14 @@ export async function publishArticleToProduction(
   // `<p class="date-info">` element and published it to production 44
   // minutes after the fabricated-expert detector went live.
   const ftc = enforceNoFabricatedTestingClaims(stagingHtml);
-  const html = ftc.html;
-  if (ftc.removed > 0 || ftc.headingsChanged > 0) {
+  // The "Why You Should Trust Us" block is no longer rendered by
+  // html-builder, so nothing should produce one — but the QC and Polish
+  // stages hand the whole document to a model, and those rewrites have
+  // reshaped template markup before. Catching a hallucinated block here
+  // costs one regex and keeps the guarantee absolute.
+  const trust = removeTrustBox(ftc.html);
+  const html = trust.html;
+  if (trust.removed > 0 || ftc.removed > 0 || ftc.headingsChanged > 0) {
     // Write the cleaned copy back to staging too, so the two
     // namespaces do not diverge and a later re-publish cannot
     // resurrect the excised text.
@@ -377,6 +390,7 @@ export async function publishArticleToProduction(
     bytes: rewritten.length,
     indexes,
     ftcRemoved: ftc.removed,
-    ftcSample: ftc.findings[0]?.sentence.slice(0, 200)
+    ftcSample: ftc.findings[0]?.sentence.slice(0, 200),
+    trustBoxRemoved: trust.removed
   };
 }
