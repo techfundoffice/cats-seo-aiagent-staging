@@ -33,11 +33,26 @@
 /** Rows younger than this are assumed to be legitimately in flight. */
 export const DEFAULT_STALE_MINUTES = 30;
 
+/**
+ * How many times a row may be swept back to 'pending' before it is
+ * abandoned instead.
+ *
+ * Requeueing without a bound is an unbounded retry: a keyword whose
+ * generation dies deterministically gets requeued, re-claimed, dies and
+ * is requeued again forever, burning a full ~12-minute generation cycle
+ * every round. The DO-local `keywords` table has always had this guard
+ * (retry_count + MAX_KEYWORD_RETRIES -> 'abandoned'); the D1 table it
+ * claims from did not, because until 2026-07-29 nothing swept it at all.
+ */
+export const DEFAULT_MAX_SWEEPS = 3;
+
 export interface ScoutStuckSweepResult {
   /** Rows returned to `pending` because no article was ever produced. */
   requeued: string[];
   /** Rows marked `published` from an existing ledger entry. */
   reconciled: string[];
+  /** Rows that exhausted their sweep budget and were given up on. */
+  abandoned: string[];
   /** Set when the sweep could not run; the caller logs and moves on. */
   error?: string;
 }
@@ -52,11 +67,16 @@ export interface ScoutStuckSweepResult {
  */
 export async function sweepStuckScoutKeywords(
   db: D1Database | undefined,
-  options: { staleMinutes?: number } = {}
+  options: { staleMinutes?: number; maxSweeps?: number } = {}
 ): Promise<ScoutStuckSweepResult> {
-  const empty: ScoutStuckSweepResult = { requeued: [], reconciled: [] };
+  const empty: ScoutStuckSweepResult = {
+    requeued: [],
+    reconciled: [],
+    abandoned: []
+  };
   if (!db) return { ...empty, error: "KEYWORDS_DB binding missing" };
   const staleMinutes = options.staleMinutes ?? DEFAULT_STALE_MINUTES;
+  const maxSweeps = options.maxSweeps ?? DEFAULT_MAX_SWEEPS;
   const cutoff = `-${Math.max(1, Math.floor(staleMinutes))} minutes`;
 
   try {
@@ -80,23 +100,47 @@ export async function sweepStuckScoutKeywords(
       .bind(cutoff)
       .all<{ slug: string }>();
 
-    const requeued = await db
+    // Abandon BEFORE requeueing, so a row at its budget is given up on
+    // rather than requeued one last time by the statement below.
+    const abandoned = await db
       .prepare(
         `UPDATE scout_keywords
-            SET status = 'pending', claimed_at = NULL
+            SET status = 'abandoned',
+                finished_at = datetime('now'),
+                error = 'stranded in generating; abandoned after ' ||
+                        sweep_count || ' sweep(s)'
           WHERE status = 'generating'
             AND claimed_at IS NOT NULL
             AND claimed_at <= datetime('now', ?1)
+            AND sweep_count >= ?2
             AND NOT EXISTS (SELECT 1 FROM article_ledger
                              WHERE article_ledger.slug = scout_keywords.slug)
           RETURNING slug`
       )
-      .bind(cutoff)
+      .bind(cutoff, maxSweeps)
+      .all<{ slug: string }>();
+
+    const requeued = await db
+      .prepare(
+        `UPDATE scout_keywords
+            SET status = 'pending',
+                claimed_at = NULL,
+                sweep_count = sweep_count + 1
+          WHERE status = 'generating'
+            AND claimed_at IS NOT NULL
+            AND claimed_at <= datetime('now', ?1)
+            AND sweep_count < ?2
+            AND NOT EXISTS (SELECT 1 FROM article_ledger
+                             WHERE article_ledger.slug = scout_keywords.slug)
+          RETURNING slug`
+      )
+      .bind(cutoff, maxSweeps)
       .all<{ slug: string }>();
 
     return {
       requeued: (requeued.results ?? []).map((r) => r.slug),
-      reconciled: (reconciled.results ?? []).map((r) => r.slug)
+      reconciled: (reconciled.results ?? []).map((r) => r.slug),
+      abandoned: (abandoned.results ?? []).map((r) => r.slug)
     };
   } catch (err: unknown) {
     return {
@@ -119,6 +163,11 @@ export function summarizeScoutStuckSweep(
   if (result.reconciled.length > 0) {
     parts.push(
       `${result.reconciled.length} reconciled to 'published' from the ledger (write-back was lost): ${result.reconciled.slice(0, 5).join(", ")}`
+    );
+  }
+  if (result.abandoned.length > 0) {
+    parts.push(
+      `${result.abandoned.length} abandoned after exhausting the sweep budget (generation keeps dying): ${result.abandoned.slice(0, 5).join(", ")}`
     );
   }
   return parts.join(" | ");

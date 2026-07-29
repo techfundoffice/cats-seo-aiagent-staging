@@ -1,0 +1,12 @@
+-- Bound the D1 stuck-keyword sweep.
+--
+-- `sweepStuckScoutKeywords` returns a row stranded in 'generating' back
+-- to 'pending' so a deploy restart cannot silently drop it from the
+-- queue. Without a counter that is an unbounded retry: a keyword whose
+-- generation dies deterministically is requeued, re-claimed, dies, and
+-- is requeued again forever, burning a full generation cycle each time.
+--
+-- The DO-local `keywords` table has always had this guard
+-- (`retry_count` + MAX_KEYWORD_RETRIES -> 'abandoned'); the D1 table it
+-- claims from did not, because until 2026-07-29 nothing swept it at all.
+ALTER TABLE scout_keywords ADD COLUMN sweep_count INTEGER NOT NULL DEFAULT 0;
