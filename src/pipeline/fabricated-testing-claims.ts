@@ -15,7 +15,7 @@
  * certification, "studies show", etc.).
  *
  * This module is a deterministic, model-free **pre-filter** (its only
- * imports are two other leaf helpers — no network, no LLM).
+ * import is one other leaf helper — no network, no LLM).
  * It scans plain body text for ≥14 phrasing variants that assert
  * first-person product-testing experience, returns matched
  * sentences with a category tag, and is consumed by:
@@ -53,7 +53,6 @@
  *     no product-testing implication.
  */
 
-import { stripHtmlToPlainText } from "./plagiarism-overlap";
 import { neutralizeTestingHeadings } from "./testing-vocab-swap";
 
 export type FabricatedTestingClaimCategory =
@@ -134,6 +133,9 @@ const MIN_SENTENCE_LEN = 20;
  * deleting unrelated prose that happens to share a common phrase.
  */
 const MIN_EXCISION_WORDS = 6;
+
+/** Detect-and-excise rounds before giving up. */
+const MAX_EXCISION_PASSES = 4;
 
 /**
  * Per-category trigger patterns. A sentence matching ANY pattern in
@@ -383,6 +385,45 @@ const TRIGGERS: Array<{
     category: "fabricated-expert",
     pattern:
       /\b(?:His|Her|Their)\s+(?:perspective|input|insights?|guidance|feedback|expertise|review|assessment)\b[\s\S]{0,200}?\b(?:informed|shaped|guided|refined|validated|underpins?|underpinned)\s+(?:our|these|this|the)\b/i
+  },
+  {
+    // "we spoke with certified animal behaviorist Pamela Reid, PhD" —
+    // the original first-person pattern required the name to follow
+    // "with" immediately, so any intervening role description defeated
+    // it. Allow up to four lowercase qualifier words in between; a
+    // trailing capitalized name (or honorific) is still required, so
+    // "we worked with the manufacturer" does not match.
+    category: "fabricated-expert",
+    pattern:
+      /\bwe\s+(?:consulted|spoke|worked|partnered|collaborated)\s+with\s+(?:[a-z][a-z-]*\s+){0,4}(?:Dr\.|[A-Z][a-z]+\s+[A-Z][a-z]+)/
+  },
+  {
+    // "Susan Little, a feline-exclusive veterinarian with over 25 years
+    // of experience, who provided insight on…" — a REAL, identifiable
+    // professional with no honorific and no credential suffix, so every
+    // name-anchored pattern missed her. The specialty apposition plus an
+    // attribution verb is what makes it an endorsement rather than a
+    // citation.
+    category: "fabricated-expert",
+    pattern:
+      /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:a|an)\s+(?:[a-z][a-z-]*\s+){0,4}(?:veterinarian|vet|behaviou?rist|nutritionist|technician|groomer|specialist|researcher|scientist|professor|practitioner)\b[\s\S]{0,200}?\b(?:who\s+)?(?:provided|offered|shared|contributed|explained|advised|confirmed|emphasi[sz]ed|cautioned|stressed|noted|told\s+us)\b/
+  },
+  {
+    // Credentialed name + ANY attribution verb. The original pattern
+    // listed only review verbs (reviewed/vetted/verified/evaluated/
+    // advised/consulted), so "Pamela Reid, PhD, who explained that…"
+    // walked straight through.
+    category: "fabricated-expert",
+    pattern:
+      /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:DVM|VMD|PhD|CVT|RVT|CCBC|DACVB|MS|MSc)\b[\s\S]{0,160}?\bwho\s+(?:reviewed|vetted|verified|evaluated|advised|consulted|explained|noted|told|shared|confirmed|recommended|emphasi[sz]ed|cautioned|stressed|provided|offered|suggested|warned|described)\b/
+  },
+  {
+    // Bare attribution tail: "…who provided insight on how auditory
+    // tracking aids compare…". Catches the fragment even when the
+    // sentence splitter has already severed the name from the clause.
+    category: "fabricated-expert",
+    pattern:
+      /\bwho\s+(?:provided|offered|contributed|shared)\s+(?:her|his|their|the|us\s+with\s+)?\s*(?:insight|input|guidance|commentary|expertise|perspective)\b/i
   }
 ];
 
@@ -435,6 +476,8 @@ export function detectFabricatedTestingClaims(
   const seen = new Set<string>();
 
   for (const sentence of splitSentences(text)) {
+    // A sentence that DENIES testing is the disclosure, not the claim.
+    if (NEGATED_TESTING_RE.test(sentence)) continue;
     for (const { category, pattern } of TRIGGERS) {
       const m = sentence.match(pattern);
       if (!m) continue;
@@ -511,6 +554,9 @@ const METHODOLOGY_DISCLOSURE_MARKERS: RegExp[] = [
   /review\s+aggregates/i
 ];
 
+const WC_METHODOLOGY_SECTION_RE_G =
+  /<section\b[^>]*\bclass="[^"]*\bwc-methodology\b[^"]*"[^>]*>[\s\S]*?<\/section\s*>/gi;
+
 const WC_METHODOLOGY_SECTION_RE =
   /<section\b[^>]*\bclass="[^"]*\bwc-methodology\b[^"]*"[^>]*>[\s\S]*?<\/section\s*>/gi;
 
@@ -535,10 +581,6 @@ export function stripCompliantMethodologySections(html: string): string {
   });
 }
 
-/** Inline phrasing tags a flagged sentence may legally span in HTML. */
-const EXCISION_INLINE_TAGS =
-  "a|abbr|b|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr";
-
 /** Cap excisions per article — a runaway match list must not gut the page. */
 const MAX_EXCISED_SENTENCES = 10;
 
@@ -559,6 +601,31 @@ const MAX_EXCISED_SENTENCES = 10;
  * match longer than 3x the sentence is rejected rather than risk eating
  * structure. Returns the cleaned HTML and the number removed.
  */
+
+/**
+ * Delete the TEXT of an HTML span while keeping every tag inside it.
+ *
+ * A flagged sentence routinely crosses element boundaries (it starts in
+ * a `<strong>` and ends after `</p>`), so slicing the raw range out
+ * destroys the tags in between and leaves markup like
+ * `<p><strong> /p></a>` — which renders the literal text "/p>" on the
+ * page. Keeping the tags means the excision can never unbalance the
+ * document; the emptied wrappers are then swept by the residue pass.
+ */
+function removeTextKeepingTags(segment: string): string {
+  let out = "";
+  let i = 0;
+  while (i < segment.length) {
+    const lt = segment.indexOf("<", i);
+    if (lt < 0) break;
+    const gt = segment.indexOf(">", lt);
+    if (gt < 0) break;
+    out += segment.slice(lt, gt + 1);
+    i = gt + 1;
+  }
+  return out;
+}
+
 export function removeFabricatedTestingSentences(
   html: string,
   findings: readonly FabricatedTestingClaimFinding[]
@@ -566,46 +633,119 @@ export function removeFabricatedTestingSentences(
   if (!html || findings.length === 0) return { html, removed: 0 };
   let out = html;
   let removed = 0;
-  const inlineTagPat = `(?:<\\/?(?:${EXCISION_INLINE_TAGS})\\b[^>]{0,200}>\\s*)*`;
   for (const finding of findings.slice(0, MAX_EXCISED_SENTENCES)) {
-    const words = finding.sentence
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    if (words.length < MIN_EXCISION_WORDS) continue; // too short to match safely
-    // The plain-text pass joins adjacent block elements without a
-    // sentence boundary, so a reported "sentence" can carry leading
-    // text from a preceding block (an SVG label, a button caption) that
-    // is not contiguous with the claim in the HTML. A whole-sentence
-    // literal match then fails and the claim silently survives — how
-    // "Editorial Process Note: This review incorporates insights from
-    // Dr." escaped a clean on 2026-07-29. Retry from progressively
-    // later word offsets, keeping the tail (which holds the claim)
-    // intact, and stop as soon as one matches.
-    let matched: string | null = null;
-    for (let start = 0; start <= words.length - MIN_EXCISION_WORDS; start++) {
-      const slice = words.slice(start);
-      let re: RegExp;
-      try {
-        re = new RegExp(slice.join(`\\s*${inlineTagPat}\\s*`), "i");
-      } catch {
-        break;
-      }
-      const m = out.match(re);
-      if (!m || !m[0]) continue;
-      // Length guard is measured against the slice actually sought, not
-      // the full reported sentence, so a short tail cannot license a
-      // long greedy match across structure.
-      const sliceLen = slice.join(" ").length;
-      if (m[0].length > sliceLen * 3) continue;
-      matched = m[0];
-      break;
-    }
-    if (matched === null) continue;
-    out = out.replace(matched, " ");
+    const sentence = finding.sentence.replace(/\s+/g, " ").trim();
+    if (sentence.split(" ").length < MIN_EXCISION_WORDS) continue;
+    // Re-project after each removal: excising one span shifts every
+    // later offset, so the map must be rebuilt rather than reused.
+    const { text, map, syn } = collapseWithMap(
+      alignedBodyText(out, { stripMethodology: false })
+    );
+    const idx = text.indexOf(sentence);
+    if (idx < 0) continue;
+    let startIdx = idx;
+    let endIdx = idx + sentence.length - 1;
+    // Never let the range start or end on a synthetic character — its
+    // map entry points at the tag the character stands in for.
+    while (endIdx > startIdx && syn[endIdx]) endIdx--;
+    while (startIdx < endIdx && syn[startIdx]) startIdx++;
+    if (endIdx <= startIdx) continue;
+    const from = map[startIdx];
+    const to = map[endIdx] + 1;
+    out = `${out.slice(0, from)} ${removeTextKeepingTags(
+      out.slice(from, to)
+    )} ${out.slice(to)}`;
     removed++;
   }
   return { html: out, removed };
+}
+
+// ── Length-preserving HTML projection ────────────────────────────────
+//
+// Both detection and excision need to agree, exactly, on what the body
+// text is and where each character came from. The previous approach
+// rebuilt a word-by-word regex with an inline-tag group between every
+// word and scanned the whole document once per candidate offset; on an
+// 80 KB article that degenerated into minutes of backtracking and still
+// missed matches whose text was not contiguous in the source.
+//
+// Instead, every transformation below replaces content with an EQUAL
+// NUMBER of characters, so an index into the projected string is an
+// index into the original HTML. Finding a sentence becomes an indexOf,
+// and excising it becomes a slice — both linear and exact.
+
+const spaces = (n: number): string => " ".repeat(n);
+
+/** Replace every match with spaces, preserving length and offsets. */
+function blank(html: string, re: RegExp): string {
+  return html.replace(re, (m) => spaces(m.length));
+}
+
+const SCRIPT_STYLE_RE =
+  /<script[^>]*>[\s\S]*?<\/script\s*>|<style[^>]*>[\s\S]*?<\/style\s*>/gi;
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const ANY_TAG_RE = /<[^>]+>/g;
+
+/**
+ * Project HTML to body text without moving any character. Block tags
+ * become ". " (padded) so a heading never fuses to the paragraph below
+ * it; everything else that is not text becomes spaces.
+ */
+function alignedBodyText(
+  html: string,
+  options: { stripMethodology: boolean }
+): { aligned: string; synthetic: Uint8Array } {
+  let out = blank(html, HTML_COMMENT_RE);
+  out = blank(out, SCRIPT_STYLE_RE);
+  out = blank(out, CITATION_SECTION_RE);
+  if (options.stripMethodology) {
+    out = blank(out, WC_METHODOLOGY_SECTION_RE_G);
+  }
+  // The "." a block boundary contributes is SYNTHETIC: it terminates
+  // the sentence for the splitter but corresponds to no character in
+  // the source. Excising a range that ends on it would cut into the
+  // tag it replaced (turning `</p>` into `/p>`, which then renders as
+  // literal text), so its positions are recorded and trimmed off the
+  // range later.
+  const synthetic = new Uint8Array(out.length);
+  out = out.replace(BLOCK_BOUNDARY_RE, (m, offset: number) => {
+    for (let i = 0; i < m.length; i++) synthetic[offset + i] = 1;
+    return m.length >= 2 ? `. ${spaces(m.length - 2)}` : spaces(m.length);
+  });
+  return { aligned: blank(out, ANY_TAG_RE), synthetic };
+}
+
+/**
+ * Collapse whitespace in an aligned projection, keeping a map from each
+ * output character back to its index in the aligned string (and thus in
+ * the original HTML).
+ */
+function collapseWithMap(projection: {
+  aligned: string;
+  synthetic: Uint8Array;
+}): { text: string; map: number[]; syn: Uint8Array } {
+  const { aligned, synthetic } = projection;
+  const chars: string[] = [];
+  const map: number[] = [];
+  const syn: number[] = [];
+  let pendingSpace = false;
+  for (let i = 0; i < aligned.length; i++) {
+    const c = aligned[i];
+    if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f") {
+      if (chars.length > 0) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace) {
+      chars.push(" ");
+      map.push(i);
+      syn.push(synthetic[i]);
+      pendingSpace = false;
+    }
+    chars.push(c);
+    map.push(i);
+    syn.push(synthetic[i]);
+  }
+  return { text: chars.join(""), map, syn: Uint8Array.from(syn) };
 }
 
 /**
@@ -620,28 +760,74 @@ export function removeFabricatedTestingSentences(
  *     it cures nothing about inventing a veterinarian, so that category
  *     gets no proximity exception.
  */
-/** Remove HTML comments so their text is never read as body prose. */
-function stripHtmlComments(html: string): string {
-  return html.replace(/<!--[\s\S]*?-->/g, " ");
-}
+
+/**
+ * Block-level elements whose boundaries are sentence boundaries.
+ *
+ * `stripHtmlToPlainText` concatenates adjacent blocks with only
+ * whitespace between them, so a heading runs straight into the
+ * paragraph below it and a table-of-contents entry runs into the next.
+ * The splitter then produces "sentences" that exist nowhere in the
+ * document — which both invents false positives (an `<h2>` fused to an
+ * unrelated `<p>`) and breaks excision, because the fused string has no
+ * contiguous match in the HTML. Terminating each block with a period
+ * before the text pass removes that whole class of error.
+ */
+const BLOCK_TAGS =
+  "p|div|section|article|nav|li|ul|ol|h[1-6]|td|th|tr|table|aside|header|footer|blockquote|figcaption|dd|dt|main";
+
+// Both OPEN and CLOSE tags are boundaries. A close tag alone is not
+// enough: model-mangled markup nests a `<p>` directly inside an `<a>`
+// (observed in a rewritten table of contents), so the heading text runs
+// into the paragraph across an OPENING tag with no close in between.
+const BLOCK_BOUNDARY_RE = new RegExp(
+  `<\\/?(?:${BLOCK_TAGS})\\b[^>]*>|<br\\s*\\/?>`,
+  "gi"
+);
+
+/**
+ * Third-party citation surfaces. The module's stated design is that
+ * quoting published work is honest and good for E-E-A-T — only claiming
+ * that work vetted US is a violation. The "Trusted Sources &
+ * References" block is nothing but outbound citations, so an article
+ * TITLE living there ("11 Best Interactive Cat Toys — Expert Tested
+ * Reviews") is someone else's testing claim, not ours. Strip the block
+ * before detection rather than teach every pattern to recognise it.
+ */
+const CITATION_SECTION_RE =
+  /<(section|div|nav|aside)\b[^>]*\bclass="[^"]*\b(?:trusted-sources|citations?|references?|source-list)\b[^"]*"[^>]*>[\s\S]*?<\/\1\s*>/gi;
+
+/**
+ * Sentences that DENY testing are the compliance language, not a
+ * violation — "Cats Luv Us does not conduct hands-on product testing",
+ * "Rankings reflect our editorial judgment…, not hands-on evaluation",
+ * "Without hands-on testing, we cannot verify manufacturer claims".
+ * Excising those would delete the very disclosures that keep the page
+ * FTC-compliant, so a negated trigger suppresses the finding.
+ *
+ * Scoped deliberately: the negator must attach to a testing noun, so
+ * "Our team's hands-on testing revealed…" (no negator) still fires, and
+ * an unrelated "not" elsewhere in the sentence does not grant amnesty.
+ */
+const NEGATED_TESTING_RE =
+  /\b(?:not|never|no|without|cannot|can['’]?t|do(?:es)?n['’]?t|do(?:es)? not|rather\s+than|instead\s+of|nor)\b[^.]{0,90}?\b(?:hands[- ]on|physically\s+tested|product\s+test\w*|controlled\s+(?:product\s+)?trials?|in[- ]house\s+test\w*|lab\s+test\w*|test(?:ing|ed|s)?|trials?|evaluation)\b/i;
 
 export function detectFabricatedTestingClaimsInHtml(
   html: string
 ): FabricatedTestingClaimFinding[] {
   if (!html || typeof html !== "string") return [];
-  // `stripHtmlToPlainText` keeps comment bodies, so a `-->` and the
-  // template's own explanatory comments bleed into the sentence a
-  // finding reports. That text does not exist in the rendered page, and
-  // worse, the excision pass then fails its literal match against the
-  // HTML and silently leaves the real claim in place — exactly how
-  // "This review incorporates insights from Dr." survived a clean on
-  // 2026-07-29. Drop comments before either pass.
-  const body = stripHtmlComments(html);
+  // General categories run against the body with compliant
+  // `wc-methodology` sections removed — their comparative claims are
+  // substantiated in-section, so flagging them is a false positive.
   const findings = detectFabricatedTestingClaims(
-    stripHtmlToPlainText(stripCompliantMethodologySections(body))
+    collapseWithMap(alignedBodyText(html, { stripMethodology: true })).text
   );
+  // `fabricated-expert` gets no proximity exception: a disclosure that
+  // products are not physically tested substantiates a comparative
+  // claim, but cures nothing about inventing — or misattributing — a
+  // veterinarian. Scan the full body for that category and merge.
   const fullBody = detectFabricatedTestingClaims(
-    stripHtmlToPlainText(body)
+    collapseWithMap(alignedBodyText(html, { stripMethodology: false })).text
   ).filter((f) => f.category === "fabricated-expert");
   for (const f of fullBody) {
     if (!findings.some((x) => x.sentence === f.sentence)) findings.push(f);
@@ -687,21 +873,43 @@ export function enforceNoFabricatedTestingClaims(html: string): {
   let out = html;
   const headingFix = neutralizeTestingHeadings(out);
   out = headingFix.html;
+  // Excising one sentence can rejoin its neighbours into a NEW sentence
+  // that itself trips a trigger — two claims sharing a paragraph leave
+  // the second behind on a single pass. Re-detect and repeat until the
+  // document is clean or the pass budget runs out.
   const excision = removeFabricatedTestingSentences(out, findings);
   out = excision.html;
-  if (excision.removed > 0) {
+  let removed = excision.removed;
+  for (let pass = 1; pass < MAX_EXCISION_PASSES && removed > 0; pass++) {
+    const again = detectFabricatedTestingClaimsInHtml(out);
+    if (again.length === 0) break;
+    const next = removeFabricatedTestingSentences(out, again);
+    if (next.removed === 0) break;
+    out = next.html;
+    removed += next.removed;
+    for (const f of again) {
+      if (!findings.some((x) => x.sentence === f.sentence)) findings.push(f);
+    }
+  }
+  if (removed > 0) {
     // Tidy what the sentence-level excision leaves behind: the label
     // that introduced the removed block, empty inline wrappers, empty
     // paragraphs, and doubled whitespace.
     out = out
       .replace(ORPHANED_ATTRIBUTION_LABEL_RE, "")
       .replace(/<(strong|em|b|i|small)>\s*<\/\1>/gi, "")
-      .replace(/<p[^>]*>\s*<\/p>/gi, "")
+      // A paragraph left holding nothing but whitespace and inline
+      // wrappers — including wrappers the source never closed, which is
+      // what a model-mangled block looks like after its text is gone.
+      .replace(
+        /<p\b[^>]*>(?:\s|<\/?(?:strong|em|b|i|small|span)\b[^>]*>)*<\/p\s*>/gi,
+        ""
+      )
       .replace(/[ \t]{2,}/g, " ");
   }
   return {
     html: out,
-    removed: excision.removed,
+    removed,
     headingsChanged: headingFix.changed,
     findings
   };
