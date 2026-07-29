@@ -15,6 +15,10 @@ import { GoogleSheetsDirectClient } from "./pipeline/google-sheets-direct";
 import { runObserverTick } from "./pipeline/observer-agent";
 import { runLiveQualityProbe } from "./pipeline/live-quality-probe";
 import { normalizeKeywordText } from "./pipeline/keyword-normalize";
+import {
+  sweepStuckScoutKeywords,
+  summarizeScoutStuckSweep
+} from "./pipeline/scout-stuck-sweep";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
 import { classifyUserAgent } from "./pipeline/prod-publish";
 import {
@@ -3373,6 +3377,41 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           runId: "pre-fix"
         });
         // #endregion
+
+        // 0. Self-heal the Scout DB. `onStart()` resets rows stuck in
+        // 'generating', but only in this DO's LOCAL SQLite table — the
+        // D1 `scout_keywords` table it claims work from was never swept,
+        // so a keyword claimed seconds before a deploy pause stayed
+        // 'generating' forever and silently left the queue (only
+        // 'pending' rows are ever claimed). Observed 2026-07-29:
+        // shake-away-coyote-fox-urine-granules-review, claimed four
+        // seconds before a pause, still stuck 128 minutes later with no
+        // article, no ledger row and no KV object.
+        try {
+          const sweep = await sweepStuckScoutKeywords(this.env.KEYWORDS_DB);
+          if (sweep.error) {
+            this.log(
+              "info",
+              `Scout stuck-keyword sweep skipped: ${sweep.error}`,
+              "analyst"
+            );
+          } else {
+            const summary = summarizeScoutStuckSweep(sweep);
+            if (summary) {
+              this.log(
+                "warning",
+                `Scout stuck-keyword sweep: ${summary}`,
+                "analyst"
+              );
+            }
+          }
+        } catch (sweepErr: unknown) {
+          this.log(
+            "info",
+            `Scout stuck-keyword sweep threw: ${errMsg(sweepErr)}`,
+            "analyst"
+          );
+        }
 
         // 1. Find next pending keyword
         const pending = this.sql<{
