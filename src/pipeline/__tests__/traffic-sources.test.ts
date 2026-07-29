@@ -8,6 +8,7 @@ import {
   extractArticleFacts,
   isLedgerComplete,
   ledgerKey,
+  mergeLedgers,
   mergeQaPayloadIntoFacts,
   parseCopyResponse,
   pendingSourceIds,
@@ -271,6 +272,106 @@ describe("parseCopyResponse", () => {
       parseCopyResponse("I cannot help with that.", socialChannels, FACTS, URL_)
     ).toEqual({});
   });
+
+  it("keeps the X thread's final post within the 260-char cap", () => {
+    const full = {
+      ...validSocial,
+      x: { thread: [pad("a", 300), pad("b", 300), pad("c", 300)] }
+    };
+    const out = parseCopyResponse(
+      JSON.stringify(full),
+      socialChannels,
+      FACTS,
+      URL_
+    );
+    const thread = out.x.fields.thread as string[];
+    expect(thread[thread.length - 1]).toContain(URL_);
+    for (const post of thread) expect(post.length).toBeLessThanOrEqual(260);
+  });
+});
+
+describe("parseCopyResponse — longform batch", () => {
+  const longformChannels = COPY_CHANNELS.filter((c) => c.batch === "longform");
+
+  const validLongform = {
+    quora: {
+      questions: [
+        "Are automatic litter boxes worth it for two cats?",
+        "Do automatic litter boxes jam with clumping litter?",
+        "How often do you empty an automatic litter box?"
+      ],
+      answer: pad(
+        "The weight sensor is what decides whether a box works in a two-cat home.",
+        400
+      )
+    },
+    youtubeShort: {
+      hook: "The litter box spec nobody checks",
+      script: pad(
+        "Everyone compares cycle speed. The spec that actually matters is the weight sensor.",
+        350
+      ),
+      description: pad("Why weight sensors decide the winner here.", 120),
+      tags: ["cat litter box", "automatic litter box", "cat gear"]
+    },
+    newsletter: {
+      subject: "The litter box spec nobody checks",
+      preheader: "It is not cycle speed, and it is not price",
+      body: pad(
+        "Every listing leads with cycle speed. The weight sensor is the part that decides it.",
+        350
+      )
+    },
+    medium: {
+      title: "The litter box spec nobody checks",
+      standfirst: "Cycle speed sells boxes. Weight sensors make them work.",
+      intro: pad(
+        "Two cats sharing one automatic box is where the cheap models fall apart.",
+        400
+      )
+    }
+  };
+
+  it("builds every longform channel from a well-formed response", () => {
+    const out = parseCopyResponse(
+      JSON.stringify(validLongform),
+      longformChannels,
+      FACTS,
+      URL_
+    );
+    expect(Object.keys(out).sort()).toEqual([
+      "medium",
+      "newsletter",
+      "quora",
+      "youtube-short"
+    ]);
+  });
+
+  it("cites the article in every longform channel", () => {
+    const out = parseCopyResponse(
+      JSON.stringify(validLongform),
+      longformChannels,
+      FACTS,
+      URL_
+    );
+    expect(out.quora.fields.answer).toContain(URL_);
+    expect(out["youtube-short"].fields.description).toContain(URL_);
+    expect(out.newsletter.fields.body).toContain(URL_);
+    expect(out.medium.fields.intro).toContain(URL_);
+    expect(out.medium.fields.canonicalUrl).toBe(URL_);
+  });
+
+  it("rejects longform channels that fall under their length floors", () => {
+    const thin = {
+      quora: { questions: ["only one"], answer: "too short" },
+      youtubeShort: { hook: "hi", script: "short", description: "", tags: [] },
+      newsletter: { subject: "s", preheader: "p", body: "short" },
+      medium: { title: "t", standfirst: "s", intro: "short" }
+    };
+    expect(
+      parseCopyResponse(JSON.stringify(thin), longformChannels, FACTS, URL_)
+    ).toEqual({});
+  });
 });
 
 describe("ledger bookkeeping", () => {
@@ -334,6 +435,54 @@ describe("ledger bookkeeping", () => {
 
     delete ledger.sources.newsletter;
     expect(isLedgerComplete(ledger)).toBe(false);
+  });
+});
+
+describe("mergeLedgers", () => {
+  const entry = (
+    status: "filled" | "failed" | "skipped",
+    attempts: number,
+    artifact?: string
+  ) => ({
+    status,
+    detail: "",
+    at: "",
+    attempts,
+    ...(artifact ? { artifactKey: artifact } : {})
+  });
+
+  it("keeps a concurrent pass's work that this run never saw", () => {
+    const stored = emptyLedger();
+    stored.sources.pinterest = entry("filled", 1, "traffic-source:pinterest:k");
+    const local = emptyLedger();
+    local.sources.reddit = entry("filled", 1);
+
+    const merged = mergeLedgers(stored, local);
+    expect(merged.sources.pinterest.status).toBe("filled");
+    expect(merged.sources.pinterest.artifactKey).toBe(
+      "traffic-source:pinterest:k"
+    );
+    expect(merged.sources.reddit.status).toBe("filled");
+  });
+
+  it("prefers the entry with more attempts", () => {
+    const stored = emptyLedger();
+    stored.sources.indexnow = entry("failed", 3);
+    const local = emptyLedger();
+    local.sources.indexnow = entry("failed", 1);
+
+    expect(mergeLedgers(stored, local).sources.indexnow.attempts).toBe(3);
+    expect(mergeLedgers(local, stored).sources.indexnow.attempts).toBe(3);
+  });
+
+  it("prefers a terminal outcome when attempt counts tie", () => {
+    const stored = emptyLedger();
+    stored.sources.rss = entry("filled", 1);
+    const local = emptyLedger();
+    local.sources.rss = entry("failed", 1);
+
+    expect(mergeLedgers(stored, local).sources.rss.status).toBe("filled");
+    expect(mergeLedgers(local, stored).sources.rss.status).toBe("filled");
   });
 });
 

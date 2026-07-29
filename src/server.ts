@@ -5082,23 +5082,26 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
            WHERE kv_key != ''
            ORDER BY created_at DESC
            LIMIT ${limit}`;
-        const articles = [];
-        for (const row of rows) {
-          const ledger = await readLedger(
-            this,
-            row.kv_key,
-            row.url,
-            row.keyword
-          );
-          articles.push({
-            kvKey: row.kv_key,
-            url: row.url,
-            keyword: row.keyword,
-            ledgerKey: ledgerKey(row.kv_key),
-            pending: pendingSourceIds(ledger),
-            sources: ledger.sources
-          });
-        }
+        // One KV read per article — issue them concurrently so latency
+        // doesn't scale with `limit`.
+        const articles = await Promise.all(
+          [...rows].map(async (row) => {
+            const ledger = await readLedger(
+              this,
+              row.kv_key,
+              row.url,
+              row.keyword
+            );
+            return {
+              kvKey: row.kv_key,
+              url: row.url,
+              keyword: row.keyword,
+              ledgerKey: ledgerKey(row.kv_key),
+              pending: pendingSourceIds(ledger),
+              sources: ledger.sources
+            };
+          })
+        );
         return Response.json({
           ok: true,
           sources: TRAFFIC_SOURCES,
@@ -5143,11 +5146,35 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             { status: 400 }
           );
         }
-        const sourceId = rest.slice(0, slashIdx);
+        // Decode the source id on the same terms as the kvKey segment, and
+        // reject ids that aren't in the registry — otherwise a typo or a
+        // percent-encoded id silently becomes a 404 on a key that could
+        // never exist.
+        let sourceId: string;
+        try {
+          sourceId = decodeURIComponent(rest.slice(0, slashIdx));
+        } catch {
+          return Response.json(
+            { ok: false, error: "invalid sourceId encoding" },
+            { status: 400 }
+          );
+        }
         const kvKeyResult = getRequiredAdminKvKey(rest.slice(slashIdx + 1));
         if (kvKeyResult instanceof Response) return kvKeyResult;
         const { kvKey } = kvKeyResult;
-        const { artifactKey } = await import("./pipeline/traffic-sources");
+        const { artifactKey, TRAFFIC_SOURCE_IDS } =
+          await import("./pipeline/traffic-sources");
+        if (!TRAFFIC_SOURCE_IDS.includes(sourceId)) {
+          return Response.json(
+            {
+              ok: false,
+              error: "unknown sourceId",
+              sourceId,
+              known: TRAFFIC_SOURCE_IDS
+            },
+            { status: 400 }
+          );
+        }
         const raw = await this.envBindings.ARTICLES_KV.get(
           artifactKey(sourceId, kvKey)
         );
@@ -6068,32 +6095,34 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
          WHERE kv_key != ''
          ORDER BY created_at DESC
          LIMIT ${limit}`;
-      const articles: Array<{
-        kvKey: string;
-        keyword: string;
-        url: string;
-        filled: number;
-        pending: string[];
-        statuses: Record<string, string>;
-      }> = [];
-      for (const row of rows) {
-        const ledger = await readLedger(this, row.kv_key, row.url, row.keyword);
-        const statuses: Record<string, string> = {};
-        let filled = 0;
-        for (const source of TRAFFIC_SOURCES) {
-          const entry = ledger.sources[source.id];
-          statuses[source.id] = entry?.status ?? "pending";
-          if (entry?.status === "filled") filled++;
-        }
-        articles.push({
-          kvKey: row.kv_key,
-          keyword: row.keyword,
-          url: row.url,
-          filled,
-          pending: pendingSourceIds(ledger),
-          statuses
-        });
-      }
+      // Concurrent ledger reads — this route is polled every 60s by every
+      // open dashboard tab, so serial KV gets would make its latency scale
+      // with the article count.
+      const articles = await Promise.all(
+        [...rows].map(async (row) => {
+          const ledger = await readLedger(
+            this,
+            row.kv_key,
+            row.url,
+            row.keyword
+          );
+          const statuses: Record<string, string> = {};
+          let filled = 0;
+          for (const source of TRAFFIC_SOURCES) {
+            const entry = ledger.sources[source.id];
+            statuses[source.id] = entry?.status ?? "pending";
+            if (entry?.status === "filled") filled++;
+          }
+          return {
+            kvKey: row.kv_key,
+            keyword: row.keyword,
+            url: row.url,
+            filled,
+            pending: pendingSourceIds(ledger),
+            statuses
+          };
+        })
+      );
       return Response.json(
         {
           ok: true,
@@ -8849,11 +8878,21 @@ export default {
         const id = env.SEOArticleAgent.idFromName("default");
         const stub = env.SEOArticleAgent.get(id);
         try {
-          await stub.fetch(
+          const response = await stub.fetch(
             new Request("https://internal/api/traffic-sources/fill", {
               method: "POST"
             })
           );
+          if (!response.ok) {
+            const rawDetail = (await response.text()).trim();
+            const detail =
+              rawDetail.length > 300
+                ? `${rawDetail.slice(0, 300)}…`
+                : rawDetail;
+            console.warn(
+              `Traffic-source fill dispatch returned ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`
+            );
+          }
         } catch (err: unknown) {
           console.warn(`Traffic-source fill dispatch failed: ${errMsg(err)}`);
         }

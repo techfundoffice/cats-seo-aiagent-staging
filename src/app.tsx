@@ -5273,6 +5273,9 @@ function TrafficSourcesPanel() {
                       <td
                         key={s.id}
                         title={`${s.label}: ${status}`}
+                        // The glyph + background colour carry the meaning
+                        // visually; the label carries it for screen readers.
+                        aria-label={`${s.label}: ${status}`}
                         style={{
                           padding: "0.25rem",
                           textAlign: "center",
@@ -5281,7 +5284,7 @@ function TrafficSourcesPanel() {
                           fontWeight: 700
                         }}
                       >
-                        {style.mark}
+                        <span aria-hidden="true">{style.mark}</span>
                       </td>
                     );
                   })}

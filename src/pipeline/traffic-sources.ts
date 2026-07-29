@@ -123,6 +123,16 @@ const LOCK_TTL_S = 60;
 
 const MAX_POST_CHARS = 4_000;
 
+/** Per-post character cap for the X thread channel. */
+const X_POST_MAX_CHARS = 260;
+
+/**
+ * Hard bound on one batched copy call. Two of these plus the machine
+ * channels have to fit inside the fill's lock window, so a stalled
+ * provider must fail rather than hang.
+ */
+const COPY_CALL_TIMEOUT_MS = 90_000;
+
 // ── Article facts ──────────────────────────────────────────────────────────────
 
 function decodeEntities(s: string): string {
@@ -401,13 +411,17 @@ export const COPY_CHANNELS: CopyChannel[] = [
     guidance:
       "X: thread = 3 to 5 posts, each <= 260 characters. Post 1 is a concrete hook with a specific fact — no 'thread 🧵' filler. Middle posts each carry one useful takeaway. The final post links the article.",
     build(raw, _facts, url) {
-      const thread = list(raw.thread, 5, 260);
+      const thread = list(raw.thread, 5, X_POST_MAX_CHARS);
       if (thread.length < 3) return null;
+      // list() already clamps each post to the cap, so appending the URL
+      // to a full-budget post would push the paste-ready text over it.
+      // Trim the tail post to make room first.
+      const room = Math.max(0, X_POST_MAX_CHARS - url.length - 1);
       const withLink = thread.some((t) => t.includes(url))
         ? thread
         : [
             ...thread.slice(0, -1),
-            `${thread[thread.length - 1]} ${url}`.trim()
+            `${thread[thread.length - 1].slice(0, room).trimEnd()} ${url}`.trim()
           ];
       return {
         fields: { thread: withLink },
@@ -752,15 +766,71 @@ export async function readLedger(
   }
 }
 
+/**
+ * Combine a ledger read back from KV with the one this run mutated.
+ *
+ * A fill can outrun the 60s lock (two model calls plus the machine
+ * channels), which lets a second pass start on the same article. A blind
+ * write would then last-writer-wins away the other pass's attempts and
+ * artifact keys. Per source, keep whichever entry knows more: more
+ * attempts wins, and on a tie a terminal outcome beats a `failed` one.
+ */
+export function mergeLedgers(
+  stored: TrafficSourceLedger,
+  local: TrafficSourceLedger
+): TrafficSourceLedger {
+  const isTerminal = (e: TrafficSourceEntry) =>
+    e.status === "filled" || e.status === "skipped";
+  const sources: Record<string, TrafficSourceEntry> = { ...stored.sources };
+  for (const [id, mine] of Object.entries(local.sources)) {
+    const theirs = sources[id];
+    if (!theirs) {
+      sources[id] = mine;
+      continue;
+    }
+    if (mine.attempts > theirs.attempts) sources[id] = mine;
+    else if (mine.attempts === theirs.attempts && !isTerminal(theirs)) {
+      sources[id] = mine;
+    }
+  }
+  return { ...local, sources };
+}
+
 async function writeLedger(
   agent: SEOArticleAgent,
   ledger: TrafficSourceLedger
-): Promise<void> {
-  ledger.updatedAt = new Date().toISOString();
-  await agent.envBindings.ARTICLES_KV.put(
-    ledgerKey(ledger.kvKey),
-    JSON.stringify(ledger)
+): Promise<TrafficSourceLedger> {
+  const stored = await readLedger(
+    agent,
+    ledger.kvKey,
+    ledger.url,
+    ledger.keyword
   );
+  const merged = mergeLedgers(stored, ledger);
+  merged.updatedAt = new Date().toISOString();
+  await agent.envBindings.ARTICLES_KV.put(
+    ledgerKey(merged.kvKey),
+    JSON.stringify(merged)
+  );
+  return merged;
+}
+
+/**
+ * Push the lock's expiry back out to the full TTL. Called before each
+ * slow phase so a long fill keeps exclusivity for its whole run instead
+ * of only its first 60 seconds. Best-effort: a failed renew degrades to
+ * the old behaviour (lock lapses, ledger merge catches the overlap).
+ */
+async function renewLock(agent: SEOArticleAgent): Promise<void> {
+  try {
+    await agent.envBindings.ARTICLES_KV.put(
+      LOCK_KEY,
+      new Date().toISOString(),
+      { expirationTtl: LOCK_TTL_S }
+    );
+  } catch {
+    /* best-effort */
+  }
 }
 
 function record(
@@ -929,7 +999,8 @@ async function runCopyBatch(
     providerOptions: getKimiProviderOptions(agent.envBindings),
     system: COPY_SYSTEM_PROMPT,
     prompt,
-    maxOutputTokens: batch === "social" ? 1_800 : 2_400
+    maxOutputTokens: batch === "social" ? 1_800 : 2_400,
+    abortSignal: AbortSignal.timeout(COPY_CALL_TIMEOUT_MS)
   });
   return parseCopyResponse(text ?? "", channels, facts, url);
 }
@@ -1027,6 +1098,9 @@ export async function fillArticleTrafficSources(
       (c) => c.batch === batch && pending.includes(c.id)
     );
     if (channels.length === 0) continue;
+    // Each batch is a bounded-but-slow model call; refresh the lock before
+    // it so a fill that runs past 60s still excludes a concurrent pass.
+    await renewLock(agent);
 
     let generated: Record<
       string,
@@ -1077,8 +1151,15 @@ export async function fillArticleTrafficSources(
       try {
         await agent.envBindings.ARTICLES_KV.put(key, JSON.stringify(artifact));
       } catch (err: unknown) {
-        record(ledger, channel.id, "failed", `KV write failed: ${errMsg(err)}`);
+        const detail = `KV write failed: ${errMsg(err)}`;
+        record(ledger, channel.id, "failed", detail);
         failed++;
+        agent.log(
+          "warning",
+          `Traffic source ⚠️ ${channel.id} — ${kvKey}: ${detail}`,
+          "marketing",
+          { kanbanStage: "queue" }
+        );
         continue;
       }
       record(
@@ -1098,8 +1179,8 @@ export async function fillArticleTrafficSources(
     }
   }
 
-  await writeLedger(agent, ledger);
-  const remaining = pendingSourceIds(ledger).length;
+  const merged = await writeLedger(agent, ledger);
+  const remaining = pendingSourceIds(merged).length;
   return {
     ok: failed === 0,
     kvKey,
