@@ -317,6 +317,20 @@ const TRIGGERS: Array<{
       /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*our\s+(?:Head|Lead|Senior|Chief|Staff)\s+[A-Z]/
   },
   {
+    // "informed by a 2024 consultation with Dr. Elena Vasquez, DVM" —
+    // a NOUN-form consultation with no first-person verb. Shipped live
+    // 2026-07-29 past every verb-anchored pattern above.
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:a|an|our|the)\s+(?:\d{4}\s+)?(?:\w+\s+)?consultation\s+with\s+(?:Dr\.?|[A-Z][a-z]+\s+[A-Z][a-z]+)/i
+  },
+  {
+    // "Dr. Vasquez reviewed our methodology" / "…whose practice sees…"
+    category: "fabricated-expert",
+    pattern:
+      /\bDr\.\s*[A-Z][a-z]+\s+(?:reviewed|vetted|verified|advised|evaluated|confirmed)\b/
+  },
+  {
     // Orphaned tail of a split "Dr. <Name>, DVM, a <specialty>…"
     category: "fabricated-expert",
     pattern: /^[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:DVM|VMD|PhD|CVT|RVT|CCBC)\b/

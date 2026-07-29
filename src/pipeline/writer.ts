@@ -2638,6 +2638,25 @@ async function generateArticleUnsafe(
         stripCompliantMethodologySections(html)
       );
       fabricatedTestingFindings = detectFabricatedTestingClaims(ftcGateText);
+      // The proximity exception does NOT extend to fabricated experts.
+      // A disclosure saying "products are not physically tested by Cats
+      // Luv Us" substantiates a comparative claim; it cures nothing about
+      // inventing a veterinarian. Observed live 2026-07-29: an article
+      // published AFTER the fabricated-expert detector shipped still went
+      // out carrying "informed by a 2024 consultation with Dr. Elena
+      // Vasquez, DVM, whose small-animal practice…" — placed inside the
+      // compliant wc-methodology block, so the stripped text above never
+      // contained it and the gate never saw it. Re-scan the FULL body for
+      // that category only, and merge any findings the stripped pass
+      // missed.
+      const fullBodyFindings = detectFabricatedTestingClaims(
+        stripHtmlToPlainText(html)
+      ).filter((f) => f.category === "fabricated-expert");
+      for (const f of fullBodyFindings) {
+        if (!fabricatedTestingFindings.some((x) => x.sentence === f.sentence)) {
+          fabricatedTestingFindings.push(f);
+        }
+      }
       if (fabricatedTestingFindings.length > 0) {
         const summary = summarizeFabricatedTestingClaims(
           fabricatedTestingFindings

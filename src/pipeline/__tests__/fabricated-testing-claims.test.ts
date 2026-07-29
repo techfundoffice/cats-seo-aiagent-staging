@@ -689,3 +689,31 @@ describe("fabricated-expert — invented / misattributed consultations", () => {
     }
   });
 });
+
+describe("fabricated-expert — noun-form consultation (live escape 2026-07-29)", () => {
+  it("flags 'informed by a 2024 consultation with Dr. X, DVM'", () => {
+    const s =
+      "The product assessments in this article were informed by a 2024 consultation with Dr. Elena Vasquez, DVM, whose small-animal practice in Orange County sees approximately 4,000 feline patients annually.";
+    const f = detectFabricatedTestingClaims(s);
+    expect(f.length).toBeGreaterThan(0);
+    expect(f.some((x) => x.category === "fabricated-expert")).toBe(true);
+  });
+
+  it("flags the follow-on 'Dr. Vasquez reviewed our methodology' sentence", () => {
+    const s =
+      "Dr. Vasquez reviewed our methodology for evaluating active ingredient concentrations and application safety.";
+    expect(detectFabricatedTestingClaims(s).length).toBeGreaterThan(0);
+  });
+
+  it("still allows honest citation with no consultation claim", () => {
+    for (const s of [
+      "A 2024 study by Mikel Delgado, PhD, examined feeding enrichment.",
+      "Consultation with your own veterinarian is recommended before switching foods."
+    ]) {
+      expect(
+        detectFabricatedTestingClaims(s).length,
+        `false positive: ${s}`
+      ).toBe(0);
+    }
+  });
+});
