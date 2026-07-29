@@ -1,4 +1,5 @@
 import { errMsg, getEnvBinding } from "./http-utils";
+import { enforceNoFabricatedTestingClaims } from "./fabricated-testing-claims";
 
 /**
  * prod-publish.ts — direct-to-production article publishing.
@@ -99,6 +100,14 @@ export interface ProdPublishResult {
   bytes?: number;
   dryRun?: boolean;
   indexes?: { category: boolean; global: boolean };
+  /**
+   * Fabricated testing/expert sentences the pre-prod FTC gate had to
+   * excise. Non-zero means a post-Step-14.7 model rewrite reintroduced
+   * a violation and this gate caught it — worth alerting on.
+   */
+  ftcRemoved?: number;
+  /** Sample of the first excised sentence, for the alert log. */
+  ftcSample?: string;
   error?: string;
 }
 
@@ -208,9 +217,27 @@ export async function publishArticleToProduction(
     getEnvBinding(env, "PROD_ARTICLES_KV_NAMESPACE_ID") ??
     DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID;
 
-  const html = await articlesKv.get(kvKey);
-  if (html === null) {
+  const stagingHtml = await articlesKv.get(kvKey);
+  if (stagingHtml === null) {
     return { ok: false, kvKey, error: "staging article not found in KV" };
+  }
+
+  // Last line of defense before the public site. Every article that
+  // reaches catsluvus.com passes through this function, whichever
+  // pipeline step last wrote staging KV — so the FTC check belongs
+  // here as well as at the individual write sites. Step 14.7 gates the
+  // builder's output, but steps 17-20 hand the whole document to a
+  // model afterwards; on 2026-07-29 a Polish-stage rewrite injected
+  // "insights from Dr. Elena Voss, DVM" into the template's own
+  // `<p class="date-info">` element and published it to production 44
+  // minutes after the fabricated-expert detector went live.
+  const ftc = enforceNoFabricatedTestingClaims(stagingHtml);
+  const html = ftc.html;
+  if (ftc.removed > 0 || ftc.headingsChanged > 0) {
+    // Write the cleaned copy back to staging too, so the two
+    // namespaces do not diverge and a later re-publish cannot
+    // resurrect the excised text.
+    await articlesKv.put(kvKey, html).catch(() => {});
   }
 
   const { html: rewritten, replacements } = rewriteHtmlForDomain(
@@ -348,6 +375,8 @@ export async function publishArticleToProduction(
     prodUrl,
     replacements,
     bytes: rewritten.length,
-    indexes
+    indexes,
+    ftcRemoved: ftc.removed,
+    ftcSample: ftc.findings[0]?.sentence.slice(0, 200)
   };
 }

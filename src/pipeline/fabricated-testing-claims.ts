@@ -14,7 +14,8 @@
  * `unsourced-claims.ts` (which targets benefit eligibility, FDA
  * certification, "studies show", etc.).
  *
- * This module is a deterministic, dependency-free **pre-filter**.
+ * This module is a deterministic, model-free **pre-filter** (its only
+ * imports are two other leaf helpers — no network, no LLM).
  * It scans plain body text for ≥14 phrasing variants that assert
  * first-person product-testing experience, returns matched
  * sentences with a category tag, and is consumed by:
@@ -51,6 +52,9 @@
  *   - "Hands-on cat-care experience" — boarding-facility credential,
  *     no product-testing implication.
  */
+
+import { stripHtmlToPlainText } from "./plagiarism-overlap";
+import { neutralizeTestingHeadings } from "./testing-vocab-swap";
 
 export type FabricatedTestingClaimCategory =
   /** First-person verb claiming product testing/trial. */
@@ -124,6 +128,12 @@ const MAX_FINDINGS = 20;
 
 /** Shortest sentence length (chars) we bother inspecting. */
 const MIN_SENTENCE_LEN = 20;
+
+/**
+ * Fewest words an excision match may consist of. Short matches risk
+ * deleting unrelated prose that happens to share a common phrase.
+ */
+const MIN_EXCISION_WORDS = 6;
 
 /**
  * Per-category trigger patterns. A sentence matching ANY pattern in
@@ -339,8 +349,50 @@ const TRIGGERS: Array<{
     category: "fabricated-expert",
     pattern:
       /\b(?:reviewed|vetted|verified|approved)\s+(?:our|these|this)\s+(?:facility\s+)?(?:protocols?|assessments?|methodology|recommendations?|guides?)\b/i
+  },
+  {
+    // "This review incorporates insights from Dr. Elena Voss, DVM…"
+    // Also catches the orphaned head of that sentence after the
+    // splitter cuts on the "Dr. " honorific, so excising the claim
+    // does not leave "…incorporates insights from Dr." behind.
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:incorporates?|incorporated|reflects?|draws\s+on|drew\s+on|informed\s+by|based\s+on)\s+(?:the\s+)?(?:insights?|input|guidance|perspectives?|feedback|expertise)\s+(?:from|of)\s+(?:Dr\.?|[A-Z][a-z]+\s+[A-Z][a-z]+)/i
+  },
+  {
+    // "Veterinary input was supplemented by interviews with three
+    // professional pet cemetery groundskeepers…" — an unnamed-expert
+    // sourcing claim. Cats Luv Us conducts no interviews.
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:veterinary|expert|professional|clinical|specialist)\s+(?:input|guidance|consultation|review)\s+(?:was|were)\s+(?:supplemented|provided|obtained|sought|incorporated)/i
+  },
+  {
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:we|our\s+team|our\s+editors?)\s+(?:interviewed|surveyed|polled)\s+/i
+  },
+  {
+    // "Her perspective on how physical memorials facilitate healthy
+    // grief processing informed our evaluation criteria." — an
+    // anaphoric reference back to the fabricated expert. Excising only
+    // the naming sentence leaves this dangling and still asserting
+    // that an outside professional shaped our recommendations. Tight
+    // by construction: requires the possessive lead-in AND a verb
+    // binding it to our own work.
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:His|Her|Their)\s+(?:perspective|input|insights?|guidance|feedback|expertise|review|assessment)\b[\s\S]{0,200}?\b(?:informed|shaped|guided|refined|validated|underpins?|underpinned)\s+(?:our|these|this|the)\b/i
   }
 ];
+
+/**
+ * Section labels that exist only to introduce an expert-attribution
+ * block. Once the claims under them are excised the label is an
+ * orphan, so it is removed alongside them.
+ */
+const ORPHANED_ATTRIBUTION_LABEL_RE =
+  /(?:Editorial\s+Process\s+Note|Expert\s+(?:Input|Consultation|Review)|Veterinary\s+(?:Input|Review)|Professional\s+Input)\s*:\s*/gi;
 
 /**
  * Single-regex union of every trigger pattern. Used by SEO scorecard
@@ -520,18 +572,137 @@ export function removeFabricatedTestingSentences(
       .split(/\s+/)
       .filter(Boolean)
       .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    if (words.length < 4) continue; // too short to match safely
-    let re: RegExp;
-    try {
-      re = new RegExp(words.join(`\\s*${inlineTagPat}\\s*`), "i");
-    } catch {
-      continue;
+    if (words.length < MIN_EXCISION_WORDS) continue; // too short to match safely
+    // The plain-text pass joins adjacent block elements without a
+    // sentence boundary, so a reported "sentence" can carry leading
+    // text from a preceding block (an SVG label, a button caption) that
+    // is not contiguous with the claim in the HTML. A whole-sentence
+    // literal match then fails and the claim silently survives — how
+    // "Editorial Process Note: This review incorporates insights from
+    // Dr." escaped a clean on 2026-07-29. Retry from progressively
+    // later word offsets, keeping the tail (which holds the claim)
+    // intact, and stop as soon as one matches.
+    let matched: string | null = null;
+    for (let start = 0; start <= words.length - MIN_EXCISION_WORDS; start++) {
+      const slice = words.slice(start);
+      let re: RegExp;
+      try {
+        re = new RegExp(slice.join(`\\s*${inlineTagPat}\\s*`), "i");
+      } catch {
+        break;
+      }
+      const m = out.match(re);
+      if (!m || !m[0]) continue;
+      // Length guard is measured against the slice actually sought, not
+      // the full reported sentence, so a short tail cannot license a
+      // long greedy match across structure.
+      const sliceLen = slice.join(" ").length;
+      if (m[0].length > sliceLen * 3) continue;
+      matched = m[0];
+      break;
     }
-    const m = out.match(re);
-    if (!m || !m[0]) continue;
-    if (m[0].length > finding.sentence.length * 3) continue;
-    out = out.replace(m[0], " ");
+    if (matched === null) continue;
+    out = out.replace(matched, " ");
     removed++;
   }
   return { html: out, removed };
+}
+
+/**
+ * Detect fabricated testing/expert claims directly from HTML, applying
+ * the FTC proximity exception the same way Step 14.7 does:
+ *
+ *   - General categories are scanned against the body with compliant
+ *     `wc-methodology` sections stripped (their comparative claims are
+ *     substantiated in-section, so flagging them is a false positive).
+ *   - `fabricated-expert` is ALSO scanned against the FULL body. A
+ *     methodology disclosure substantiates "we compared N products";
+ *     it cures nothing about inventing a veterinarian, so that category
+ *     gets no proximity exception.
+ */
+/** Remove HTML comments so their text is never read as body prose. */
+function stripHtmlComments(html: string): string {
+  return html.replace(/<!--[\s\S]*?-->/g, " ");
+}
+
+export function detectFabricatedTestingClaimsInHtml(
+  html: string
+): FabricatedTestingClaimFinding[] {
+  if (!html || typeof html !== "string") return [];
+  // `stripHtmlToPlainText` keeps comment bodies, so a `-->` and the
+  // template's own explanatory comments bleed into the sentence a
+  // finding reports. That text does not exist in the rendered page, and
+  // worse, the excision pass then fails its literal match against the
+  // HTML and silently leaves the real claim in place — exactly how
+  // "This review incorporates insights from Dr." survived a clean on
+  // 2026-07-29. Drop comments before either pass.
+  const body = stripHtmlComments(html);
+  const findings = detectFabricatedTestingClaims(
+    stripHtmlToPlainText(stripCompliantMethodologySections(body))
+  );
+  const fullBody = detectFabricatedTestingClaims(
+    stripHtmlToPlainText(body)
+  ).filter((f) => f.category === "fabricated-expert");
+  for (const f of fullBody) {
+    if (!findings.some((x) => x.sentence === f.sentence)) findings.push(f);
+  }
+  return findings;
+}
+
+/**
+ * Deterministic FTC backstop for HTML that a model has rewritten.
+ *
+ * Step 14.7 gates the article the HTML builder produced, but four
+ * later steps (17 QC, 18 Polish, 19 live-SEO, 20 SISS) hand the whole
+ * document to Kimi and write the result straight back to KV. Nothing
+ * re-checked those rewrites, so the gate was structurally upstream of
+ * the last four chances to introduce a violation.
+ *
+ * Observed live 2026-07-29: `cat-memorials-funerary:custom-cat-name-
+ * memorial-grave-stake-marker-review` published 44 minutes AFTER the
+ * fabricated-expert detector shipped, carrying an "Editorial Process
+ * Note: This review incorporates insights from Dr. Elena Voss, DVM…"
+ * injected into the template's own `<p class="date-info">` element —
+ * the rewrite ate the `<time>` open tag, proving a model wrote it long
+ * after Step 14.7 had run and passed.
+ *
+ * This helper is the FTC analogue of `stripPricesFromHtml`, which
+ * already runs at those same write sites: detect, neutralize testing
+ * vocabulary in headings, excise the offending sentences, return the
+ * cleaned HTML. Safe to call on clean HTML — it is a no-op.
+ */
+export function enforceNoFabricatedTestingClaims(html: string): {
+  html: string;
+  removed: number;
+  headingsChanged: number;
+  findings: FabricatedTestingClaimFinding[];
+} {
+  if (!html || typeof html !== "string") {
+    return { html, removed: 0, headingsChanged: 0, findings: [] };
+  }
+  const findings = detectFabricatedTestingClaimsInHtml(html);
+  if (findings.length === 0) {
+    return { html, removed: 0, headingsChanged: 0, findings: [] };
+  }
+  let out = html;
+  const headingFix = neutralizeTestingHeadings(out);
+  out = headingFix.html;
+  const excision = removeFabricatedTestingSentences(out, findings);
+  out = excision.html;
+  if (excision.removed > 0) {
+    // Tidy what the sentence-level excision leaves behind: the label
+    // that introduced the removed block, empty inline wrappers, empty
+    // paragraphs, and doubled whitespace.
+    out = out
+      .replace(ORPHANED_ATTRIBUTION_LABEL_RE, "")
+      .replace(/<(strong|em|b|i|small)>\s*<\/\1>/gi, "")
+      .replace(/<p[^>]*>\s*<\/p>/gi, "")
+      .replace(/[ \t]{2,}/g, " ");
+  }
+  return {
+    html: out,
+    removed: excision.removed,
+    headingsChanged: headingFix.changed,
+    findings
+  };
 }

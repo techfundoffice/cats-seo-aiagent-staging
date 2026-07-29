@@ -72,9 +72,9 @@ import { rankSerpUrlsForEditorialCompetitor } from "./competitorPick";
 import { runQCAgent } from "./qc-agent";
 import { runPolishAgent } from "./polish-agent";
 import {
-  detectFabricatedTestingClaims,
+  detectFabricatedTestingClaimsInHtml,
+  enforceNoFabricatedTestingClaims,
   removeFabricatedTestingSentences,
-  stripCompliantMethodologySections,
   summarizeFabricatedTestingClaims,
   type FabricatedTestingClaimFinding
 } from "./fabricated-testing-claims";
@@ -2634,10 +2634,6 @@ async function generateArticleUnsafe(
       // so the gate doesn't fire on its own template output. Non-
       // compliant `wc-methodology` blocks and any text outside the
       // section flow through unchanged.
-      const ftcGateText = stripHtmlToPlainText(
-        stripCompliantMethodologySections(html)
-      );
-      fabricatedTestingFindings = detectFabricatedTestingClaims(ftcGateText);
       // The proximity exception does NOT extend to fabricated experts.
       // A disclosure saying "products are not physically tested by Cats
       // Luv Us" substantiates a comparative claim; it cures nothing about
@@ -2645,18 +2641,14 @@ async function generateArticleUnsafe(
       // published AFTER the fabricated-expert detector shipped still went
       // out carrying "informed by a 2024 consultation with Dr. Elena
       // Vasquez, DVM, whose small-animal practice…" — placed inside the
-      // compliant wc-methodology block, so the stripped text above never
-      // contained it and the gate never saw it. Re-scan the FULL body for
-      // that category only, and merge any findings the stripped pass
-      // missed.
-      const fullBodyFindings = detectFabricatedTestingClaims(
-        stripHtmlToPlainText(html)
-      ).filter((f) => f.category === "fabricated-expert");
-      for (const f of fullBodyFindings) {
-        if (!fabricatedTestingFindings.some((x) => x.sentence === f.sentence)) {
-          fabricatedTestingFindings.push(f);
-        }
-      }
+      // compliant wc-methodology block, so the stripped text never
+      // contained it and the gate never saw it.
+      //
+      // `detectFabricatedTestingClaimsInHtml` encapsulates both passes
+      // (stripped-body for the general categories, full-body for
+      // `fabricated-expert`) so this gate and the post-rewrite backstops
+      // in QC / Polish / prod-publish cannot drift apart.
+      fabricatedTestingFindings = detectFabricatedTestingClaimsInHtml(html);
       if (fabricatedTestingFindings.length > 0) {
         const summary = summarizeFabricatedTestingClaims(
           fabricatedTestingFindings
@@ -3402,7 +3394,20 @@ async function generateArticleUnsafe(
               `QC redeploy: stripped ${qcStrip.stripped.length} price mention(s) — ${qcStrip.stripped.slice(0, 3).join(", ")}`
             );
           }
-          const qcCleanHtml = normalizeHtmlWhitespace(qcStrip.cleaned);
+          // FTC backstop. Step 14.7 gated the builder's HTML; the QC
+          // Agent has since handed the whole document to Kimi, so the
+          // rewrite gets its own deterministic re-check before it can
+          // reach KV. Same defense-in-depth shape as the price strip
+          // directly above.
+          const qcFtc = enforceNoFabricatedTestingClaims(qcStrip.cleaned);
+          if (qcFtc.removed > 0 || qcFtc.headingsChanged > 0) {
+            agent.log(
+              "warning",
+              `QC redeploy: FTC backstop excised ${qcFtc.removed} fabricated-claim sentence(s) and neutralized ${qcFtc.headingsChanged} heading(s) reintroduced by the QC rewrite. Sample: "${(qcFtc.findings[0]?.sentence ?? "").slice(0, 160)}"`,
+              "qaReviewer"
+            );
+          }
+          const qcCleanHtml = normalizeHtmlWhitespace(qcFtc.html);
           html = qcCleanHtml;
           await agent.envBindings.ARTICLES_KV.put(kvKey, qcCleanHtml, {
             metadata: {
@@ -3512,7 +3517,21 @@ async function generateArticleUnsafe(
               `Polish redeploy: stripped ${polishStrip.stripped.length} price mention(s) — ${polishStrip.stripped.slice(0, 3).join(", ")}`
             );
           }
-          const polishCleanHtml = normalizeHtmlWhitespace(polishStrip.cleaned);
+          // FTC backstop — see the QC redeploy site above. The Polish
+          // Agent is the LAST model rewrite before the prod-publish
+          // gate, so this is the final deterministic chance to keep a
+          // fabricated expert out of the live article.
+          const polishFtc = enforceNoFabricatedTestingClaims(
+            polishStrip.cleaned
+          );
+          if (polishFtc.removed > 0 || polishFtc.headingsChanged > 0) {
+            agent.log(
+              "warning",
+              `Polish redeploy: FTC backstop excised ${polishFtc.removed} fabricated-claim sentence(s) and neutralized ${polishFtc.headingsChanged} heading(s) reintroduced by the Polish rewrite. Sample: "${(polishFtc.findings[0]?.sentence ?? "").slice(0, 160)}"`,
+              "qaReviewer"
+            );
+          }
+          const polishCleanHtml = normalizeHtmlWhitespace(polishFtc.html);
           // Re-score after polishing
           const reScore = calculateSEOScore(
             polishCleanHtml,
@@ -3894,7 +3913,7 @@ async function generateArticleUnsafe(
         if (prodPublish.ok) {
           agent.log(
             "info",
-            `✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
+            `${(prodPublish.ftcRemoved ?? 0) > 0 ? `⚠️ FTC gate excised ${prodPublish.ftcRemoved} fabricated-claim sentence(s) at the prod boundary — a post-Step-14.7 model rewrite reintroduced them. Sample: "${prodPublish.ftcSample ?? ""}" | ` : ""}✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
             "marketing",
             { kanbanStage: "done" }
           );
