@@ -100,6 +100,9 @@ export async function enqueueIndexNowPending(
   agent: SEOArticleAgent,
   url: string
 ): Promise<void> {
+  if (!isIndexNowEligibleHost(normalizeIndexNowHost(url))) {
+    return;
+  }
   const queue = await readIndexNowQueue(agent);
   if (queue.some((e) => e.url === url)) return;
   queue.push({ url, queuedAt: new Date().toISOString() });
@@ -133,6 +136,11 @@ export async function drainIndexNowPending(
   const byHost = new Map<string, IndexNowQueueEntry[]>();
   for (const entry of head) {
     const host = normalizeIndexNowHost(entry.url);
+    // Drop staging/workshop URLs that should never have been queued.
+    if (!isIndexNowEligibleHost(host)) {
+      succeeded += 1; // count as cleared, not re-queued
+      continue;
+    }
     const group = byHost.get(host) ?? [];
     group.push(entry);
     byHost.set(host, group);
@@ -187,6 +195,20 @@ function normalizeIndexNowHost(rawDomain: string | undefined): string {
  * `notifyIndexNow`. Returns true on success, false on any failure.
  * Logs the wire response either way.
  */
+/**
+ * Hosts we are allowed to announce via IndexNow. Staging workers.dev
+ * has no verifiable key file — submitting it 403s and used to arm a
+ * global backoff that also blocked later catsluvus.com pings.
+ */
+export function isIndexNowEligibleHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, "");
+  if (!h) return false;
+  if (h === "catsluvus.com" || h.endsWith(".catsluvus.com")) return true;
+  // Explicit allowlist for promotion target domains (env can expand later).
+  if (h === "www.catsluvus.com") return true;
+  return false;
+}
+
 async function notifyIndexNowDirect(
   agent: SEOArticleAgent,
   urlOrUrls: string | string[]
@@ -194,6 +216,17 @@ async function notifyIndexNowDirect(
   const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
   if (urls.length === 0) return true;
   const url = urls[0];
+  // Host comes from the submitted URLs, not the worker's DOMAIN var:
+  // articles that cleared the quality gate live on catsluvus.com, and
+  // IndexNow rejects a urlList whose URLs don't belong to `host`.
+  const domain = normalizeIndexNowHost(url);
+  if (!isIndexNowEligibleHost(domain)) {
+    agent.log(
+      "info",
+      `IndexNow: skipped non-promotion host ${domain} for ${url} (staging/workshop URLs are not announced)`
+    );
+    return false;
+  }
   // Skip silently while a backoff is active — the activation log line
   // was written when the backoff was set, and the URLs stay queued.
   try {
@@ -204,10 +237,6 @@ async function notifyIndexNowDirect(
   } catch {
     /* best-effort; fall through */
   }
-  // Host comes from the submitted URLs, not the worker's DOMAIN var:
-  // articles that cleared the quality gate live on catsluvus.com, and
-  // IndexNow rejects a urlList whose URLs don't belong to `host`.
-  const domain = normalizeIndexNowHost(url);
   // Default to the IndexNow key that is actually deployed and verifiable:
   // https://catsluvus.com/5d2a70a712524fe39b9dda29ab79e6ee.txt returns 200
   // (served by this worker's ASSETS binding from public/, via the
@@ -344,6 +373,16 @@ export async function notifyIndexNow(
   agent: SEOArticleAgent,
   url: string
 ): Promise<boolean> {
+  const host = normalizeIndexNowHost(url);
+  // Never enqueue workers.dev / non-promotion hosts — they cannot verify
+  // and would only pollute the pending queue + risk 403 backoffs.
+  if (!isIndexNowEligibleHost(host)) {
+    agent.log(
+      "info",
+      `IndexNow: not enqueueing non-promotion host ${host} (${url})`
+    );
+    return false;
+  }
   const ok = await notifyIndexNowDirect(agent, url);
   if (ok) {
     // Opportunistic drain: re-submit a small batch of previously-

@@ -27,7 +27,23 @@ export interface SerpData {
    * Surfaced to the activity-log sheet so silent degradation becomes visible.
    */
   serpProvenance?: string;
+  /**
+   * True when the cascade produced no usable titles/URLs (all tiers failed
+   * or returned empty). Callers should treat on-page SEO scores as
+   * research-blind and avoid claiming competitive SERP baselines.
+   */
+  researchDegraded?: boolean;
 }
+
+/** Shared with scout/analytics: miss live "HTTP 402: …" before this fix. */
+export function isDataForSeoSerpQuotaError(error: string): boolean {
+  return /^HTTP\s*(?:402|429)\b|status_code=402\d{2}\b|\bquota\b|\bcredit/i.test(
+    error
+  );
+}
+
+const SERP_DATAFORSEO_BACKOFF_KEY = "serp-dataforseo-backoff";
+const SERP_DATAFORSEO_BACKOFF_TTL_SECONDS = 30 * 60;
 
 /**
  * Raw result a tier returns on success.  Empty/missing fields are OK;
@@ -149,6 +165,22 @@ async function tierDataForSEO(
     }
     return null;
   }
+  // Skip paid tier while a recent 402/429/quota backoff is active so
+  // every article does not re-hit a dead DataForSEO account first.
+  try {
+    const backedOff = await agent.envBindings.ARTICLES_KV.get(
+      SERP_DATAFORSEO_BACKOFF_KEY
+    );
+    if (backedOff) {
+      agent.log(
+        "info",
+        `SERP (dataforseo) skipped: recent 402/quota backoff active until ${backedOff}`
+      );
+      return null;
+    }
+  } catch {
+    /* best-effort */
+  }
   const result = await fetchSerpLive(creds, keyword);
   if ("error" in result) {
     const errorMessage = result.error.trim();
@@ -157,10 +189,22 @@ async function tierDataForSEO(
         "warning",
         "SERP (dataforseo): unauthorized response — verify DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD and rotate credentials if needed"
       );
-    } else if (/^(?:HTTP 429\b|status_code=402\d{2}\b)/i.test(errorMessage)) {
+    } else if (isDataForSeoSerpQuotaError(errorMessage)) {
+      try {
+        const until = new Date(
+          Date.now() + SERP_DATAFORSEO_BACKOFF_TTL_SECONDS * 1000
+        ).toISOString();
+        await agent.envBindings.ARTICLES_KV.put(
+          SERP_DATAFORSEO_BACKOFF_KEY,
+          until,
+          { expirationTtl: SERP_DATAFORSEO_BACKOFF_TTL_SECONDS }
+        );
+      } catch {
+        /* best-effort */
+      }
       agent.log(
         "warning",
-        `SERP (dataforseo): rate-limited or quota-exceeded (429/402xx) for "${keyword}" — DataForSEO SERP tier skipped; next article will retry`
+        `SERP (dataforseo): rate-limited or quota-exceeded (HTTP 402/429) for "${keyword}" — backing off 30m; falling through to next SERP tier`
       );
     } else {
       agent.log("info", `SERP (dataforseo): ${errorMessage}`);
@@ -938,7 +982,8 @@ export async function analyzeSERP(
       topTitles: hit.data.topTitles,
       topUrls: hit.data.topUrls,
       paaQuestions,
-      serpProvenance: name
+      serpProvenance: name,
+      researchDegraded: false
     };
   }
 
@@ -979,7 +1024,7 @@ export async function analyzeSERP(
   const configuredHint = ` [${hintParts.join("; ")}]`;
   agent.log(
     "warning",
-    `SERP: all sources failed for "${keyword}" — target ${targetWordCount} words (competitor: ${competitorWordCount})${configuredHint}`
+    `SERP: all sources failed for "${keyword}" — SCORE_RESEARCH_BLIND; target ${targetWordCount} words (competitor: ${competitorWordCount})${configuredHint}`
   );
   return {
     targetWordCount,
@@ -987,7 +1032,8 @@ export async function analyzeSERP(
     topTitles: [],
     topUrls: [],
     paaQuestions: [],
-    serpProvenance: ""
+    serpProvenance: "",
+    researchDegraded: true
   };
 }
 

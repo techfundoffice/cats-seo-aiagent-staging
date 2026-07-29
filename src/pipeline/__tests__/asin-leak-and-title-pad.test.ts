@@ -68,7 +68,7 @@ describe("enforceTitleSerpWindow — Best-aware short-title pad", () => {
     expect(r.title).toContain("Best Cat Carrier Backpack for Hiking");
   });
 
-  it("still uses the '| Best Picks' pad for titles not leading with Best", () => {
+  it("pads short titles that do not lead with Best into the SERP window", () => {
     const r = enforceTitleSerpWindow(
       "Quiet Carriers for Skittish Cats", // 32 chars — below MIN
       "quiet cat carrier",
@@ -76,6 +76,7 @@ describe("enforceTitleSerpWindow — Best-aware short-title pad", () => {
     );
     expect(r.title.length).toBeGreaterThanOrEqual(45);
     expect(r.title.length).toBeLessThanOrEqual(60);
+    expect(r.title).not.toMatch(/hands-on/i);
   });
 });
 

@@ -216,31 +216,25 @@ function padTitleToMin(
   //    doubled year ("Best X (2026) — Buying Guide 2026", seen live).
   const leadsWithBest = /^(?:best|top)\b/i.test(candidate.trim());
   const baseHasYear = /\b20\d{2}\b/.test(candidate);
+  // Prefer specific, research-safe pads. Avoid "Curated Recommendations"
+  // and stacked "Best Picks" AI-slop that hurts CTR and house voice.
   const pads = leadsWithBest
     ? baseHasYear
-      ? [
-          ` — Buying Guide`,
-          ` for Every Cat Owner`,
-          ` — Curated Recommendations`
-        ]
+      ? [` — Buying Guide`, ` Comparison`, ` Guide`, ` Overview`]
       : [
           ` — Buying Guide ${year}`,
-          ` for Every Cat Owner`,
-          ` — Curated Recommendations`,
-          ` ${year}`
+          ` Comparison`,
+          ` Guide`,
+          ` ${year}`,
+          ` Overview`
         ]
     : baseHasYear
-      ? [
-          ` | Best Picks`,
-          ` — Complete Buyer's Guide`,
-          ` for Every Cat Owner`,
-          ` — Curated Recommendations`
-        ]
+      ? [` — Buying Guide`, ` Comparison`, ` Guide`, ` for Cat Owners`]
       : [
-          ` | Best Picks ${year}`,
-          ` — Complete Buyer's Guide`,
-          ` for Every Cat Owner`,
-          ` — Curated Recommendations`,
+          ` — Buying Guide ${year}`,
+          ` Comparison`,
+          ` Guide`,
+          ` for Cat Owners`,
           ` ${year}`
         ];
   for (const p of pads) {
@@ -258,7 +252,7 @@ function padTitleToMin(
   // edge case), force-pad with spaces of "—" then trim.
   while (candidate.length < TITLE_MIN_CHARS) {
     const remaining = TITLE_MIN_CHARS - candidate.length;
-    const filler = " — Top Cat Picks Reviewed".slice(0, remaining + 1);
+    const filler = " — Cat Product Guide".slice(0, remaining + 1);
     candidate = `${candidate}${filler}`;
     if (candidate.length > TITLE_MAX_CHARS) {
       candidate = candidate.slice(0, TITLE_MAX_CHARS).replace(/\s+\S*$/, "");
@@ -335,9 +329,9 @@ function padMetaToMin(
   // regardless of base length. Each pad is a complete sentence.
   const pads = [
     kw ? ` Compare our top picks for ${kw} and find the right fit today.` : "",
-    " Read on for curated recommendations, real-world tradeoffs, and our top picks.",
-    " Curated reviews, fair comparisons, honest tradeoffs — find what fits.",
-    " Find the right option for your cat with our hands-on guide."
+    " Read on for specs, review-signal tradeoffs, and our ranked picks.",
+    " Fair comparisons, honest tradeoffs, and clear use-case guidance.",
+    " Find the right option for your cat with research-backed comparisons."
   ].filter(Boolean);
   let candidate = base;
   for (const p of pads) {

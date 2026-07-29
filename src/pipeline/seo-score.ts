@@ -191,11 +191,13 @@ export function calculateSEOScore(
     id: 5,
     pillar: P1,
     name: "Personal anecdotes",
+    // Boarding-care observation only — do NOT reward product-trial verbs
+    // ("we tested" / "we evaluated"); those fail check #10 (FTC).
     passed:
-      /\b(at our facility|at Cats Luv Us|in our boarding|we tested|we evaluated|I noticed|I found)\b/i.test(
+      /\b(at our facility|at Cats Luv Us|in our boarding|boarding hotel|Laguna Niguel|caring for|boarding cats|I noticed|I found)\b/i.test(
         bodyText
-      ),
-    detail: "Facility experience"
+      ) && !/\bwe\s+(tested|evaluated)\b/i.test(bodyText),
+    detail: "Facility experience (no product trials)"
   });
   checks.push({
     id: 6,
@@ -276,11 +278,13 @@ export function calculateSEOScore(
   checks.push({
     id: 12,
     pillar: P1,
-    name: "Specific dates/times of testing",
-    passed: /\b(20[2-3]\d|months|weeks|days of testing|over \d+)\b/i.test(
-      bodyText
-    ),
-    detail: "Time references"
+    name: "Specific dates/time references",
+    // Years/months/weeks only — "days of testing" rewarded trial language
+    // that check #10 bans.
+    passed:
+      /\b(20[2-3]\d|months|weeks|over \d+)\b/i.test(bodyText) &&
+      !/\bdays of testing\b/i.test(bodyText),
+    detail: "Time references (non-trial)"
   });
   checks.push({
     id: 13,
@@ -734,11 +738,13 @@ export function calculateSEOScore(
     id: 61,
     pillar: P4,
     name: "Fact not in Top 10 results",
+    // Facility/boarding uniqueness only — never "we tested" (FTC).
+    // This is still an on-page proxy, not a real SERP delta.
     passed:
-      /\b(at our facility|at Cats Luv Us|our boarding hotel|we tested)\b/i.test(
+      /\b(at our facility|at Cats Luv Us|our boarding hotel|boarding cats|Laguna Niguel)\b/i.test(
         bodyText
       ),
-    detail: "Unique facility data"
+    detail: "Unique facility data (on-page proxy)"
   });
   checks.push({
     id: 62,
@@ -753,12 +759,14 @@ export function calculateSEOScore(
   checks.push({
     id: 63,
     pillar: P4,
-    name: "Internal testing results",
+    name: "Original research framing",
+    // Pass on honest comparison language — FAIL if fabricated product-trial
+    // verbs appear (aligns with check #10 / FTC false-endorsement ban).
     passed:
-      /\b(we tested|we evaluated|we found|our testing|our review)\b/i.test(
+      /\b(we compared|we reviewed|we found|review aggregates|manufacturer specifications|our comparison)\b/i.test(
         bodyText
-      ),
-    detail: "Original testing"
+      ) && !/\b(we tested|our testing|we evaluated)\b/i.test(bodyText),
+    detail: "Original comparison (no fabricated trials)"
   });
   checks.push({
     id: 64,

@@ -198,7 +198,7 @@ export async function runPolishAgent(
     )
     .join("\n");
   const claimBlock = claimList
-    ? `\n\nUNSOURCED YMYL CLAIMS — statements asserted as fact with no citation. For EACH, generate a rewrite that does ONE of: (a) attribute to a verifiable named source, (b) soften to an honest hedge ("some veterans explore…", "may qualify case-by-case", "in our facility testing we observed…"), or (c) remove the specific unverifiable assertion. NEVER fabricate a citation, statistic, program name, certification, or partnership. Use checkId "U1", "U2", … to reference these:\n${claimList}`
+    ? `\n\nUNSOURCED YMYL CLAIMS — statements asserted as fact with no citation. For EACH, generate a rewrite that does ONE of: (a) attribute to a verifiable named source, (b) soften to an honest hedge ("buyer reports suggest…", "may qualify case-by-case", "results vary by household…"), or (c) remove the specific unverifiable assertion. NEVER invent facility testing, product trials, or "we observed in testing". NEVER fabricate a citation, statistic, program name, certification, or partnership. Use checkId "U1", "U2", … to reference these:\n${claimList}`
     : "";
 
   // Fabricated-testing block (from detectFabricatedTestingClaims, writer.ts
