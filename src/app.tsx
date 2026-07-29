@@ -1586,6 +1586,9 @@ export default function Dashboard() {
         {/* Rankings — DataForSEO Labs ranked-keywords feedback loop. Data refreshes weekly per article; panel polls every 5 min. */}
         <RankingsPanel />
 
+        {/* Traffic Sources — per-article distribution ledger; fills in while the next article generates (src/pipeline/traffic-sources.ts) */}
+        <TrafficSourcesPanel />
+
         {/* Improvement Agent — autonomous self-improvement loop (src/pipeline/improvement-agent.ts) */}
         <ImprovementAgentPanel state={state} />
 
@@ -5005,6 +5008,285 @@ function RankingsPanel() {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </details>
+  );
+}
+
+// Traffic Sources panel — the distribution ledger written by
+// src/pipeline/traffic-sources.ts. One row per recent article, one cell per
+// traffic source (sitemap, IndexNow, RSS, WebSub, answer-engine Q&A,
+// Pinterest, X, Facebook, Reddit, Quora, YouTube Short, newsletter, Medium).
+//
+// The fill runs on the 10-minute cron AND fire-and-forget while the writer is
+// generating the next article, so cells flip from grey to green during a
+// generation. Polls every 60s for exactly that reason.
+interface TrafficSourceMeta {
+  id: string;
+  label: string;
+  kind: string;
+}
+interface TrafficSourceArticleRow {
+  kvKey: string;
+  keyword: string;
+  url: string;
+  filled: number;
+  pending: string[];
+  statuses: Record<string, string>;
+}
+interface TrafficSourcesResponse {
+  ok: boolean;
+  sources: TrafficSourceMeta[];
+  articles: TrafficSourceArticleRow[];
+  totalSources: number;
+}
+
+const TRAFFIC_STATUS_STYLE: Record<
+  string,
+  { bg: string; fg: string; mark: string }
+> = {
+  filled: { bg: "#dcfce7", fg: "#15803d", mark: "✓" },
+  failed: { bg: "#fee2e2", fg: "#b91c1c", mark: "!" },
+  skipped: { bg: "#f3f4f6", fg: "#6b7280", mark: "–" },
+  pending: { bg: "#fff7ed", fg: "#c2410c", mark: "·" }
+};
+
+function TrafficSourcesPanel() {
+  const [data, setData] = useState<TrafficSourcesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const resp = await fetch("/api/traffic-sources?limit=25", {
+          credentials: "same-origin"
+        });
+        if (!resp.ok) {
+          if (!cancelled) {
+            setError(`HTTP ${resp.status}`);
+            setLoading(false);
+          }
+          return;
+        }
+        const json = (await resp.json()) as TrafficSourcesResponse;
+        if (!cancelled) {
+          setData(json);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setError(errMsg(err));
+          setLoading(false);
+        }
+      }
+    };
+    void load();
+    const interval = setInterval(() => void load(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const sources = data?.sources ?? [];
+  const articles = data?.articles ?? [];
+  const totalSources = data?.totalSources ?? sources.length;
+  const totalCells = articles.length * totalSources;
+  const filledCells = articles.reduce((sum, a) => sum + a.filled, 0);
+
+  return (
+    <details
+      open
+      style={{
+        background: "#fff",
+        borderRadius: "0.75rem",
+        border: "1px solid #e5e7eb",
+        padding: "1rem",
+        marginBottom: "1rem"
+      }}
+    >
+      <summary
+        style={{
+          cursor: "pointer",
+          userSelect: "none",
+          listStyle: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.75rem"
+        }}
+      >
+        <div>
+          <h2
+            style={{
+              fontSize: "1.125rem",
+              fontWeight: 600,
+              color: "#111827",
+              margin: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem"
+            }}
+          >
+            <span>📣</span>
+            <span>Traffic Sources</span>
+          </h2>
+          <p
+            style={{
+              margin: "0.25rem 0 0",
+              fontSize: "0.8125rem",
+              color: "#6b7280"
+            }}
+          >
+            Every traffic source each published article has been pushed into.
+            Machine channels (sitemap, IndexNow, RSS, WebSub, answer-engine
+            Q&amp;A) do real work and are re-verified; the rest are
+            ready-to-paste channel copy in KV (no platform here has a posting
+            API). Fills in while the next article generates; polls every 60s.
+          </p>
+        </div>
+        <div
+          style={{
+            fontSize: "0.75rem",
+            color: "#6b7280",
+            whiteSpace: "nowrap",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: "0.125rem"
+          }}
+        >
+          <span>
+            {filledCells} / {totalCells} filled
+          </span>
+          <span style={{ color: "#9ca3af" }}>
+            {error ? `error: ${error}` : `${articles.length} articles`}
+          </span>
+        </div>
+      </summary>
+
+      <div
+        style={{
+          marginTop: "0.75rem",
+          maxHeight: "480px",
+          overflow: "auto",
+          background: "#fafafa",
+          borderRadius: "0.5rem"
+        }}
+      >
+        {loading ? (
+          <div
+            style={{
+              padding: "1.25rem",
+              color: "#6b7280",
+              fontSize: "0.875rem",
+              textAlign: "center"
+            }}
+          >
+            Loading traffic sources…
+          </div>
+        ) : articles.length === 0 ? (
+          <div
+            style={{
+              padding: "1.25rem",
+              color: "#6b7280",
+              fontSize: "0.875rem",
+              textAlign: "center"
+            }}
+          >
+            No published articles yet.
+          </div>
+        ) : (
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontSize: "0.75rem"
+            }}
+          >
+            <thead>
+              <tr style={{ background: "#f3f4f6" }}>
+                <th
+                  style={{
+                    textAlign: "left",
+                    padding: "0.5rem",
+                    position: "sticky",
+                    left: 0,
+                    background: "#f3f4f6"
+                  }}
+                >
+                  Article
+                </th>
+                {sources.map((s) => (
+                  <th
+                    key={s.id}
+                    title={`${s.label} (${s.kind})`}
+                    style={{
+                      padding: "0.5rem 0.25rem",
+                      fontWeight: 600,
+                      color: "#374151",
+                      whiteSpace: "nowrap"
+                    }}
+                  >
+                    {s.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {articles.map((a) => (
+                <tr key={a.kvKey} style={{ borderTop: "1px solid #e5e7eb" }}>
+                  <td
+                    style={{
+                      padding: "0.5rem",
+                      maxWidth: "260px",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      position: "sticky",
+                      left: 0,
+                      background: "#fafafa"
+                    }}
+                    title={a.kvKey}
+                  >
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#2563eb", textDecoration: "none" }}
+                    >
+                      {a.keyword || a.kvKey}
+                    </a>
+                  </td>
+                  {sources.map((s) => {
+                    const status = a.statuses[s.id] ?? "pending";
+                    const style =
+                      TRAFFIC_STATUS_STYLE[status] ??
+                      TRAFFIC_STATUS_STYLE.pending;
+                    return (
+                      <td
+                        key={s.id}
+                        title={`${s.label}: ${status}`}
+                        style={{
+                          padding: "0.25rem",
+                          textAlign: "center",
+                          background: style.bg,
+                          color: style.fg,
+                          fontWeight: 700
+                        }}
+                      >
+                        {style.mark}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
             </tbody>
           </table>
         )}

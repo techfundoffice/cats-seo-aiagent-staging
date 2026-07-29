@@ -5062,6 +5062,106 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // GET /api/admin/traffic-sources?limit=N — per-article distribution
+      // ledgers: which of the traffic sources in TRAFFIC_SOURCES have been
+      // filled for each recent article, and what is still pending.
+      if (
+        url.pathname === "/api/admin/traffic-sources" &&
+        request.method === "GET"
+      ) {
+        const limit = parseAdminLimit(url.searchParams.get("limit"), 20, 100);
+        const { ledgerKey, pendingSourceIds, readLedger, TRAFFIC_SOURCES } =
+          await import("./pipeline/traffic-sources");
+        const rows = this.sql<{
+          kv_key: string;
+          url: string;
+          keyword: string;
+        }>`
+          SELECT kv_key, url, keyword
+            FROM articles
+           WHERE kv_key != ''
+           ORDER BY created_at DESC
+           LIMIT ${limit}`;
+        const articles = [];
+        for (const row of rows) {
+          const ledger = await readLedger(
+            this,
+            row.kv_key,
+            row.url,
+            row.keyword
+          );
+          articles.push({
+            kvKey: row.kv_key,
+            url: row.url,
+            keyword: row.keyword,
+            ledgerKey: ledgerKey(row.kv_key),
+            pending: pendingSourceIds(ledger),
+            sources: ledger.sources
+          });
+        }
+        return Response.json({
+          ok: true,
+          sources: TRAFFIC_SOURCES,
+          articles
+        });
+      }
+
+      // POST /api/admin/traffic-sources/fill — fill every pending traffic
+      // source for one article (body `{ kvKey?, force? }`); with no kvKey
+      // it picks the most recent article that still has pending sources.
+      if (
+        url.pathname === "/api/admin/traffic-sources/fill" &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json().catch(() => ({}))) as {
+          kvKey?: string;
+          force?: boolean;
+        };
+        const { runTrafficSourceFill } =
+          await import("./pipeline/traffic-sources");
+        const result = await runTrafficSourceFill(this, {
+          ...(body.kvKey ? { kvKey: body.kvKey } : {}),
+          ...(body.force ? { force: true } : {})
+        });
+        return Response.json(result);
+      }
+
+      // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post
+      // artifact generated for one channel of one article.
+      if (
+        url.pathname.startsWith("/api/admin/traffic-source/") &&
+        request.method === "GET"
+      ) {
+        const rest = url.pathname.slice("/api/admin/traffic-source/".length);
+        const slashIdx = rest.indexOf("/");
+        if (slashIdx <= 0) {
+          return Response.json(
+            {
+              ok: false,
+              error: "expected /api/admin/traffic-source/:id/:kvKey"
+            },
+            { status: 400 }
+          );
+        }
+        const sourceId = rest.slice(0, slashIdx);
+        const kvKeyResult = getRequiredAdminKvKey(rest.slice(slashIdx + 1));
+        if (kvKeyResult instanceof Response) return kvKeyResult;
+        const { kvKey } = kvKeyResult;
+        const { artifactKey } = await import("./pipeline/traffic-sources");
+        const raw = await this.envBindings.ARTICLES_KV.get(
+          artifactKey(sourceId, kvKey)
+        );
+        if (raw === null) {
+          return Response.json(
+            { ok: false, error: "not found", sourceId, kvKey },
+            { status: 404 }
+          );
+        }
+        return new Response(raw, {
+          headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+
       // GET /api/admin/kimi-raw/:kvKey — raw Kimi JSON output stored on
       // failure by writer.ts (see kimi-raw:<kvKey> KV writes there)
       if (
@@ -5927,6 +6027,82 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       const { runIdleTick } = await import("./pipeline/idle-tick");
       const result = await runIdleTick(this);
       return Response.json(result);
+    }
+
+    // Traffic-source fill — cron-fired distribution pass. Unlike the idle
+    // tick this deliberately runs *while* the pipeline is generating: the
+    // generation wait is exactly the window we want to spend filling in
+    // every traffic source for the previously published article. The
+    // in-flight keyword is excluded and a KV lock prevents overlap.
+    if (
+      url.pathname === "/api/traffic-sources/fill" &&
+      request.method === "POST"
+    ) {
+      const { runTrafficSourceFill } =
+        await import("./pipeline/traffic-sources");
+      const inFlight =
+        this.state.currentCategory && this.state.currentArticleSlug
+          ? `${this.state.currentCategory}:${this.state.currentArticleSlug}`
+          : "";
+      const result = await runTrafficSourceFill(this, {
+        ...(inFlight ? { excludeKvKey: inFlight } : {})
+      });
+      return Response.json(result);
+    }
+
+    // GET /api/traffic-sources — read-only distribution state for the
+    // dashboard's Traffic Sources panel. Same ledgers as the bearer-gated
+    // /api/admin/traffic-sources, minus the artifact bodies (the panel
+    // only needs per-source status, not the post copy).
+    if (url.pathname === "/api/traffic-sources" && request.method === "GET") {
+      const limit = parseAdminLimit(url.searchParams.get("limit"), 25, 100);
+      const { pendingSourceIds, readLedger, TRAFFIC_SOURCES } =
+        await import("./pipeline/traffic-sources");
+      const rows = this.sql<{
+        kv_key: string;
+        url: string;
+        keyword: string;
+      }>`
+        SELECT kv_key, url, keyword
+          FROM articles
+         WHERE kv_key != ''
+         ORDER BY created_at DESC
+         LIMIT ${limit}`;
+      const articles: Array<{
+        kvKey: string;
+        keyword: string;
+        url: string;
+        filled: number;
+        pending: string[];
+        statuses: Record<string, string>;
+      }> = [];
+      for (const row of rows) {
+        const ledger = await readLedger(this, row.kv_key, row.url, row.keyword);
+        const statuses: Record<string, string> = {};
+        let filled = 0;
+        for (const source of TRAFFIC_SOURCES) {
+          const entry = ledger.sources[source.id];
+          statuses[source.id] = entry?.status ?? "pending";
+          if (entry?.status === "filled") filled++;
+        }
+        articles.push({
+          kvKey: row.kv_key,
+          keyword: row.keyword,
+          url: row.url,
+          filled,
+          pending: pendingSourceIds(ledger),
+          statuses
+        });
+      }
+      return Response.json(
+        {
+          ok: true,
+          sources: TRAFFIC_SOURCES,
+          articles,
+          totalSources: TRAFFIC_SOURCES.length
+        },
+        { headers: { "cache-control": "no-store" } }
+      );
     }
 
     // ── Browser analytics endpoints — same DO SQL queries as the Bearer-
@@ -8501,7 +8677,11 @@ export default {
       "/api/patch-css",
       "/api/patch-css-all",
       "/api/analytics-summary",
-      "/api/observer-history"
+      "/api/observer-history",
+      // Exact match only — the sibling POST /api/traffic-sources/fill is
+      // deliberately absent so the fill can only be driven by the Worker's
+      // own cron dispatch or the bearer-gated admin route.
+      "/api/traffic-sources"
     ];
     // /api/qa/* routes are dynamic — match by prefix, not exact path
     const isQaRoute = url.pathname.startsWith("/api/qa");
@@ -8656,6 +8836,26 @@ export default {
           );
         } catch (err: unknown) {
           console.warn(`Idle tick dispatch failed: ${errMsg(err)}`);
+        }
+      })()
+    );
+    // Traffic-source fill — pushes every published article into every
+    // traffic source (sitemap, IndexNow, RSS, WebSub, answer-engine Q&A,
+    // and the per-channel social/community/newsletter copy). Runs whether
+    // or not a generation is in flight; the DO route excludes the
+    // in-flight article and holds a KV lock.
+    ctx.waitUntil(
+      (async () => {
+        const id = env.SEOArticleAgent.idFromName("default");
+        const stub = env.SEOArticleAgent.get(id);
+        try {
+          await stub.fetch(
+            new Request("https://internal/api/traffic-sources/fill", {
+              method: "POST"
+            })
+          );
+        } catch (err: unknown) {
+          console.warn(`Traffic-source fill dispatch failed: ${errMsg(err)}`);
         }
       })()
     );

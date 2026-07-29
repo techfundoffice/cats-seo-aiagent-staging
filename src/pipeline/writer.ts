@@ -65,6 +65,7 @@ import { notifyN8nPublishSuccess } from "./n8n-webhook";
 import { fetchOnPageScore, resolveDataForSeoCreds } from "./dataforseo";
 import { hydrateKeywordMetrics } from "./keyword-metrics";
 import { runQASyndication } from "./qa-syndication";
+import { backfillTrafficSourcesInBackground } from "./traffic-sources";
 import { calculateSEOScore } from "./seo-score";
 import { generateSeoScorecardQcPromptCells } from "./seo-scorecard-qc-prompts";
 import { captureCompetitor, type CompetitorData } from "./competitor";
@@ -560,6 +561,15 @@ export async function generateArticle(
   slug: string,
   categorySlug: string
 ): Promise<ArticleResult> {
+  // Distribution runs in the gap the writer creates. Generating one
+  // article takes minutes of model + API latency; that is exactly when
+  // the previously published articles should be pushed into every
+  // traffic source. Fire-and-forget, KV-locked, and it never touches the
+  // article being written here (excludeKvKey) — so it can neither block
+  // nor collide with this run.
+  backfillTrafficSourcesInBackground(agent, {
+    excludeKvKey: `${categorySlug}:${slug}`
+  });
   try {
     return await generateArticleUnsafe(agent, keyword, slug, categorySlug);
   } catch (err: unknown) {
