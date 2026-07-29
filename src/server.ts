@@ -14,6 +14,7 @@ import { runDefectEval } from "./pipeline/defect-eval-runner";
 import { GoogleSheetsDirectClient } from "./pipeline/google-sheets-direct";
 import { runObserverTick } from "./pipeline/observer-agent";
 import { runLiveQualityProbe } from "./pipeline/live-quality-probe";
+import { normalizeKeywordText } from "./pipeline/keyword-normalize";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
 import { classifyUserAgent } from "./pipeline/prod-publish";
 import {
@@ -3240,6 +3241,24 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         return null;
       }
       if (!claimed) return null;
+
+      // The catalog derives keywords from Amazon product titles, so
+      // title punctuation survives into the keyword and then into the
+      // title tag, the meta description and the body prose. Observed
+      // live: "shake-away coyote/fox urine granules . review" shipped a
+      // meta description reading "Our shake-away coyote/fox urine
+      // granules . review covers…". Tidy the prose form; `slug` is
+      // stored separately, is already clean, and is left untouched, so
+      // no URL or KV key can move.
+      const tidied = normalizeKeywordText(claimed.keyword);
+      if (tidied !== claimed.keyword) {
+        this.log(
+          "info",
+          `Scout claim: normalized keyword punctuation "${claimed.keyword}" → "${tidied}"`,
+          "analyst"
+        );
+        claimed = { ...claimed, keyword: tidied };
+      }
 
       const { checkKeywordOwnership } =
         await import("./pipeline/entity-ownership");
