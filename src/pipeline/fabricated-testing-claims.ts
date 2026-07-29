@@ -359,7 +359,15 @@ const TRIGGERS: Array<{
     // does not leave "…incorporates insights from Dr." behind.
     category: "fabricated-expert",
     pattern:
-      /\b(?:incorporates?|incorporated|reflects?|draws\s+on|drew\s+on|informed\s+by|based\s+on)\s+(?:the\s+)?(?:insights?|input|guidance|perspectives?|feedback|expertise)\s+(?:from|of)\s+(?:Dr\.?|[A-Z][a-z]+\s+[A-Z][a-z]+)/i
+      // NOT case-insensitive, deliberately. With /i the `[A-Z][a-z]+`
+      // name guard matched any two lowercase words, so "incorporated
+      // feedback from feline behaviorists" (about the MANUFACTURER) and
+      // "incorporates feedback from multiple users" both fired.
+      // `(?!\s+[A-Z])` then excludes organisations: a published body
+      // like "the American Veterinary Medical Association" runs to three
+      // or more capitalised words, and citing its guidance is legitimate
+      // — only claiming a PERSON advised us is not.
+      /\b(?:incorporates?|incorporated|reflects?|draws\s+on|drew\s+on|informed\s+by|based\s+on)\s+(?:the\s+)?(?:insights?|input|guidance|perspectives?|feedback|expertise)\s+(?:from|of)\s+(?:Dr\.|[A-Z][a-z]+\s+[A-Z][a-z]+(?!\s+[A-Z]))/
   },
   {
     // "Veterinary input was supplemented by interviews with three
@@ -416,6 +424,20 @@ const TRIGGERS: Array<{
     category: "fabricated-expert",
     pattern:
       /\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:DVM|VMD|PhD|CVT|RVT|CCBC|DACVB|MS|MSc)\b[\s\S]{0,160}?\bwho\s+(?:reviewed|vetted|verified|evaluated|advised|consulted|explained|noted|told|shared|confirmed|recommended|emphasi[sz]ed|cautioned|stressed|provided|offered|suggested|warned|described)\b/
+  },
+  {
+    // First-person engagement of an UNNAMED expert: "Our assessments
+    // incorporate insights from consultations with veterinary
+    // nutritionists", "our consultation with veterinary grief
+    // counselors", "guidance from certified feline behavior
+    // consultants and veterinary technicians on staff". No name to
+    // anchor on, so the subject must be us and the source must be a
+    // credentialed ROLE. Citing a published organisation ("guidance
+    // from the American Veterinary Medical Association") is untouched:
+    // "the" is not a credentialed role.
+    category: "fabricated-expert",
+    pattern:
+      /\b(?:our|we|us|this\s+(?:review|guide|article)|review|evaluation|analysis|assessments?|recommendations?)\b[^.]{0,90}?\b(?:consultations?\s+with|(?:incorporates?|incorporated|reflects?|draws?\s+on)\s+(?:insights?|guidance|feedback|input|expertise)\s+from|input\s+from)\s+(?:certified|licensed|board[- ]certified|veterinary|feline|professional|staff|our\s+staff)\b/i
   },
   {
     // Bare attribution tail: "…who provided insight on how auditory
