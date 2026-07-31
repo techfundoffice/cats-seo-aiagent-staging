@@ -129,7 +129,7 @@ page into a `ga_pages` table on the idle tick's round-robin.
 
 With 1.1 + 1.2 you can finally compute, per article:
 
-```
+```text
 EPC       = earnings / clicks_out          -- how well the page monetizes a click
 RPM       = earnings / sessions × 1000     -- how well it monetizes traffic
 click_rate= clicks_out / sessions          -- how well the layout converts a reader
@@ -138,6 +138,21 @@ click_rate= clicks_out / sessions          -- how well the layout converts a rea
 These three separate the failure modes that are indistinguishable today: good
 traffic + bad picks (low EPC), good picks + bad layout (low click rate), good
 page + no traffic (an SEO problem, not a revenue one).
+
+**Zero denominators are the common case, not an edge case.** A page published
+this week has no clicks-out and often no sessions, and GSC's latency floor means
+it stays that way for weeks. Store the metric as `NULL` rather than `0` — a
+zero-EPC page and an unmeasured page are opposite signals, and collapsing them
+tells Phase 2 to defund every new article. Rules for the consumers:
+
+- **Never coalesce `NULL` to `0`** in a ranking query. Rank on measured pages;
+  treat unmeasured ones separately.
+- **Require a volume floor before a ratio is trusted** — one click-out and one
+  order is a 100% conversion rate and pure noise. Below the floor, fall back to
+  the category prior (2.2's cold-start path), not the page's own number.
+- **`clicks_out > 0` with `earnings = 0` is real data**, not a missing value:
+  that page is genuinely earning nothing, and it's exactly the signal 2.5 wants.
+  Only a `NULL` denominator means "unknown."
 
 ---
 

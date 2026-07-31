@@ -60,7 +60,7 @@ fails on formatting alone.
 `src/server.ts` (9k lines) is both the Worker entrypoint **and** the
 `SEOArticleAgent` Durable Object class.
 
-```
+```text
 Browser dashboard (src/app.tsx, React 19 + useAgent WebSocket)
    │
    ▼
