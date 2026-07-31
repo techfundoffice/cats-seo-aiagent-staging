@@ -155,7 +155,14 @@ Instead make the decision and continue. The user redirects when they disagree; s
 - **Doppler for secrets.** Use `doppler secrets get <KEY> --plain --no-read-env` to retrieve credentials for local Wrangler or tooling. Never hardcode secrets.
 - **Article HTML → GitHub backup:** set Worker secret `GITHUB_TOKEN_SECRET` (repo + `actions:write` if you use workflow dispatch). Optional `GITHUB_ARTICLE_BACKUP_REPOSITORY` as `owner/repo` (default `techfundoffice/catsluvus-cloudflare-kv-backup`). Cloudflare: `wrangler secret put GITHUB_TOKEN_SECRET` (and optional backup repo string) or Doppler → Wrangler.
 - **Always run `npm run check` before committing.** This runs `oxfmt --check . && oxlint src/ && tsc`. All three must pass.
-- **Commit directly to main** unless told otherwise.
+- **ALWAYS push straight to `main`.** This is the default for every change —
+  features, fixes, refactors, docs. Do not open a feature branch and a PR and
+  then sit waiting for a human to click merge: that stalls the work and, worse,
+  nothing is verified until it deploys, because pushing to `main` is what runs
+  `deploy.yml`. `npm run check` must pass first; after that, commit and push to
+  `main`. Only use a branch + PR when the user explicitly asks for one.
+  (Confirmed by the user 2026-07-31, after a traffic-sources change sat unmerged
+  for a day and never ran.)
 - **Format after editing.** Run `npx oxfmt --write .` after making changes. The config is in `.oxfmtrc.json` (printWidth: 80, trailingComma: none).
 
 ## Project Stack
