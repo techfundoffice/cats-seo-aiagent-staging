@@ -640,7 +640,8 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
     article.quickAnswer,
     ...(article.keyTakeaways ?? []),
     ...(article.sections ?? []).flatMap((s) => [s.heading, s.content]),
-    article.whyTrustUs,
+    // whyTrustUs deliberately excluded — it is no longer rendered, so
+    // counting it would overstate the declared wordCount in JSON-LD.
     ...(article.faqs ?? []).flatMap((f) => [f.question, f.answer]),
     article.conclusion
   ]
@@ -1018,19 +1019,23 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
     ? `<script>window.addEventListener('load',function(){document.addEventListener('click',function(e){var t=e.target.closest('lite-youtube');if(t){var v=t.getAttribute('videoid');t.outerHTML='<div style="position:relative;padding-bottom:56.25%;height:0"><iframe src="https://www.youtube.com/embed/'+v+'?autoplay=1&rel=0" frameborder="0" allow="autoplay;encrypted-media;picture-in-picture" allowfullscreen title="YouTube video player" style="position:absolute;top:0;left:0;width:100%;height:100%;border-radius:8px"></iframe></div>'}})});</script>`
     : "";
 
-  // ── Why Trust Us ───────────────────────────────────────────────────────────
-
-  const whyTrustUsHtml = article.whyTrustUs
-    ? `
-    <section class="wc-trust-box">
-      <div class="wc-trust-icon">&#128300;</div>
-      <div class="wc-trust-content">
-        <h2>Why You Should Trust Us</h2>
-        <p>${article.whyTrustUs}</p>
-      </div>
-    </section>
-  `
-    : "";
+  // ── Why Trust Us — REMOVED 2026-07-29 by operator request ──────────────────
+  //
+  // The block rendered `article.whyTrustUs`, a free-text field the model
+  // wrote, and it kept reintroducing claims the site cannot stand behind:
+  // "Our staff includes certified feline behavior consultants and
+  // experienced installers", "we consulted with Dr. Sarah Chen, DVM",
+  // "our team observes daily how different tools perform". Each was
+  // patched individually and the next generation invented a new variant,
+  // because a free-text trust box is an open invitation to fabricate
+  // credentials.
+  //
+  // The block is no longer rendered at all. Genuine trust signals remain:
+  // the `wc-methodology` "How We Picked" section states the real
+  // methodology and carries the FTC disclosure, and authorship is still
+  // declared to search engines via the JSON-LD Person entity.
+  // `whyTrustUs` stays on the interface so the text-editor validators and
+  // JSON parsers keep working, but nothing reads it into a page.
 
   // ── How We Picked / Our Editorial Approach — honest methodology ─────────────
   // Wirecutter guides always name their methodology. We don't physically
@@ -1302,10 +1307,6 @@ main{padding-top:0;overflow-x:hidden}
 .container{max-width:720px;margin:0 auto;padding:40px 24px;overflow-wrap:break-word;word-wrap:break-word;overflow-x:hidden}
 
 /* Wirecutter-style Trust Box */
-.wc-trust-box{display:flex;gap:16px;background:#f0f7ff;border:1px solid #cce0ff;border-radius:8px;padding:20px 24px;margin:32px 0}
-.wc-trust-icon{font-size:2rem;flex-shrink:0}
-.wc-trust-content h2{font-size:1.1rem;margin:0 0 8px;border:none;padding:0;color:#1a56db}
-.wc-trust-content p{margin:0;font-size:0.95rem;line-height:1.6;color:#333}
 
 /* Typography */
 body{font-size:18px;line-height:1.75;letter-spacing:-0.01em}
@@ -1448,8 +1449,7 @@ input::placeholder{color:#767676 !important}
   .pick-rank{width:28px;height:28px;font-size:12px}
   .pick-cta{max-width:100px;gap:8px}
   .pick-image{width:90px;height:90px}
-  .wc-trust-box{flex-direction:column;gap:8px;padding:16px}
-}
+  }
 @media (max-width:480px){
   body{font-size:16px}
   article{font-size:16px;line-height:1.7}
@@ -1526,7 +1526,6 @@ input::placeholder{color:#767676 !important}
 
   ${heroImageHtml}
 
-  ${whyTrustUsHtml}
 
   ${howWeTestedHtml}
 

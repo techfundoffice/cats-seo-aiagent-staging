@@ -914,8 +914,14 @@ export function calculateSEOScore(
     id: 80,
     pillar: P4,
     name: "Content adds value beyond ranking",
+    // Repointed 2026-07-29: the `wc-trust-box` block was removed at the
+    // operator's request (it kept regenerating fabricated staff
+    // credentials). `wc-methodology` is the honest replacement signal —
+    // it states the real methodology and carries the FTC disclosure — so
+    // this check keeps testing "adds value beyond ranking" without
+    // silently failing on every article and costing a scorecard point.
     passed:
-      html.includes("wc-trust-box") &&
+      html.includes("wc-methodology") &&
       html.includes("top-picks") &&
       html.includes("faq-item"),
     detail: "Real value"

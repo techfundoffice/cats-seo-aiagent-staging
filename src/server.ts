@@ -14,6 +14,11 @@ import { runDefectEval } from "./pipeline/defect-eval-runner";
 import { GoogleSheetsDirectClient } from "./pipeline/google-sheets-direct";
 import { runObserverTick } from "./pipeline/observer-agent";
 import { runLiveQualityProbe } from "./pipeline/live-quality-probe";
+import { normalizeKeywordText } from "./pipeline/keyword-normalize";
+import {
+  sweepStuckScoutKeywords,
+  summarizeScoutStuckSweep
+} from "./pipeline/scout-stuck-sweep";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
 import { classifyUserAgent } from "./pipeline/prod-publish";
 import {
@@ -3241,6 +3246,24 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       }
       if (!claimed) return null;
 
+      // The catalog derives keywords from Amazon product titles, so
+      // title punctuation survives into the keyword and then into the
+      // title tag, the meta description and the body prose. Observed
+      // live: "shake-away coyote/fox urine granules . review" shipped a
+      // meta description reading "Our shake-away coyote/fox urine
+      // granules . review covers…". Tidy the prose form; `slug` is
+      // stored separately, is already clean, and is left untouched, so
+      // no URL or KV key can move.
+      const tidied = normalizeKeywordText(claimed.keyword);
+      if (tidied !== claimed.keyword) {
+        this.log(
+          "info",
+          `Scout claim: normalized keyword punctuation "${claimed.keyword}" → "${tidied}"`,
+          "analyst"
+        );
+        claimed = { ...claimed, keyword: tidied };
+      }
+
       const { checkKeywordOwnership } =
         await import("./pipeline/entity-ownership");
       const verdict = await checkKeywordOwnership(db, claimed.keyword, {
@@ -3354,6 +3377,41 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           runId: "pre-fix"
         });
         // #endregion
+
+        // 0. Self-heal the Scout DB. `onStart()` resets rows stuck in
+        // 'generating', but only in this DO's LOCAL SQLite table — the
+        // D1 `scout_keywords` table it claims work from was never swept,
+        // so a keyword claimed seconds before a deploy pause stayed
+        // 'generating' forever and silently left the queue (only
+        // 'pending' rows are ever claimed). Observed 2026-07-29:
+        // shake-away-coyote-fox-urine-granules-review, claimed four
+        // seconds before a pause, still stuck 128 minutes later with no
+        // article, no ledger row and no KV object.
+        try {
+          const sweep = await sweepStuckScoutKeywords(this.env.KEYWORDS_DB);
+          if (sweep.error) {
+            this.log(
+              "info",
+              `Scout stuck-keyword sweep skipped: ${sweep.error}`,
+              "analyst"
+            );
+          } else {
+            const summary = summarizeScoutStuckSweep(sweep);
+            if (summary) {
+              this.log(
+                "warning",
+                `Scout stuck-keyword sweep: ${summary}`,
+                "analyst"
+              );
+            }
+          }
+        } catch (sweepErr: unknown) {
+          this.log(
+            "info",
+            `Scout stuck-keyword sweep threw: ${errMsg(sweepErr)}`,
+            "analyst"
+          );
+        }
 
         // 1. Find next pending keyword
         const pending = this.sql<{
@@ -5062,6 +5120,133 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
       }
 
+      // GET /api/admin/traffic-sources?limit=N — per-article distribution
+      // ledgers: which of the traffic sources in TRAFFIC_SOURCES have been
+      // filled for each recent article, and what is still pending.
+      if (
+        url.pathname === "/api/admin/traffic-sources" &&
+        request.method === "GET"
+      ) {
+        const limit = parseAdminLimit(url.searchParams.get("limit"), 20, 100);
+        const { ledgerKey, pendingSourceIds, readLedger, TRAFFIC_SOURCES } =
+          await import("./pipeline/traffic-sources");
+        const rows = this.sql<{
+          kv_key: string;
+          url: string;
+          keyword: string;
+        }>`
+          SELECT kv_key, url, keyword
+            FROM articles
+           WHERE kv_key != ''
+           ORDER BY created_at DESC
+           LIMIT ${limit}`;
+        // One KV read per article — issue them concurrently so latency
+        // doesn't scale with `limit`.
+        const articles = await Promise.all(
+          [...rows].map(async (row) => {
+            const ledger = await readLedger(
+              this,
+              row.kv_key,
+              row.url,
+              row.keyword
+            );
+            return {
+              kvKey: row.kv_key,
+              url: row.url,
+              keyword: row.keyword,
+              ledgerKey: ledgerKey(row.kv_key),
+              pending: pendingSourceIds(ledger),
+              sources: ledger.sources
+            };
+          })
+        );
+        return Response.json({
+          ok: true,
+          sources: TRAFFIC_SOURCES,
+          articles
+        });
+      }
+
+      // POST /api/admin/traffic-sources/fill — fill every pending traffic
+      // source for one article (body `{ kvKey?, force? }`); with no kvKey
+      // it picks the most recent article that still has pending sources.
+      if (
+        url.pathname === "/api/admin/traffic-sources/fill" &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json().catch(() => ({}))) as {
+          kvKey?: string;
+          force?: boolean;
+        };
+        const { runTrafficSourceFill } =
+          await import("./pipeline/traffic-sources");
+        const result = await runTrafficSourceFill(this, {
+          ...(body.kvKey ? { kvKey: body.kvKey } : {}),
+          ...(body.force ? { force: true } : {})
+        });
+        return Response.json(result);
+      }
+
+      // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post
+      // artifact generated for one channel of one article.
+      if (
+        url.pathname.startsWith("/api/admin/traffic-source/") &&
+        request.method === "GET"
+      ) {
+        const rest = url.pathname.slice("/api/admin/traffic-source/".length);
+        const slashIdx = rest.indexOf("/");
+        if (slashIdx <= 0) {
+          return Response.json(
+            {
+              ok: false,
+              error: "expected /api/admin/traffic-source/:id/:kvKey"
+            },
+            { status: 400 }
+          );
+        }
+        // Decode the source id on the same terms as the kvKey segment, and
+        // reject ids that aren't in the registry — otherwise a typo or a
+        // percent-encoded id silently becomes a 404 on a key that could
+        // never exist.
+        let sourceId: string;
+        try {
+          sourceId = decodeURIComponent(rest.slice(0, slashIdx));
+        } catch {
+          return Response.json(
+            { ok: false, error: "invalid sourceId encoding" },
+            { status: 400 }
+          );
+        }
+        const kvKeyResult = getRequiredAdminKvKey(rest.slice(slashIdx + 1));
+        if (kvKeyResult instanceof Response) return kvKeyResult;
+        const { kvKey } = kvKeyResult;
+        const { artifactKey, TRAFFIC_SOURCE_IDS } =
+          await import("./pipeline/traffic-sources");
+        if (!TRAFFIC_SOURCE_IDS.includes(sourceId)) {
+          return Response.json(
+            {
+              ok: false,
+              error: "unknown sourceId",
+              sourceId,
+              known: TRAFFIC_SOURCE_IDS
+            },
+            { status: 400 }
+          );
+        }
+        const raw = await this.envBindings.ARTICLES_KV.get(
+          artifactKey(sourceId, kvKey)
+        );
+        if (raw === null) {
+          return Response.json(
+            { ok: false, error: "not found", sourceId, kvKey },
+            { status: 404 }
+          );
+        }
+        return new Response(raw, {
+          headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+
       // GET /api/admin/kimi-raw/:kvKey — raw Kimi JSON output stored on
       // failure by writer.ts (see kimi-raw:<kvKey> KV writes there)
       if (
@@ -5927,6 +6112,84 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       const { runIdleTick } = await import("./pipeline/idle-tick");
       const result = await runIdleTick(this);
       return Response.json(result);
+    }
+
+    // Traffic-source fill — cron-fired distribution pass. Unlike the idle
+    // tick this deliberately runs *while* the pipeline is generating: the
+    // generation wait is exactly the window we want to spend filling in
+    // every traffic source for the previously published article. The
+    // in-flight keyword is excluded and a KV lock prevents overlap.
+    if (
+      url.pathname === "/api/traffic-sources/fill" &&
+      request.method === "POST"
+    ) {
+      const { runTrafficSourceFill } =
+        await import("./pipeline/traffic-sources");
+      const inFlight =
+        this.state.currentCategory && this.state.currentArticleSlug
+          ? `${this.state.currentCategory}:${this.state.currentArticleSlug}`
+          : "";
+      const result = await runTrafficSourceFill(this, {
+        ...(inFlight ? { excludeKvKey: inFlight } : {})
+      });
+      return Response.json(result);
+    }
+
+    // GET /api/traffic-sources — read-only distribution state for the
+    // dashboard's Traffic Sources panel. Same ledgers as the bearer-gated
+    // /api/admin/traffic-sources, minus the artifact bodies (the panel
+    // only needs per-source status, not the post copy).
+    if (url.pathname === "/api/traffic-sources" && request.method === "GET") {
+      const limit = parseAdminLimit(url.searchParams.get("limit"), 25, 100);
+      const { pendingSourceIds, readLedger, TRAFFIC_SOURCES } =
+        await import("./pipeline/traffic-sources");
+      const rows = this.sql<{
+        kv_key: string;
+        url: string;
+        keyword: string;
+      }>`
+        SELECT kv_key, url, keyword
+          FROM articles
+         WHERE kv_key != ''
+         ORDER BY created_at DESC
+         LIMIT ${limit}`;
+      // Concurrent ledger reads — this route is polled every 60s by every
+      // open dashboard tab, so serial KV gets would make its latency scale
+      // with the article count.
+      const articles = await Promise.all(
+        [...rows].map(async (row) => {
+          const ledger = await readLedger(
+            this,
+            row.kv_key,
+            row.url,
+            row.keyword
+          );
+          const statuses: Record<string, string> = {};
+          let filled = 0;
+          for (const source of TRAFFIC_SOURCES) {
+            const entry = ledger.sources[source.id];
+            statuses[source.id] = entry?.status ?? "pending";
+            if (entry?.status === "filled") filled++;
+          }
+          return {
+            kvKey: row.kv_key,
+            keyword: row.keyword,
+            url: row.url,
+            filled,
+            pending: pendingSourceIds(ledger),
+            statuses
+          };
+        })
+      );
+      return Response.json(
+        {
+          ok: true,
+          sources: TRAFFIC_SOURCES,
+          articles,
+          totalSources: TRAFFIC_SOURCES.length
+        },
+        { headers: { "cache-control": "no-store" } }
+      );
     }
 
     // ── Browser analytics endpoints — same DO SQL queries as the Bearer-
@@ -8501,7 +8764,11 @@ export default {
       "/api/patch-css",
       "/api/patch-css-all",
       "/api/analytics-summary",
-      "/api/observer-history"
+      "/api/observer-history",
+      // Exact match only — the sibling POST /api/traffic-sources/fill is
+      // deliberately absent so the fill can only be driven by the Worker's
+      // own cron dispatch or the bearer-gated admin route.
+      "/api/traffic-sources"
     ];
     // /api/qa/* routes are dynamic — match by prefix, not exact path
     const isQaRoute = url.pathname.startsWith("/api/qa");
@@ -8656,6 +8923,36 @@ export default {
           );
         } catch (err: unknown) {
           console.warn(`Idle tick dispatch failed: ${errMsg(err)}`);
+        }
+      })()
+    );
+    // Traffic-source fill — pushes every published article into every
+    // traffic source (sitemap, IndexNow, RSS, WebSub, answer-engine Q&A,
+    // and the per-channel social/community/newsletter copy). Runs whether
+    // or not a generation is in flight; the DO route excludes the
+    // in-flight article and holds a KV lock.
+    ctx.waitUntil(
+      (async () => {
+        const id = env.SEOArticleAgent.idFromName("default");
+        const stub = env.SEOArticleAgent.get(id);
+        try {
+          const response = await stub.fetch(
+            new Request("https://internal/api/traffic-sources/fill", {
+              method: "POST"
+            })
+          );
+          if (!response.ok) {
+            const rawDetail = (await response.text()).trim();
+            const detail =
+              rawDetail.length > 300
+                ? `${rawDetail.slice(0, 300)}…`
+                : rawDetail;
+            console.warn(
+              `Traffic-source fill dispatch returned ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`
+            );
+          }
+        } catch (err: unknown) {
+          console.warn(`Traffic-source fill dispatch failed: ${errMsg(err)}`);
         }
       })()
     );

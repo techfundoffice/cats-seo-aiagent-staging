@@ -65,6 +65,7 @@ import { notifyN8nPublishSuccess } from "./n8n-webhook";
 import { fetchOnPageScore, resolveDataForSeoCreds } from "./dataforseo";
 import { hydrateKeywordMetrics } from "./keyword-metrics";
 import { runQASyndication } from "./qa-syndication";
+import { backfillTrafficSourcesInBackground } from "./traffic-sources";
 import { calculateSEOScore } from "./seo-score";
 import { generateSeoScorecardQcPromptCells } from "./seo-scorecard-qc-prompts";
 import { captureCompetitor, type CompetitorData } from "./competitor";
@@ -72,9 +73,9 @@ import { rankSerpUrlsForEditorialCompetitor } from "./competitorPick";
 import { runQCAgent } from "./qc-agent";
 import { runPolishAgent } from "./polish-agent";
 import {
-  detectFabricatedTestingClaims,
+  detectFabricatedTestingClaimsInHtml,
+  enforceNoFabricatedTestingClaims,
   removeFabricatedTestingSentences,
-  stripCompliantMethodologySections,
   summarizeFabricatedTestingClaims,
   type FabricatedTestingClaimFinding
 } from "./fabricated-testing-claims";
@@ -560,6 +561,15 @@ export async function generateArticle(
   slug: string,
   categorySlug: string
 ): Promise<ArticleResult> {
+  // Distribution runs in the gap the writer creates. Generating one
+  // article takes minutes of model + API latency; that is exactly when
+  // the previously published articles should be pushed into every
+  // traffic source. Fire-and-forget, KV-locked, and it never touches the
+  // article being written here (excludeKvKey) — so it can neither block
+  // nor collide with this run.
+  backfillTrafficSourcesInBackground(agent, {
+    excludeKvKey: `${categorySlug}:${slug}`
+  });
   try {
     return await generateArticleUnsafe(agent, keyword, slug, categorySlug);
   } catch (err: unknown) {
@@ -2634,10 +2644,21 @@ async function generateArticleUnsafe(
       // so the gate doesn't fire on its own template output. Non-
       // compliant `wc-methodology` blocks and any text outside the
       // section flow through unchanged.
-      const ftcGateText = stripHtmlToPlainText(
-        stripCompliantMethodologySections(html)
-      );
-      fabricatedTestingFindings = detectFabricatedTestingClaims(ftcGateText);
+      // The proximity exception does NOT extend to fabricated experts.
+      // A disclosure saying "products are not physically tested by Cats
+      // Luv Us" substantiates a comparative claim; it cures nothing about
+      // inventing a veterinarian. Observed live 2026-07-29: an article
+      // published AFTER the fabricated-expert detector shipped still went
+      // out carrying "informed by a 2024 consultation with Dr. Elena
+      // Vasquez, DVM, whose small-animal practice…" — placed inside the
+      // compliant wc-methodology block, so the stripped text never
+      // contained it and the gate never saw it.
+      //
+      // `detectFabricatedTestingClaimsInHtml` encapsulates both passes
+      // (stripped-body for the general categories, full-body for
+      // `fabricated-expert`) so this gate and the post-rewrite backstops
+      // in QC / Polish / prod-publish cannot drift apart.
+      fabricatedTestingFindings = detectFabricatedTestingClaimsInHtml(html);
       if (fabricatedTestingFindings.length > 0) {
         const summary = summarizeFabricatedTestingClaims(
           fabricatedTestingFindings
@@ -3383,7 +3404,20 @@ async function generateArticleUnsafe(
               `QC redeploy: stripped ${qcStrip.stripped.length} price mention(s) — ${qcStrip.stripped.slice(0, 3).join(", ")}`
             );
           }
-          const qcCleanHtml = normalizeHtmlWhitespace(qcStrip.cleaned);
+          // FTC backstop. Step 14.7 gated the builder's HTML; the QC
+          // Agent has since handed the whole document to Kimi, so the
+          // rewrite gets its own deterministic re-check before it can
+          // reach KV. Same defense-in-depth shape as the price strip
+          // directly above.
+          const qcFtc = enforceNoFabricatedTestingClaims(qcStrip.cleaned);
+          if (qcFtc.removed > 0 || qcFtc.headingsChanged > 0) {
+            agent.log(
+              "warning",
+              `QC redeploy: FTC backstop excised ${qcFtc.removed} fabricated-claim sentence(s) and neutralized ${qcFtc.headingsChanged} heading(s) reintroduced by the QC rewrite. Sample: "${(qcFtc.findings[0]?.sentence ?? "").slice(0, 160)}"`,
+              "qaReviewer"
+            );
+          }
+          const qcCleanHtml = normalizeHtmlWhitespace(qcFtc.html);
           html = qcCleanHtml;
           await agent.envBindings.ARTICLES_KV.put(kvKey, qcCleanHtml, {
             metadata: {
@@ -3493,7 +3527,21 @@ async function generateArticleUnsafe(
               `Polish redeploy: stripped ${polishStrip.stripped.length} price mention(s) — ${polishStrip.stripped.slice(0, 3).join(", ")}`
             );
           }
-          const polishCleanHtml = normalizeHtmlWhitespace(polishStrip.cleaned);
+          // FTC backstop — see the QC redeploy site above. The Polish
+          // Agent is the LAST model rewrite before the prod-publish
+          // gate, so this is the final deterministic chance to keep a
+          // fabricated expert out of the live article.
+          const polishFtc = enforceNoFabricatedTestingClaims(
+            polishStrip.cleaned
+          );
+          if (polishFtc.removed > 0 || polishFtc.headingsChanged > 0) {
+            agent.log(
+              "warning",
+              `Polish redeploy: FTC backstop excised ${polishFtc.removed} fabricated-claim sentence(s) and neutralized ${polishFtc.headingsChanged} heading(s) reintroduced by the Polish rewrite. Sample: "${(polishFtc.findings[0]?.sentence ?? "").slice(0, 160)}"`,
+              "qaReviewer"
+            );
+          }
+          const polishCleanHtml = normalizeHtmlWhitespace(polishFtc.html);
           // Re-score after polishing
           const reScore = calculateSEOScore(
             polishCleanHtml,
@@ -3875,7 +3923,7 @@ async function generateArticleUnsafe(
         if (prodPublish.ok) {
           agent.log(
             "info",
-            `✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
+            `${(prodPublish.trustBoxRemoved ?? 0) > 0 ? `⚠️ Removed ${prodPublish.trustBoxRemoved} hallucinated "Why You Should Trust Us" block(s) at the prod boundary — the template no longer emits one. | ` : ""}${(prodPublish.ftcRemoved ?? 0) > 0 ? `⚠️ FTC gate excised ${prodPublish.ftcRemoved} fabricated-claim sentence(s) at the prod boundary — a post-Step-14.7 model rewrite reintroduced them. Sample: "${prodPublish.ftcSample ?? ""}" | ` : ""}✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
             "marketing",
             { kanbanStage: "done" }
           );
@@ -4118,7 +4166,6 @@ YOU MUST RETURN ONLY A JSON OBJECT with this exact schema. No markdown, no backt
     {"heading": "string", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML"},
     {"heading": "string", "content": "string ${sectionMinWords}-${sectionMaxWords} words in HTML"}
   ],
-  "whyTrustUs": "string, 40-60 words. Cats Luv Us Boarding Hotel, Laguna Niguel CA.",
   "faqs": [
     {"question": "string", "answer": "string, ${faqMinWords}-${faqMaxWords} words, direct answer first then supporting detail"},
     {"question": "string", "answer": "string"},
@@ -4184,7 +4231,6 @@ AI WRITING STYLE:
 
 FIELD GUIDANCE:
 - introduction: ${introMinWords}-${introMinWords + 50} words. ${hasProducts ? "Name top product, brief why." : "Lead with the reader's specific decision, not the keyword."}
-- whyTrustUs: 40-60 words.
 - sections: AT LEAST 8 sections, ${sectionMinWords}-${sectionMaxWords} words each. Do NOT write sections shorter than ${Math.round(sectionMinWords * 0.8)} words. Add more sections if the topic or competitor heading list warrants it.
 - faqs: EXACTLY 5 questions and answers. ${paaQuestions.length > 0 ? `Use these PAA questions: ${paaQuestions.slice(0, 5).join(", ")}` : "Write 5 questions a buyer would actually ask before purchasing."}
 - conclusion: 60-100 words, ${hasProducts ? "name the top pick, explain who it is best for, one actionable next step." : "summarize the 3 key decision criteria, one actionable next step."}.
