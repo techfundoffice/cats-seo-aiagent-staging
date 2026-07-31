@@ -217,12 +217,17 @@ prefer over `kv/` when checking whether a fix landed live), `editorial-report/`,
 
 ## Repo conventions
 
-- Format with `npx oxfmt --write .` and get `npm run check` green **before**
-  committing; commit directly to `main` unless told otherwise, and push in the
-  same turn you made the change (`.cursor/rules/git-commit-push.mdc`).
+- **Always push straight to `main`** — features, fixes, refactors, docs alike.
+  Pushing to `main` is what runs `deploy.yml`, so a change parked on a branch is
+  a change that is neither verified nor live. Get `npx oxfmt --write .` and
+  `npm run check` green first, then commit and push in the same turn you made
+  the change (`.cursor/rules/git-commit-push.mdc`). Open a branch + PR only when
+  the user explicitly asks for one. (Confirmed by the user 2026-07-31, after a
+  traffic-sources change sat unmerged for a day and never ran.)
 - Copilot PRs auto-merge (`auto-merge-copilot.yml`, squash) once
-  `check (ubuntu-24.04)` passes. Human PRs must be opened **non-draft** —
-  GitHub refuses auto-merge on drafts.
+  `check (ubuntu-24.04)` passes. When a PR is warranted at all, open it
+  **non-draft** — GitHub refuses auto-merge on drafts, and CodeRabbit skips
+  reviewing them, so a draft PR stalls twice over.
 - `.github/workflows/repo-agent.yml` owns post-merge health: deploy watchdog,
   `claude-fix` issue dedup, stale-PR sweep, secret-expiry scan. It intentionally
   avoids `workflow_run` on Copilot-authored workflows (self-blocking recursion)
