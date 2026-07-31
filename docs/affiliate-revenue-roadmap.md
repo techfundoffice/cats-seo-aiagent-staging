@@ -31,11 +31,12 @@ Ranking better is only half the machine. This roadmap builds the other half.
 | On-site behavior                                    | —                                                                                                            | —                                             | **Missing** — no GA property, no tag in generated HTML               |
 | Outbound affiliate clicks                           | —                                                                                                            | —                                             | **Missing** — links are bare `?tag=`                                 |
 | Orders / earnings / EPC                             | —                                                                                                            | —                                             | **Missing** — no ingest, no schema                                   |
+| Non-search traffic (Pinterest, Reddit, X, …)        | `traffic-sources.ts` generates the copy; posting is manual                                                   | `traffic-source:<id>:<kvKey>` artifacts       | **Unattributed** — the URLs in that copy carry no UTM                |
 
 Two caveats worth knowing before trusting any existing number:
 
 - `article_ledger.human_views` / `googlebot_hits` increment only in this Worker's
-  fetch handler (`server.ts:8315-8321`). Promoted articles are served from
+  fetch handler (`server.ts:8578-8584`). Promoted articles are served from
   production KV by a _different_ Worker, so these counters stay near-zero for
   exactly the pages that earn. They are not a traffic metric.
 - GSC's 28-day window means every feedback loop below has a **~2–4 week latency
@@ -53,8 +54,8 @@ steer anything.
 Amazon Associates passes an arbitrary `ascsubtag` value through to the Orders
 report, so each commission can be traced to the page and slot that produced it.
 Today links are built as `https://www.amazon.com/dp/${asin}?tag=${tag}` in nine
-places: `html-builder.ts:825,878,887`, `amazon.ts:328,574,761,958`,
-`top-seller-scout.ts:270`, `writer.ts:609`.
+places: `html-builder.ts:826,879,888`, `amazon.ts:328,574,761,958`,
+`top-seller-scout.ts:270`, `writer.ts:619`.
 
 Extract one helper — `buildAmazonUrl({ asin, tag, kvKey, slot })` — emitting
 `?tag=<tag>&ascsubtag=<kvKey>__<slot>`, and route all nine call sites through it.
@@ -75,10 +76,17 @@ This gives the one thing GSC structurally cannot: **on-page behavior between
 landing and click-out** — which product block gets engagement, where readers
 stop scrolling, whether the picks block above the fold outperforms mid-article.
 
+It also covers the channels GSC never sees at all. `traffic-sources.ts` now
+generates ready-to-paste copy for eight social/community/owned channels, and the
+article URLs inside that copy are bare — add a `?utm_source=<sourceId>` when the
+artifact is built, so a Pinterest pin and a Reddit comment are distinguishable in
+GA4 rather than collapsing into "direct".
+
 ### 0.3 Query-dimension GSC sync
 
 `gsc-sync.ts` requests `dimensions: ["page"]`. Add a second Search Analytics call
-with `["page", "query"]` into a new `gsc_queries` table (migration `0007`).
+with `["page", "query"]` into a new `gsc_queries` table (next free migration in
+`migrations-keywords/` — `0007` is taken by `scout_sweep_count`).
 
 Unlocks three things page-level data can't:
 
