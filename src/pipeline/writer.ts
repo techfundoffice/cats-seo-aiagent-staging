@@ -52,6 +52,7 @@ import {
   normalizeForFingerprint
 } from "./content-fingerprint";
 import { notifyIndexNow, updateSitemap } from "./indexing";
+import { detectNoindex, verifyIndexableViaPageSpeed } from "./indexability";
 import {
   enforceMetaSerpWindow,
   enforceTitleSerpWindow,
@@ -2195,6 +2196,41 @@ async function generateArticleUnsafe(
       });
     }
 
+    // Publish gate: refuse to publish a page that tells Google not to index
+    // it. The article HTML is built with `<meta name="robots" content="index,
+    // follow">`, so a noindex here means something upstream (a template edit,
+    // a model-authored <head> fragment, a merged snippet) has silently made
+    // the article invisible in search — which defeats the entire pipeline.
+    // Fail loudly rather than publish a page that can never rank.
+    const indexCheck = detectNoindex(html);
+    if (indexCheck.noindex) {
+      const blockingSources = [
+        ...new Set(indexCheck.blockedBy.map((d) => d.source))
+      ].join(", ");
+      agent.log(
+        "error",
+        `❌ Publish gate: article HTML carries a noindex directive (${blockingSources}) — pipeline stopped, nothing published`
+      );
+      await escalateToCodingAgent(agent, {
+        kvKey,
+        keyword,
+        categorySlug,
+        errorCategory: "publish-gate-noindex",
+        errorMessage: `Pre-publish HTML contains a noindex directive (${indexCheck.detail}). Every article must ship "index, follow"; a noindex makes the page unrankable.`,
+        metadata: {
+          noindexSources: blockingSources,
+          robotsDirectives: indexCheck.directives
+            .map((d) => `${d.source}:${d.directive}`)
+            .join(","),
+          htmlLength: html.length
+        }
+      });
+      return failResult({
+        success: false,
+        error: `Article HTML contains a noindex directive (${indexCheck.detail}) — refusing to publish`
+      });
+    }
+
     // Design Architect: HTML structure + schemas
     const schemas: string[] = ["Article", "BreadcrumbList"];
     if (article.faqs && article.faqs.length > 0) schemas.push("FAQ");
@@ -3202,6 +3238,18 @@ async function generateArticleUnsafe(
       } else {
         const rendered = await renderPage(accountId, apiToken, url);
         if (rendered.html) {
+          // Live indexability net. The pre-publish gate only sees the HTML we
+          // built; this sees what Googlebot sees — including a noindex added
+          // by the serving edge, a CDN rule, or client-side JS. Reuses the
+          // render above, so it costs no extra Browser Rendering call.
+          await verifyLiveIndexability(agent, {
+            url,
+            kvKey,
+            keyword,
+            categorySlug,
+            renderedHtml: rendered.html
+          });
+
           const liveCheck = detectJsonSchemaLeak(rendered.html);
           if (liveCheck.leaked) {
             agent.log(
@@ -4382,6 +4430,136 @@ function dedupePickReasonsByAsin(
     out.push(p);
   }
   return out;
+}
+
+/**
+ * Post-publish indexability verification for one freshly published URL.
+ *
+ * Three signals, cheapest first:
+ *
+ *  1. The rendered (post-JS) HTML — catches a noindex injected at runtime
+ *     that never existed in the string we wrote to KV.
+ *  2. The live response headers — catches `X-Robots-Tag: noindex`, which is
+ *     invisible in the HTML and is the failure mode most likely to go
+ *     unnoticed. (`*.workers.dev` preview domains, for instance, can carry a
+ *     platform-added noindex header.)
+ *  3. Google PageSpeed Insights / Lighthouse `is-crawlable` — Google's own
+ *     verdict on the live URL. Only runs when `PAGESPEED_API_KEY` is set;
+ *     without a key PSI's shared anonymous quota is effectively always
+ *     exhausted, so we skip rather than log a misleading failure.
+ *
+ * Non-fatal by design: the article is already in KV, so this escalates for
+ * investigation instead of unwinding the publish. Any transport failure is a
+ * warning — an unverified page must never be reported as a verified one.
+ */
+async function verifyLiveIndexability(
+  agent: SEOArticleAgent,
+  params: {
+    url: string;
+    kvKey: string;
+    keyword: string;
+    categorySlug: string;
+    renderedHtml: string;
+  }
+): Promise<void> {
+  const { url, kvKey, keyword, categorySlug, renderedHtml } = params;
+
+  // Signal 2: live response headers. A HEAD would be cheaper, but some edges
+  // answer HEAD differently than GET, and it is the GET response Googlebot
+  // sees — so mirror that.
+  let liveHeaders: Headers | null = null;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { "User-Agent": "CatsLuvUs-IndexabilityCheck/1.0" },
+      signal: AbortSignal.timeout(20_000)
+    });
+    liveHeaders = resp.headers;
+  } catch (err) {
+    agent.log(
+      "warning",
+      `Post-publish X-Robots-Tag check skipped for ${url}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  // Signals 1 + 2 evaluated together.
+  const liveIndex = detectNoindex(renderedHtml, liveHeaders);
+  if (liveIndex.noindex) {
+    const blockingSources = [
+      ...new Set(liveIndex.blockedBy.map((d) => d.source))
+    ].join(", ");
+    agent.log(
+      "error",
+      `❌ Post-publish noindex: ${url} is blocked from indexing (${blockingSources}) despite the pre-publish gate passing`
+    );
+    await escalateToCodingAgent(agent, {
+      kvKey,
+      keyword,
+      categorySlug,
+      errorCategory: "post-publish-noindex",
+      errorMessage: `Live page ${url} carries a noindex directive (${liveIndex.detail}) that was absent from the pre-publish HTML — serving-layer, CDN, or runtime injection. The page cannot enter Google's index until this is removed.`,
+      metadata: {
+        noindexSources: blockingSources,
+        robotsDirectives: liveIndex.directives
+          .map((d) => `${d.source}:${d.directive}`)
+          .join(","),
+        renderedLength: renderedHtml.length
+      }
+    });
+    return;
+  }
+
+  if (liveIndex.unavailableAfter.length > 0) {
+    agent.log(
+      "warning",
+      `${url} is indexable now but scheduled to drop out: ${liveIndex.unavailableAfter.join(", ")}`
+    );
+  }
+
+  // Signal 3: Google's own verdict.
+  const pagespeedKey = agent.envBindings.PAGESPEED_API_KEY?.trim();
+  if (!pagespeedKey) {
+    agent.log(
+      "info",
+      `✅ ${url} is indexable (${liveIndex.detail}); PageSpeed cross-check skipped — set PAGESPEED_API_KEY to enable it`
+    );
+    return;
+  }
+
+  const psi = await verifyIndexableViaPageSpeed(url, pagespeedKey);
+  if (psi.indexable === false) {
+    agent.log(
+      "error",
+      `❌ Google PageSpeed reports ${url} is blocked from indexing: ${psi.explanation ?? "is-crawlable audit failed"}`
+    );
+    await escalateToCodingAgent(agent, {
+      kvKey,
+      keyword,
+      categorySlug,
+      errorCategory: "post-publish-noindex",
+      errorMessage: `Google PageSpeed Insights (Lighthouse \`is-crawlable\`) reports ${url} is blocked from indexing: ${psi.explanation ?? "audit failed"}. Our own header + meta checks passed, so the block is likely in robots.txt or is only visible to Googlebot.`,
+      metadata: {
+        pagespeedExplanation: psi.explanation ?? "",
+        pagespeedSeoScore: String(psi.seoScore ?? ""),
+        pagespeedStatusCode: String(psi.pageStatusCode ?? "")
+      }
+    });
+    return;
+  }
+
+  if (psi.indexable === null) {
+    // Unverified is not verified — say so rather than implying a pass.
+    agent.log(
+      "warning",
+      `PageSpeed indexability cross-check unavailable for ${url}: ${psi.error ?? "unknown error"} (local meta + header checks passed)`
+    );
+    return;
+  }
+
+  agent.log(
+    "info",
+    `✅ ${url} confirmed indexable by Google PageSpeed (is-crawlable passed, SEO score ${psi.seoScore ?? "n/a"})`
+  );
 }
 
 /**

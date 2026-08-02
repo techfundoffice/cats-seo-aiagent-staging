@@ -191,6 +191,17 @@ declare namespace Cloudflare {
 		 */
 		ADMIN_API_TOKEN?: string;
 		/**
+		 * Google PageSpeed Insights API key, used to cross-check that every
+		 * published URL passes Lighthouse's `is-crawlable` audit (i.e. is not
+		 * noindex). Optional: without it the pipeline still runs its own meta
+		 * + `X-Robots-Tag` checks, but skips Google's verdict, because PSI's
+		 * keyless anonymous quota is shared globally and effectively always
+		 * exhausted. Get a key at
+		 * https://developers.google.com/speed/docs/insights/v5/get-started
+		 * then `wrangler secret put PAGESPEED_API_KEY`.
+		 */
+		PAGESPEED_API_KEY?: string;
+		/**
 		 * Admin token for skill-catalog mutating endpoints
 		 * (`/api/skills/seed-local`, `/api/skills/crawl/start`).
 		 */
