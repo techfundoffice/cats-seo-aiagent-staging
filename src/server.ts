@@ -4472,7 +4472,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         const OLD_METHODOLOGY =
           "Picks are synthesized from public product data and review aggregates, cross-referenced with the Cats Luv Us team's hands-on experience with this product category in our Laguna Niguel facility. We do not receive free samples, and our rankings are unaffected by our Amazon affiliate relationship.";
         const NEW_METHODOLOGY =
-          "Picks are synthesized from public product data and review aggregates, cross-referenced with the Cats Luv Us team's experience caring for boarding cats at our Laguna Niguel facility. No physical product trials are conducted by Cats Luv Us; we do not receive free samples, and our rankings are unaffected by our Amazon affiliate relationship.";
+          "Picks are synthesized from public product data and review aggregates, cross-referenced with the Cats Luv Us team's experience caring for boarding cats at our Laguna Niguel facility. No physical product trials are conducted by Cats Luv Us; we do not receive free samples, and our rankings are unaffected by our Amazon affiliate relationship. Affiliate disclosure: product links on this page are affiliate links — if you buy through them we earn a commission at no extra cost to you.";
         const BACKUP_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
         let body: {

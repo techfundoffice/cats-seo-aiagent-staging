@@ -1064,7 +1064,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
         <li><strong>Use case fit</strong> — whether the product genuinely solves the scenario in the article's title (travel, apartment living, multi-cat households, etc.).</li>
       </ul>
       <p style="margin:0;color:#6b7280;font-size:14px;font-style:italic">
-        Picks are synthesized from public product data and review aggregates, cross-referenced with the Cats Luv Us team's experience caring for boarding cats at our Laguna Niguel facility. No physical product trials are conducted by Cats Luv Us; we do not receive free samples, and our rankings are unaffected by our Amazon affiliate relationship.
+        Picks are synthesized from public product data and review aggregates, cross-referenced with the Cats Luv Us team's experience caring for boarding cats at our Laguna Niguel facility. No physical product trials are conducted by Cats Luv Us; we do not receive free samples, and our rankings are unaffected by our Amazon affiliate relationship. Affiliate disclosure: product links on this page are affiliate links — if you buy through them we earn a commission at no extra cost to you.
       </p>
     </section>
   `
@@ -1489,6 +1489,12 @@ input::placeholder{color:#767676 !important}
 
   ${videoHeroHtml}
 
+  ${
+    products.length > 0
+      ? `<p class="affiliate-disclosure" role="note"><strong>Affiliate disclosure:</strong> Cats Luv Us is a participant in the Amazon Services LLC Associates Program. Product links on this page are affiliate links — if you buy through them we earn a commission, at no extra cost to you. This never changes which products we recommend or how we rank them.</p>`
+      : ""
+  }
+
   ${comparisonTableHtml}
 
   <!-- Author box removed 2026-07-27 by operator request. Authorship is
@@ -1499,7 +1505,7 @@ input::placeholder{color:#767676 !important}
        freshness signal survives. -->
   <p class="date-info">Last Updated: <time itemprop="dateModified" datetime="${dateNow}">${dateFormatted}</time></p>
 
-  <!-- affiliate disclosure injected by Worker HTMLRewriter -->
+  <!-- affiliate disclosure: also emitted above Top Picks when monetised -->
 
   ${
     article.quickAnswer
