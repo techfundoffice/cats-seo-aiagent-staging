@@ -11,6 +11,8 @@ describe("wrapWithSiteChrome", () => {
     );
     expect(out).toContain("clu-header");
     expect(out).toContain("Book Now");
+    expect(out).toContain("clu-affiliate-bar");
+    expect(out).toContain("earn a commission");
     expect(out).toContain("27601 Forbes");
     expect(out).toContain(">Home</a>");
     expect(out).toContain(">About Us</a>");

@@ -1174,6 +1174,47 @@ const CHROME_CSS = `
   visibility: hidden !important;
   pointer-events: none !important;
 }
+
+    /* Affiliate disclosure bar — 16 CFR 255.5 clear & conspicuous */
+    .clu-affiliate-bar {
+      display: block;
+      width: 100%;
+      background: linear-gradient(90deg, #fff7ed 0%, #ffedd5 50%, #fff7ed 100%);
+      border-bottom: 1px solid #fdba74;
+      padding: 8px 20px;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .clu-affiliate-bar__inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      font-family: 'Open Sans', system-ui, sans-serif;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      color: #9a3412;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    .clu-affiliate-bar__inner strong {
+      color: #c2410c;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .clu-affiliate-bar__sep {
+      display: inline;
+      margin: 0 0.35em;
+      color: #ea580c;
+      opacity: 0.75;
+    }
+    @media (max-width: 768px) {
+      .clu-affiliate-bar {
+        padding: 7px 14px;
+        text-align: left;
+      }
+      .clu-affiliate-bar__inner {
+        font-size: 0.75rem;
+      }
+    }
 `;
 
 const CHROME_HEADER = `<!-- Universal Chrome: PetSmart-inspired Header -->
@@ -1304,6 +1345,15 @@ const CHROME_HEADER = `<!-- Universal Chrome: PetSmart-inspired Header -->
           <a href="https://catsluvus.com/blog/" style="color: white; text-decoration: none; font-weight: bold; font-size: 14px;">Blog</a>
         </div>
       </nav>
+
+    <aside class="clu-affiliate-bar" role="note" aria-label="Affiliate disclosure">
+      <div class="clu-affiliate-bar__inner">
+        <strong>Affiliate disclosure:</strong>
+        We may earn a commission if you buy through links on this page
+        <span class="clu-affiliate-bar__sep" aria-hidden="true">·</span>
+        at no extra cost to you.
+      </div>
+    </aside>
     </header>`;
 
 const CHROME_FOOTER = `<footer class="universal-footer">
