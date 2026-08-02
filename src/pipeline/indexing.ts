@@ -356,6 +356,36 @@ export async function notifyIndexNow(
 }
 
 /**
+ * KV key holding the flat XML sitemap served at `/sitemap.xml`.
+ *
+ * Exported so the serving route in `server.ts` and the traffic-source
+ * verifier both read the exact key `updateSitemap()` writes — a drifting
+ * string literal here silently produces an empty sitemap.
+ */
+export const SITEMAP_KV_KEY = "sitemap:flat-sitemap";
+
+/**
+ * Cache lifetime for the `/sitemap.xml` response (seconds). One hour
+ * mirrors robots.txt: long enough to shed crawler load, short enough that a
+ * newly published article shows up in the sitemap promptly.
+ */
+export const SITEMAP_CACHE_MAX_AGE = 3600;
+
+/**
+ * A valid, empty sitemap document.
+ *
+ * Served when the KV key is missing — before the first article publishes, or
+ * if KV is wiped. Returning a well-formed empty `<urlset>` is important:
+ * crawlers treat a malformed sitemap as a fetch error and can back off from
+ * re-requesting it, whereas an empty one is simply "nothing new yet."
+ */
+export function buildEmptySitemap(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+</urlset>`;
+}
+
+/**
  * Update the flat sitemap in KV.
  * Reads existing sitemap, adds new URL, writes back.
  */
@@ -363,7 +393,7 @@ export async function updateSitemap(
   agent: SEOArticleAgent,
   newUrl: string
 ): Promise<void> {
-  const sitemapKey = "sitemap:flat-sitemap";
+  const sitemapKey = SITEMAP_KV_KEY;
 
   try {
     const existing =

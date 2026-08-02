@@ -861,12 +861,12 @@ async function fillSitemap(
   agent: SEOArticleAgent,
   url: string
 ): Promise<MachineOutcome> {
-  const { updateSitemap } = await import("./indexing");
+  const { updateSitemap, SITEMAP_KV_KEY } = await import("./indexing");
   await updateSitemap(agent, url);
   const sitemap =
-    (await agent.envBindings.ARTICLES_KV.get("sitemap:flat-sitemap")) ?? "";
+    (await agent.envBindings.ARTICLES_KV.get(SITEMAP_KV_KEY)) ?? "";
   return sitemap.includes(url)
-    ? { status: "filled", detail: "URL present in sitemap:flat-sitemap" }
+    ? { status: "filled", detail: `URL present in ${SITEMAP_KV_KEY}` }
     : { status: "failed", detail: "URL missing from sitemap after update" };
 }
 
