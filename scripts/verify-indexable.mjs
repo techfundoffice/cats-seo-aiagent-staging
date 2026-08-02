@@ -6,13 +6,20 @@
  * into the publish gate and the post-publish live check in `writer.ts`.)
  *
  * Usage:
- *   node scripts/verify-indexable.mjs [--domain <host>] [--limit <n>]
- *                                     [--strategy mobile|desktop]
+ *   node scripts/verify-indexable.mjs [--domain <host>] [--source sitemap|rss]
+ *                                     [--limit <n>] [--strategy mobile|desktop]
  *                                     [--concurrency <n>] [--json <path>]
  *
- * Discovers URLs from the site's RSS feed (`/feed.rss`), follows promotion
- * tombstones (staging → production 301s) so the page that actually serves the
- * content is the one audited, then for each final URL checks:
+ * Discovers URLs from `/sitemap.xml` — the full published corpus. **Do not
+ * switch the default to `/feed.rss`**: the feed is a rolling window of roughly
+ * the 50 most recent articles, so a green RSS sweep says nothing about the
+ * thousands of older pages. That distinction was missed once already and
+ * turned a 50-URL pass into a claim about the whole site. `--source rss` is
+ * kept for the narrow "did the last few publishes come out right?" check.
+ *
+ * From there it follows promotion tombstones (staging → production 301s) so
+ * the page that actually serves the content is the one audited, then for each
+ * final URL checks:
  *
  *   1. HTTP status
  *   2. `X-Robots-Tag` response header
@@ -35,6 +42,7 @@ const CRAWLER_UA =
 function parseArgs(argv) {
   const args = {
     domain: "cats-seo-aiagent-staging.webmaster-bc8.workers.dev",
+    source: "sitemap",
     limit: Infinity,
     strategy: "mobile",
     concurrency: 4,
@@ -44,6 +52,7 @@ function parseArgs(argv) {
     const flag = argv[i];
     const value = argv[i + 1];
     if (flag === "--domain") ((args.domain = value), i++);
+    else if (flag === "--source") ((args.source = value), i++);
     else if (flag === "--limit") ((args.limit = Number(value)), i++);
     else if (flag === "--strategy") ((args.strategy = value), i++);
     else if (flag === "--concurrency")
@@ -51,16 +60,48 @@ function parseArgs(argv) {
     else if (flag === "--json") ((args.json = value), i++);
     else if (flag === "--help" || flag === "-h") {
       console.log(
-        "Usage: node scripts/verify-indexable.mjs [--domain <host>] [--limit <n>] [--strategy mobile|desktop] [--concurrency <n>] [--json <path>]"
+        "Usage: node scripts/verify-indexable.mjs [--domain <host>] [--source sitemap|rss] [--limit <n>] [--strategy mobile|desktop] [--concurrency <n>] [--json <path>]"
       );
       process.exit(0);
     }
   }
+  if (args.source !== "sitemap" && args.source !== "rss") {
+    throw new Error(
+      `--source must be "sitemap" or "rss", got "${args.source}"`
+    );
+  }
   return args;
 }
 
-/** Pull article URLs out of the public RSS feed. */
-async function discoverUrls(domain) {
+/**
+ * Pull article URLs out of `/sitemap.xml` — the full published corpus.
+ *
+ * `<loc>` values are stored XML-escaped, so `&amp;` is decoded back before the
+ * URL is used.
+ */
+async function discoverFromSitemap(domain) {
+  const sitemapUrl = `https://${domain}/sitemap.xml`;
+  const resp = await fetch(sitemapUrl, {
+    headers: { "User-Agent": CRAWLER_UA }
+  });
+  if (!resp.ok) {
+    throw new Error(`Could not read ${sitemapUrl}: HTTP ${resp.status}`);
+  }
+  const xml = await resp.text();
+  const urls = new Set();
+  for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/g)) {
+    const url = match[1].trim().replace(/&amp;/g, "&");
+    if (url) urls.add(url);
+  }
+  return [...urls].sort();
+}
+
+/**
+ * Pull article URLs out of the public RSS feed — only the ~50 most recent.
+ * Useful for a quick "did the last few publishes come out right?" check; NOT
+ * a whole-site audit. See the header note.
+ */
+async function discoverFromRss(domain) {
   const feedUrl = `https://${domain}/feed.rss`;
   const resp = await fetch(feedUrl, { headers: { "User-Agent": CRAWLER_UA } });
   if (!resp.ok) {
@@ -75,6 +116,13 @@ async function discoverUrls(domain) {
     urls.add(url);
   }
   return [...urls].sort();
+}
+
+/** Discover the URL set to audit, per `--source`. */
+async function discoverUrls(domain, source) {
+  return source === "rss"
+    ? await discoverFromRss(domain)
+    : await discoverFromSitemap(domain);
 }
 
 /**
@@ -282,9 +330,17 @@ async function main() {
   }
 
   console.log(
-    `Discovering article URLs from https://${args.domain}/feed.rss …`
+    `Discovering article URLs from https://${args.domain}/${
+      args.source === "rss" ? "feed.rss" : "sitemap.xml"
+    } …`
   );
-  const all = await discoverUrls(args.domain);
+  const all = await discoverUrls(args.domain, args.source);
+  if (args.source === "rss") {
+    console.warn(
+      "⚠️  --source rss covers only the ~50 most recent articles, not the\n" +
+        "    whole site. A green run here says nothing about older pages.\n"
+    );
+  }
   const urls = all.slice(0, args.limit);
   console.log(`Found ${all.length} URLs; checking ${urls.length}.\n`);
 
