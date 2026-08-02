@@ -47,7 +47,7 @@ import {
 } from "./pipeline/http-utils";
 import { appendToRingBuffer } from "./pipeline/ring-buffer";
 import { createArticleResponseHeaders } from "./article-response";
-import { wrapWithSiteChrome } from "./pipeline/site-chrome";
+import { ensureChromeAffiliateBar, wrapWithSiteChrome } from "./pipeline/site-chrome";
 import {
   getMissingBrowserRenderingBindings,
   renderPage
@@ -8936,7 +8936,7 @@ export default {
         trackArticleServe(env, ctx, kvKey, request);
         // Staging/clone: inject Cats Luv Us Universal Chrome (header/nav/menus).
         // No-op on production DOMAIN (catsluvus.com) — live consumer owns chrome.
-        const body = wrapWithSiteChrome(articleHtml, env.DOMAIN);
+        const body = ensureChromeAffiliateBar(wrapWithSiteChrome(articleHtml, env.DOMAIN));
         return new Response(request.method === "HEAD" ? null : body, {
           status: 200,
           headers: createArticleResponseHeaders()

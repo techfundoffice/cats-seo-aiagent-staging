@@ -1577,6 +1577,68 @@ function isProductionDomain(domain: string | undefined): boolean {
 /**
  * Inject site header/nav/footer into article HTML for non-production hosts.
  */
+
+/**
+ * Ensure published HTML that already carries Universal Chrome also shows the
+ * FTC affiliate disclosure bar. Chrome is baked into KV at publish time, so
+ * `wrapWithSiteChrome` is a no-op on those pages; this upgrade path rewrites
+ * the existing header in place (idempotent).
+ */
+export function ensureChromeAffiliateBar(html: string): string {
+  if (!html || typeof html !== "string") return html;
+  if (html.includes("clu-affiliate-bar")) return html;
+  // Only touch pages that already have the site header.
+  if (!html.includes(CHROME_MARKER) && !html.includes('id="cluHeader"')) {
+    return html;
+  }
+
+  let out = html;
+
+  // Inject CSS once if the chrome stylesheet is present without the bar rules.
+  if (
+    out.includes("clu-universal-chrome-css") ||
+    out.includes(".clu-services-bar")
+  ) {
+    if (!out.includes(".clu-affiliate-bar{") && !out.includes(".clu-affiliate-bar {")) {
+      const cssRules =
+        `.clu-affiliate-bar{display:block;width:100%;background:linear-gradient(90deg,#fff7ed 0%,#ffedd5 50%,#fff7ed 100%);border-bottom:1px solid #fdba74;padding:8px 20px;text-align:center;box-sizing:border-box}` +
+        `.clu-affiliate-bar__inner{max-width:1100px;margin:0 auto;font-family:'Open Sans',system-ui,sans-serif;font-size:0.8125rem;line-height:1.45;color:#9a3412;font-weight:500;letter-spacing:0.01em}` +
+        `.clu-affiliate-bar__inner strong{color:#c2410c;font-weight:700;letter-spacing:0.02em}` +
+        `.clu-affiliate-bar__sep{display:inline;margin:0 0.35em;color:#ea580c;opacity:0.75}` +
+        `@media (max-width:768px){.clu-affiliate-bar{padding:7px 14px;text-align:left}.clu-affiliate-bar__inner{font-size:0.75rem}}`;
+      if (out.includes('id="clu-universal-chrome-css"')) {
+        out = out.replace(
+          /(<style[^>]*id="clu-universal-chrome-css"[^>]*>)([\s\S]*?)(<\/style>)/i,
+          (_m, open, body, close) => `${open}${body}\n${cssRules}\n${close}`
+        );
+      } else {
+        out = out.replace("</style>", f"{cssRules}</style>", 1);
+      }
+    }
+  }
+
+  const barHtml =
+    '<aside class="clu-affiliate-bar" role="note" aria-label="Affiliate disclosure">' +
+    '<div class="clu-affiliate-bar__inner">' +
+    "<strong>Affiliate disclosure:</strong> " +
+    "We may earn a commission if you buy through links on this page" +
+    '<span class="clu-affiliate-bar__sep" aria-hidden="true">·</span>' +
+    "at no extra cost to you." +
+    "</div></aside>";
+
+  const cluClose = out.search(
+    /<\/header>\s*(?:<!--|\s*<div class="clu-mobile|<!-- Amazon)/i
+  );
+  if (cluClose !== -1) {
+    return out.slice(0, cluClose) + barHtml + out.slice(cluClose);
+  }
+  const anyClose = out.search(/<\/header>/i);
+  if (anyClose !== -1) {
+    return out.slice(0, anyClose) + barHtml + out.slice(anyClose);
+  }
+  return out;
+}
+
 export function wrapWithSiteChrome(
   html: string,
   domain: string | undefined
@@ -1616,5 +1678,5 @@ export function wrapWithSiteChrome(
     out = out + bodyCloseInject;
   }
 
-  return out;
+  return ensureChromeAffiliateBar(out);
 }

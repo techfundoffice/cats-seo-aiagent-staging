@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { wrapWithSiteChrome } from "../site-chrome";
+import { ensureChromeAffiliateBar, wrapWithSiteChrome } from "../site-chrome";
 
 const bare = `<!DOCTYPE html><html><head><title>T</title></head><body><main>hi</main></body></html>`;
 
@@ -55,5 +55,24 @@ describe("wrapWithSiteChrome", () => {
       "cats-seo-aiagent-staging.webmaster-bc8.workers.dev"
     );
     expect(twice).toBe(once);
+  });
+});
+
+describe("ensureChromeAffiliateBar", () => {
+  it("injects the bar into HTML that already has clu-header", () => {
+    const existing = `<!DOCTYPE html><html><head></head><body>
+<header class="clu-header" id="cluHeader"><nav>nav</nav></header>
+<main>article with <a href="https://www.amazon.com/dp/B0?tag=x">buy</a></main>
+</body></html>`;
+    const out = ensureChromeAffiliateBar(existing);
+    expect(out).toContain("clu-affiliate-bar");
+    expect(out).toContain("earn a commission");
+    expect(out.indexOf("clu-affiliate-bar")).toBeLessThan(out.indexOf("</header>"));
+    expect(ensureChromeAffiliateBar(out)).toBe(out);
+  });
+
+  it("is a no-op without site chrome", () => {
+    const bare = "<html><body><p>no chrome</p></body></html>";
+    expect(ensureChromeAffiliateBar(bare)).toBe(bare);
   });
 });
