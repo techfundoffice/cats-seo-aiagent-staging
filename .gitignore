@@ -173,6 +173,8 @@ src/**/*.js.map
 scripts/*.mjs
 # Indexer is the exception — needed by .github/workflows/index-codebase.yml
 !scripts/index-codebase.mjs
+# Hand-written source, not a tsc artifact: sweeps published URLs for noindex
+!scripts/verify-indexable.mjs
 vite.config.js
 
 # CodeGraph local index (codegraph init)

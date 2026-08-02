@@ -8701,6 +8701,11 @@ export default {
       const isQaEndpoint = url.pathname.startsWith("/api/qa");
       // /feed.rss is a public syndication endpoint — exempt from auth
       const isFeedRss = url.pathname === "/feed.rss";
+      // /sitemap.xml is advertised in robots.txt and must be fetchable by
+      // crawlers with no session. Exempted by exact path rather than by
+      // extension: a blanket `.xml` rule would also expose any other XML
+      // served from ./public.
+      const isSitemap = url.pathname === "/sitemap.xml";
       // Static public assets (favicon, PWA icons, manifest, robots, llms,
       // IndexNow keys) must be reachable without a session so SEO crawlers
       // and browser icon loaders can fetch them. `catsluvus.com/*.txt` is
@@ -8725,6 +8730,7 @@ export default {
         !isMachineApi &&
         !isQaEndpoint &&
         !isFeedRss &&
+        !isSitemap &&
         !isPublicAsset &&
         !isArticlePath &&
         !hasValidAuthCookie(request, password)
@@ -8838,6 +8844,29 @@ export default {
           "X-Content-Type-Options": "nosniff",
           // Required so FeedSpot, Feedly, and browser-based readers can
           // fetch the feed cross-origin without CORS errors.
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    // ── /sitemap.xml — serve the flat XML sitemap from KV ───────────────────
+    // robots.txt advertises this exact path, so it has to resolve to a real
+    // sitemap document. Without this route the request fell through to the
+    // SPA/asset handler and returned the dashboard login page with HTTP 200 —
+    // a "successful" response containing HTML, which crawlers discard as a
+    // malformed sitemap. Every published URL was therefore invisible to
+    // sitemap-based discovery even though `updateSitemap()` had been
+    // faithfully maintaining the document in KV all along.
+    if (url.pathname === "/sitemap.xml") {
+      const { buildEmptySitemap, SITEMAP_CACHE_MAX_AGE, SITEMAP_KV_KEY } =
+        await import("./pipeline/indexing");
+      const sitemapXml =
+        (await env.ARTICLES_KV.get(SITEMAP_KV_KEY)) ?? buildEmptySitemap();
+      return new Response(sitemapXml, {
+        headers: {
+          "Content-Type": "application/xml; charset=UTF-8",
+          "Cache-Control": `public, max-age=${SITEMAP_CACHE_MAX_AGE}`,
+          "X-Content-Type-Options": "nosniff",
           "Access-Control-Allow-Origin": "*"
         }
       });

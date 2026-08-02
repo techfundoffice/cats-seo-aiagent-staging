@@ -137,6 +137,8 @@ function collectErrorMessages(err: unknown): string[] {
 export type EscalationCategory =
   | "publish-gate-leak"
   | "post-publish-live-leak"
+  | "publish-gate-noindex"
+  | "post-publish-noindex"
   | "content-fingerprint-missing"
   | "content-gate-too-thin"
   | "kimi-empty-or-errored"

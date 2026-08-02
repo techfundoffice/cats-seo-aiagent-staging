@@ -356,6 +356,82 @@ export async function notifyIndexNow(
 }
 
 /**
+ * KV key holding the flat XML sitemap served at `/sitemap.xml`.
+ *
+ * Exported so the serving route in `server.ts` and the traffic-source
+ * verifier both read the exact key `updateSitemap()` writes — a drifting
+ * string literal here silently produces an empty sitemap.
+ */
+export const SITEMAP_KV_KEY = "sitemap:flat-sitemap";
+
+/**
+ * Cache lifetime for the `/sitemap.xml` response (seconds). One hour
+ * mirrors robots.txt: long enough to shed crawler load, short enough that a
+ * newly published article shows up in the sitemap promptly.
+ */
+export const SITEMAP_CACHE_MAX_AGE = 3600;
+
+/**
+ * A valid, empty sitemap document.
+ *
+ * Served when the KV key is missing — before the first article publishes, or
+ * if KV is wiped. Returning a well-formed empty `<urlset>` is important:
+ * crawlers treat a malformed sitemap as a fetch error and can back off from
+ * re-requesting it, whereas an empty one is simply "nothing new yet."
+ */
+export function buildEmptySitemap(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+</urlset>`;
+}
+
+/**
+ * Remove a URL from the flat sitemap.
+ *
+ * Called when a staging article is promoted to production: the staging URL
+ * becomes a 301 to the production copy, and a sitemap must list canonical,
+ * indexable URLs — not redirects. Leaving promoted URLs in place makes every
+ * one of them surface in Search Console as "Page with redirect" and burns
+ * crawl budget re-fetching URLs that only point elsewhere.
+ *
+ * Takes the KV namespace rather than the agent because the promotion path
+ * (`publishArticleToProduction`) runs from the admin API with no agent in
+ * scope.
+ *
+ * @returns true when an entry was removed and the sitemap rewritten.
+ */
+export async function removeUrlFromSitemap(
+  articlesKv: KVNamespace,
+  url: string
+): Promise<boolean> {
+  try {
+    const existing = await articlesKv.get(SITEMAP_KV_KEY);
+    if (!existing) return false;
+
+    const loc = `<loc>${escXml(url)}</loc>`;
+    if (!existing.includes(loc)) return false;
+
+    // Drop whole `<url>…</url>` entries whose <loc> is this URL, along with
+    // their leading indentation and trailing newline, so the document stays
+    // tidy. Matching on the extracted entry with `includes` (rather than
+    // interpolating the URL into a regex) avoids escaping pitfalls with
+    // characters that are regex-significant.
+    const updated = existing.replace(
+      /[ \t]*<url>[\s\S]*?<\/url>\n?/g,
+      (entry) => (entry.includes(loc) ? "" : entry)
+    );
+    if (updated === existing) return false;
+
+    await articlesKv.put(SITEMAP_KV_KEY, updated);
+    return true;
+  } catch {
+    // Best-effort: the promotion itself has already succeeded, and a stale
+    // sitemap entry is a crawl-efficiency problem, not a correctness one.
+    return false;
+  }
+}
+
+/**
  * Update the flat sitemap in KV.
  * Reads existing sitemap, adds new URL, writes back.
  */
@@ -363,7 +439,7 @@ export async function updateSitemap(
   agent: SEOArticleAgent,
   newUrl: string
 ): Promise<void> {
-  const sitemapKey = "sitemap:flat-sitemap";
+  const sitemapKey = SITEMAP_KV_KEY;
 
   try {
     const existing =
