@@ -21,6 +21,26 @@ export interface N8nPublishSuccessPayload {
 }
 
 /**
+ * Payload for the outbound n8n `traffic.copy.ready` webhook.
+ *
+ * Fired by traffic-sources.ts after a social/community channel artifact is
+ * generated and stored in KV. Downstream n8n steps can use `postText` +
+ * `fields` to actually post to X, Reddit, Pinterest, newsletter, etc.
+ * without this Worker needing direct platform OAuth.
+ */
+export interface N8nTrafficCopyReadyPayload {
+  kvKey: string;
+  keyword: string;
+  articleUrl: string;
+  channelId: string;
+  channelLabel: string;
+  kind: string;
+  postText: string;
+  fields: Record<string, string | string[]>;
+  artifactKey: string;
+}
+
+/**
  * Build a safe URL summary for warning logs.
  *
  * Returns `origin + pathname` for parseable URLs (never query/hash), and
@@ -54,17 +74,15 @@ async function hmacSha256Hex(secret: string, body: string): Promise<string> {
 }
 
 /**
- * POST the publish-success event to the configured n8n workflow.
- *
- * Signs the JSON body with `N8N_WEBHOOK_SECRET`, routes the request through
- * `loggedFetch()` for dashboard/API-activity visibility, and treats every
- * failure mode as non-fatal so article publication can complete even when
- * the automation bridge is offline or misconfigured.
+ * Shared low-level POST to the configured n8n webhook.
+ * Returns true when the request was accepted (HTTP 2xx).
  */
-export async function notifyN8nPublishSuccess(
+async function postToN8n(
   agent: SEOArticleAgent,
-  payload: N8nPublishSuccessPayload
-): Promise<void> {
+  event: string,
+  payload: Record<string, unknown>,
+  logKey: string
+): Promise<boolean> {
   const url = agent.envBindings.N8N_WEBHOOK_URL?.trim();
   const secret = agent.envBindings.N8N_WEBHOOK_SECRET?.trim();
 
@@ -78,22 +96,14 @@ export async function notifyN8nPublishSuccess(
         .join(", ");
       agent.log(
         "warning",
-        `n8n webhook skipped: missing ${missingBindings}; set both N8N_WEBHOOK_URL and N8N_WEBHOOK_SECRET to enable publish notifications`,
-        "n8n"
-      );
-    } else {
-      agent.log(
-        "info",
-        "n8n webhook not configured (N8N_WEBHOOK_URL/N8N_WEBHOOK_SECRET unset) — skipping",
+        `n8n webhook skipped: missing ${missingBindings}; set both N8N_WEBHOOK_URL and N8N_WEBHOOK_SECRET to enable ${event} notifications`,
         "n8n"
       );
     }
-    return;
+    return false;
   }
 
   try {
-    // Validate early so misconfigured URLs are surfaced as a config warning
-    // rather than a generic fetch failure on every publish event.
     new URL(url);
   } catch {
     const urlSummary = summarizeWebhookUrlForLog(url);
@@ -102,12 +112,12 @@ export async function notifyN8nPublishSuccess(
       `n8n webhook skipped: invalid N8N_WEBHOOK_URL (${urlSummary})`,
       "n8n"
     );
-    return;
+    return false;
   }
 
   const body = JSON.stringify({
-    event: "publish.success",
-    publishedAt: new Date().toISOString(),
+    event,
+    firedAt: new Date().toISOString(),
     ...payload
   });
 
@@ -125,27 +135,64 @@ export async function notifyN8nPublishSuccess(
         body,
         signal: AbortSignal.timeout(5000)
       },
-      { api: "n8n", op: "publish.success" }
+      { api: "n8n", op: event }
     );
     if (resp.ok) {
-      agent.log("info", `n8n notified: ${payload.kvKey}`, "n8n");
-    } else {
-      const responseBody = await resp.text().catch(() => "");
-      const responseSummary = responseBody
-        .trim()
-        .replace(/\s+/g, " ")
-        .slice(0, 240);
-      agent.log(
-        "warning",
-        `n8n webhook returned HTTP ${resp.status} for ${payload.kvKey}${responseSummary ? ` — ${responseSummary}` : ""} (non-fatal)`,
-        "n8n"
-      );
+      agent.log("info", `n8n notified (${event}): ${logKey}`, "n8n");
+      return true;
     }
+    const responseBody = await resp.text().catch(() => "");
+    const responseSummary = responseBody
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 240);
+    agent.log(
+      "warning",
+      `n8n webhook returned HTTP ${resp.status} for ${logKey} (${event})${responseSummary ? ` — ${responseSummary}` : ""} (non-fatal)`,
+      "n8n"
+    );
+    return false;
   } catch (err: unknown) {
     agent.log(
       "warning",
-      `n8n webhook failed for ${payload.kvKey} (non-fatal): ${errMsg(err)}`,
+      `n8n webhook failed for ${logKey} (${event}) (non-fatal): ${errMsg(err)}`,
       "n8n"
     );
+    return false;
   }
+}
+
+/**
+ * POST the publish-success event to the configured n8n workflow.
+ *
+ * Signs the JSON body with `N8N_WEBHOOK_SECRET`, routes the request through
+ * `loggedFetch()` for dashboard/API-activity visibility, and treats every
+ * failure mode as non-fatal so article publication can complete even when
+ * the automation bridge is offline or misconfigured.
+ */
+export async function notifyN8nPublishSuccess(
+  agent: SEOArticleAgent,
+  payload: N8nPublishSuccessPayload
+): Promise<void> {
+  await postToN8n(agent, "publish.success", { ...payload }, payload.kvKey);
+}
+
+/**
+ * POST a traffic-copy-ready event so n8n can actually post the generated
+ * social/community copy (X thread, Reddit post, Pinterest pin, newsletter,
+ * etc.) to the live platforms.
+ *
+ * Non-fatal — a missing or failing n8n bridge never blocks the traffic-source
+ * ledger from marking the channel as filled.
+ */
+export async function notifyN8nTrafficCopyReady(
+  agent: SEOArticleAgent,
+  payload: N8nTrafficCopyReadyPayload
+): Promise<boolean> {
+  return postToN8n(
+    agent,
+    "traffic.copy.ready",
+    { ...payload },
+    `${payload.channelId}:${payload.kvKey}`
+  );
 }
