@@ -432,6 +432,174 @@ export async function removeUrlFromSitemap(
 }
 
 /**
+ * Reduce a configured domain value to a bare lowercase hostname.
+ *
+ * The `DOMAIN` binding is normally a bare host, but it can arrive with
+ * surrounding whitespace, a scheme, a trailing path, or mixed case. Comparing
+ * such a value directly against `URL.hostname` silently matches nothing, so
+ * callers that filter by host must normalize first.
+ *
+ * Returns "" when the value is empty or cannot be parsed at all.
+ */
+export function normalizeHostname(domain: string): string {
+  const trimmed = domain.trim();
+  if (!trimmed) return "";
+  try {
+    const withScheme = trimmed.includes("://") ? trimmed : `https://${trimmed}`;
+    return new URL(withScheme).hostname.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+/** Outcome of a one-shot sitemap prune. */
+export interface SitemapPruneResult {
+  /** Entries in the sitemap before pruning. */
+  before: number;
+  /** Entries remaining after pruning. */
+  after: number;
+  /** How many redirecting entries were dropped. */
+  removed: number;
+  /** A sample of removed URLs, for the operator to eyeball. */
+  removedSample: string[];
+  /** True when the sitemap was rewritten. */
+  changed: boolean;
+}
+
+/**
+ * One-shot backlog cleanup: drop every sitemap entry whose article has since
+ * been promoted to production.
+ *
+ * `removeUrlFromSitemap()` keeps the sitemap clean going forward, but articles
+ * promoted before it existed left their staging URLs behind. Those URLs now
+ * 301 to production, so the sitemap advertises redirects — Search Console
+ * reports them as "Page with redirect" and Googlebot spends crawl budget
+ * rediscovering the same redirect.
+ *
+ * Authority is the `redirect:<kvKey>` tombstone that promotion writes, not an
+ * HTTP probe: it is the same signal the serving path uses, needs no network
+ * round-trip per URL, and cannot be confused by a transient 5xx.
+ *
+ * Idempotent — a second run over an already-clean sitemap removes nothing.
+ *
+ * Tombstones are loaded with a single prefixed `KV.list()` sweep rather than
+ * one `get()` per entry. At ~3.5k sitemap entries the per-entry form is
+ * thousands of sequential round-trips, which would blow the admin request's
+ * time budget; the list form is a handful of paginated calls.
+ *
+ * @param domain  Host whose URLs are eligible for pruning. Entries on any
+ *                other host are left alone, so a sitemap that ever gains
+ *                cross-published URLs is not silently gutted. Accepts a bare
+ *                hostname or a full URL, and tolerates whitespace/casing.
+ * @param options `dryRun: true` computes the result without writing to KV.
+ */
+export async function pruneRedirectedFromSitemap(
+  articlesKv: KVNamespace,
+  domain: string,
+  options: { dryRun?: boolean } = {}
+): Promise<SitemapPruneResult> {
+  const empty: SitemapPruneResult = {
+    before: 0,
+    after: 0,
+    removed: 0,
+    removedSample: [],
+    changed: false
+  };
+
+  // Normalize the host once. DOMAIN may arrive with surrounding whitespace,
+  // a scheme, or mixed case; an exact string compare against `URL.hostname`
+  // would then match nothing and the prune would report a misleading zero.
+  const domainHost = normalizeHostname(domain);
+  if (!domainHost) return empty;
+
+  const existing = await articlesKv.get(SITEMAP_KV_KEY);
+  if (!existing) return empty;
+
+  const entryPattern = /[ \t]*<url>[\s\S]*?<\/url>\n?/g;
+  const entries = existing.match(entryPattern) ?? [];
+  if (entries.length === 0) return empty;
+
+  // One paginated sweep of every promotion tombstone, then in-memory lookups.
+  const tombstones = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await articlesKv.list({
+      prefix: "redirect:",
+      ...(cursor ? { cursor } : {})
+    });
+    for (const key of page.keys) {
+      tombstones.add(key.name.slice("redirect:".length));
+    }
+    if (page.list_complete) break;
+    cursor = page.cursor;
+    if (!cursor) break;
+  }
+  if (tombstones.size === 0) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
+
+  // Collect the exact `<loc>…</loc>` substrings to drop. Keying on the literal
+  // substring — rather than re-escaping the URL — keeps the match exact and
+  // sidesteps escaping round-trip bugs, and makes the rewrite a single O(n)
+  // pass instead of scanning every removed URL for every entry.
+  const removedLocTags = new Set<string>();
+  const removed: string[] = [];
+
+  for (const entry of entries) {
+    const locMatch = /<loc>([\s\S]*?)<\/loc>/.exec(entry);
+    if (!locMatch) continue;
+    const loc = locMatch[1].trim();
+    if (!loc) continue;
+
+    // `&amp;` back to `&` so the parsed URL is the real one.
+    const rawUrl = loc.replace(/&amp;/g, "&");
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      continue; // Unparseable entry — leave it rather than guess.
+    }
+    if (parsed.hostname.toLowerCase() !== domainHost) continue;
+
+    // `/categorySlug/slug` → `categorySlug:slug`, the KV key convention.
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length !== 2) continue;
+
+    if (tombstones.has(`${parts[0]}:${parts[1]}`)) {
+      removed.push(rawUrl);
+      removedLocTags.add(locMatch[0]);
+    }
+  }
+
+  if (removed.length === 0) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
+
+  const updated = existing.replace(entryPattern, (entry) => {
+    const locMatch = /<loc>[\s\S]*?<\/loc>/.exec(entry);
+    return locMatch && removedLocTags.has(locMatch[0]) ? "" : entry;
+  });
+  if (updated === existing) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
+
+  // A dry run reports the same counts but never touches KV. Writing and then
+  // restoring would briefly serve a pruned sitemap to real crawlers, and an
+  // error before the restore would make the "dry" run permanent.
+  if (!options.dryRun) {
+    await articlesKv.put(SITEMAP_KV_KEY, updated);
+  }
+
+  return {
+    before: entries.length,
+    after: entries.length - removed.length,
+    removed: removed.length,
+    removedSample: removed.slice(0, 10),
+    changed: true
+  };
+}
+
+/**
  * Update the flat sitemap in KV.
  * Reads existing sitemap, adds new URL, writes back.
  */

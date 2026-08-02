@@ -5187,6 +5187,50 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         return Response.json(result);
       }
 
+      // POST /api/admin/sitemap/prune — one-shot backlog cleanup. Drops every
+      // sitemap entry whose article has since been promoted to production and
+      // therefore only 301s. Articles promoted before `removeUrlFromSitemap()`
+      // existed left their staging URLs behind; this clears that backlog.
+      // Idempotent, so it is safe to re-run. Body `{ dryRun?: boolean }`.
+      if (
+        url.pathname === "/api/admin/sitemap/prune" &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json().catch(() => ({}))) as {
+          dryRun?: boolean;
+        };
+        const { pruneRedirectedFromSitemap } =
+          await import("./pipeline/indexing");
+        const domain = this.envBindings.DOMAIN?.trim() || "";
+        if (!domain) {
+          return Response.json(
+            { ok: false, error: "DOMAIN binding is empty" },
+            { status: 500 }
+          );
+        }
+        const dryRun = body.dryRun === true;
+        let result;
+        try {
+          result = await pruneRedirectedFromSitemap(
+            this.envBindings.ARTICLES_KV,
+            domain,
+            { dryRun }
+          );
+        } catch (err: unknown) {
+          return Response.json(
+            { ok: false, error: `sitemap prune failed: ${errMsg(err)}` },
+            { status: 500 }
+          );
+        }
+        if (!dryRun && result.changed) {
+          this.log(
+            "info",
+            `Sitemap prune: removed ${result.removed} redirecting entries (${result.before} → ${result.after})`
+          );
+        }
+        return Response.json({ ok: true, dryRun, ...result });
+      }
+
       // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post
       // artifact generated for one channel of one article.
       if (
