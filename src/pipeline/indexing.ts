@@ -431,6 +431,27 @@ export async function removeUrlFromSitemap(
   }
 }
 
+/**
+ * Reduce a configured domain value to a bare lowercase hostname.
+ *
+ * The `DOMAIN` binding is normally a bare host, but it can arrive with
+ * surrounding whitespace, a scheme, a trailing path, or mixed case. Comparing
+ * such a value directly against `URL.hostname` silently matches nothing, so
+ * callers that filter by host must normalize first.
+ *
+ * Returns "" when the value is empty or cannot be parsed at all.
+ */
+export function normalizeHostname(domain: string): string {
+  const trimmed = domain.trim();
+  if (!trimmed) return "";
+  try {
+    const withScheme = trimmed.includes("://") ? trimmed : `https://${trimmed}`;
+    return new URL(withScheme).hostname.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
 /** Outcome of a one-shot sitemap prune. */
 export interface SitemapPruneResult {
   /** Entries in the sitemap before pruning. */
@@ -461,13 +482,21 @@ export interface SitemapPruneResult {
  *
  * Idempotent — a second run over an already-clean sitemap removes nothing.
  *
- * @param domain Host whose URLs are eligible for pruning. Entries on any other
- *               host are left alone, so a sitemap that ever gains
- *               cross-published URLs is not silently gutted.
+ * Tombstones are loaded with a single prefixed `KV.list()` sweep rather than
+ * one `get()` per entry. At ~3.5k sitemap entries the per-entry form is
+ * thousands of sequential round-trips, which would blow the admin request's
+ * time budget; the list form is a handful of paginated calls.
+ *
+ * @param domain  Host whose URLs are eligible for pruning. Entries on any
+ *                other host are left alone, so a sitemap that ever gains
+ *                cross-published URLs is not silently gutted. Accepts a bare
+ *                hostname or a full URL, and tolerates whitespace/casing.
+ * @param options `dryRun: true` computes the result without writing to KV.
  */
 export async function pruneRedirectedFromSitemap(
   articlesKv: KVNamespace,
-  domain: string
+  domain: string,
+  options: { dryRun?: boolean } = {}
 ): Promise<SitemapPruneResult> {
   const empty: SitemapPruneResult = {
     before: 0,
@@ -477,18 +506,49 @@ export async function pruneRedirectedFromSitemap(
     changed: false
   };
 
+  // Normalize the host once. DOMAIN may arrive with surrounding whitespace,
+  // a scheme, or mixed case; an exact string compare against `URL.hostname`
+  // would then match nothing and the prune would report a misleading zero.
+  const domainHost = normalizeHostname(domain);
+  if (!domainHost) return empty;
+
   const existing = await articlesKv.get(SITEMAP_KV_KEY);
   if (!existing) return empty;
 
-  const entries = existing.match(/[ \t]*<url>[\s\S]*?<\/url>\n?/g) ?? [];
+  const entryPattern = /[ \t]*<url>[\s\S]*?<\/url>\n?/g;
+  const entries = existing.match(entryPattern) ?? [];
   if (entries.length === 0) return empty;
 
+  // One paginated sweep of every promotion tombstone, then in-memory lookups.
+  const tombstones = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await articlesKv.list({
+      prefix: "redirect:",
+      ...(cursor ? { cursor } : {})
+    });
+    for (const key of page.keys) {
+      tombstones.add(key.name.slice("redirect:".length));
+    }
+    if (page.list_complete) break;
+    cursor = page.cursor;
+    if (!cursor) break;
+  }
+  if (tombstones.size === 0) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
+
+  // Collect the exact `<loc>…</loc>` substrings to drop. Keying on the literal
+  // substring — rather than re-escaping the URL — keeps the match exact and
+  // sidesteps escaping round-trip bugs, and makes the rewrite a single O(n)
+  // pass instead of scanning every removed URL for every entry.
+  const removedLocTags = new Set<string>();
   const removed: string[] = [];
-  const survivors = new Set<string>();
 
   for (const entry of entries) {
     const locMatch = /<loc>([\s\S]*?)<\/loc>/.exec(entry);
-    const loc = locMatch?.[1]?.trim();
+    if (!locMatch) continue;
+    const loc = locMatch[1].trim();
     if (!loc) continue;
 
     // `&amp;` back to `&` so the parsed URL is the real one.
@@ -499,33 +559,37 @@ export async function pruneRedirectedFromSitemap(
     } catch {
       continue; // Unparseable entry — leave it rather than guess.
     }
-    if (parsed.hostname !== domain) continue;
+    if (parsed.hostname.toLowerCase() !== domainHost) continue;
 
     // `/categorySlug/slug` → `categorySlug:slug`, the KV key convention.
     const parts = parsed.pathname.split("/").filter(Boolean);
     if (parts.length !== 2) continue;
-    const kvKey = `${parts[0]}:${parts[1]}`;
 
-    const redirect = await articlesKv.get(`redirect:${kvKey}`);
-    if (redirect) removed.push(rawUrl);
+    if (tombstones.has(`${parts[0]}:${parts[1]}`)) {
+      removed.push(rawUrl);
+      removedLocTags.add(locMatch[0]);
+    }
   }
 
   if (removed.length === 0) {
     return { ...empty, before: entries.length, after: entries.length };
   }
 
-  for (const url of removed) survivors.add(`<loc>${escXml(url)}</loc>`);
-  const updated = existing.replace(
-    /[ \t]*<url>[\s\S]*?<\/url>\n?/g,
-    (entry) => {
-      for (const loc of survivors) {
-        if (entry.includes(loc)) return "";
-      }
-      return entry;
-    }
-  );
+  const updated = existing.replace(entryPattern, (entry) => {
+    const locMatch = /<loc>[\s\S]*?<\/loc>/.exec(entry);
+    return locMatch && removedLocTags.has(locMatch[0]) ? "" : entry;
+  });
+  if (updated === existing) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
 
-  await articlesKv.put(SITEMAP_KV_KEY, updated);
+  // A dry run reports the same counts but never touches KV. Writing and then
+  // restoring would briefly serve a pruned sitemap to real crawlers, and an
+  // error before the restore would make the "dry" run permanent.
+  if (!options.dryRun) {
+    await articlesKv.put(SITEMAP_KV_KEY, updated);
+  }
+
   return {
     before: entries.length,
     after: entries.length - removed.length,

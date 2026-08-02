@@ -5199,38 +5199,36 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         const body = (await request.json().catch(() => ({}))) as {
           dryRun?: boolean;
         };
-        const { pruneRedirectedFromSitemap, SITEMAP_KV_KEY } =
+        const { pruneRedirectedFromSitemap } =
           await import("./pipeline/indexing");
-        const domain = this.envBindings.DOMAIN || "";
+        const domain = this.envBindings.DOMAIN?.trim() || "";
         if (!domain) {
           return Response.json(
             { ok: false, error: "DOMAIN binding is empty" },
             { status: 500 }
           );
         }
-        if (body.dryRun) {
-          // Report what would go without touching KV: snapshot the sitemap,
-          // prune a detached copy, then restore. Cheap enough at this size
-          // and keeps the dry run honest about the real count.
-          const before = await this.envBindings.ARTICLES_KV.get(SITEMAP_KV_KEY);
-          const result = await pruneRedirectedFromSitemap(
+        const dryRun = body.dryRun === true;
+        let result;
+        try {
+          result = await pruneRedirectedFromSitemap(
             this.envBindings.ARTICLES_KV,
-            domain
+            domain,
+            { dryRun }
           );
-          if (result.changed && before !== null) {
-            await this.envBindings.ARTICLES_KV.put(SITEMAP_KV_KEY, before);
-          }
-          return Response.json({ ok: true, dryRun: true, ...result });
+        } catch (err: unknown) {
+          return Response.json(
+            { ok: false, error: `sitemap prune failed: ${errMsg(err)}` },
+            { status: 500 }
+          );
         }
-        const result = await pruneRedirectedFromSitemap(
-          this.envBindings.ARTICLES_KV,
-          domain
-        );
-        this.log(
-          "info",
-          `Sitemap prune: removed ${result.removed} redirecting entries (${result.before} → ${result.after})`
-        );
-        return Response.json({ ok: true, ...result });
+        if (!dryRun && result.changed) {
+          this.log(
+            "info",
+            `Sitemap prune: removed ${result.removed} redirecting entries (${result.before} → ${result.after})`
+          );
+        }
+        return Response.json({ ok: true, dryRun, ...result });
       }
 
       // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post

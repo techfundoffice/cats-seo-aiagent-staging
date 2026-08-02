@@ -14,6 +14,8 @@ const DOMAIN = "staging.example.dev";
 
 function makeKv(sitemap: string, redirectKeys: string[] = []) {
   const store = new Map<string, string>();
+  const listCalls: string[] = [];
+  const getCalls: string[] = [];
   store.set(SITEMAP_KV_KEY, sitemap);
   for (const k of redirectKeys) {
     store.set(
@@ -23,11 +25,27 @@ function makeKv(sitemap: string, redirectKeys: string[] = []) {
   }
   return {
     store,
-    get: async (key: string) => store.get(key) ?? null,
+    listCalls,
+    getCalls,
+    get: async (key: string) => {
+      getCalls.push(key);
+      return store.get(key) ?? null;
+    },
     put: async (key: string, value: string) => {
       store.set(key, value);
+    },
+    list: async ({ prefix }: { prefix?: string } = {}) => {
+      listCalls.push(prefix ?? "");
+      const keys = [...store.keys()]
+        .filter((k) => (prefix ? k.startsWith(prefix) : true))
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
     }
-  } as unknown as KVNamespace & { store: Map<string, string> };
+  } as unknown as KVNamespace & {
+    store: Map<string, string>;
+    listCalls: string[];
+    getCalls: string[];
+  };
 }
 
 function sitemapWith(...paths: string[]): string {
@@ -97,7 +115,8 @@ describe("pruneRedirectedFromSitemap", () => {
   it("returns a zeroed result when the sitemap key is absent", async () => {
     const kv = {
       get: async () => null,
-      put: async () => {}
+      put: async () => {},
+      list: async () => ({ keys: [], list_complete: true })
     } as unknown as KVNamespace;
     const result = await pruneRedirectedFromSitemap(kv, DOMAIN);
     expect(result).toMatchObject({
@@ -129,5 +148,82 @@ describe("pruneRedirectedFromSitemap", () => {
     const after = kv.store.get(SITEMAP_KV_KEY)!;
     expect(after).toContain("/c/a-2<");
     expect(after).not.toContain("/c/a<");
+  });
+});
+
+describe("pruneRedirectedFromSitemap — dry run", () => {
+  it("reports what would go without writing to KV", async () => {
+    // Writing then restoring would briefly serve a pruned sitemap to real
+    // crawlers, and an error before the restore would make it permanent.
+    const kv = makeKv(sitemapWith("/c/a", "/c/b"), ["c:a"]);
+    const original = kv.store.get(SITEMAP_KV_KEY)!;
+    const result = await pruneRedirectedFromSitemap(kv, DOMAIN, {
+      dryRun: true
+    });
+    expect(result.removed).toBe(1);
+    expect(result.before).toBe(2);
+    expect(result.after).toBe(1);
+    expect(result.changed).toBe(true);
+    expect(kv.store.get(SITEMAP_KV_KEY)).toBe(original);
+  });
+
+  it("leaves the sitemap byte-identical even when everything would go", async () => {
+    const kv = makeKv(sitemapWith("/c/a", "/c/b"), ["c:a", "c:b"]);
+    const original = kv.store.get(SITEMAP_KV_KEY)!;
+    await pruneRedirectedFromSitemap(kv, DOMAIN, { dryRun: true });
+    expect(kv.store.get(SITEMAP_KV_KEY)).toBe(original);
+  });
+
+  it("a real run after a dry run still removes the entries", async () => {
+    const kv = makeKv(sitemapWith("/c/a", "/c/b"), ["c:a"]);
+    await pruneRedirectedFromSitemap(kv, DOMAIN, { dryRun: true });
+    const real = await pruneRedirectedFromSitemap(kv, DOMAIN);
+    expect(real.removed).toBe(1);
+    expect(kv.store.get(SITEMAP_KV_KEY)).not.toContain("/c/a<");
+  });
+});
+
+describe("pruneRedirectedFromSitemap — tombstone lookup cost", () => {
+  it("reads tombstones via one prefixed list, not a get per entry", async () => {
+    // ~3.5k sequential gets would blow the admin request's time budget.
+    const kv = makeKv(sitemapWith("/c/a", "/c/b", "/c/c", "/c/d"), ["c:a"]);
+    await pruneRedirectedFromSitemap(kv, DOMAIN);
+    expect(kv.listCalls).toEqual(["redirect:"]);
+    // The only get is the sitemap itself — no per-entry tombstone reads.
+    expect(kv.getCalls).toEqual([SITEMAP_KV_KEY]);
+  });
+
+  it("short-circuits when no tombstones exist at all", async () => {
+    const kv = makeKv(sitemapWith("/c/a", "/c/b"));
+    const result = await pruneRedirectedFromSitemap(kv, DOMAIN);
+    expect(result.removed).toBe(0);
+    expect(result.before).toBe(2);
+    expect(result.changed).toBe(false);
+  });
+});
+
+describe("pruneRedirectedFromSitemap — domain normalization", () => {
+  const cases: Array<[string, string]> = [
+    ["surrounding whitespace", `  ${DOMAIN} `],
+    ["a scheme", `https://${DOMAIN}`],
+    ["a scheme and trailing path", `https://${DOMAIN}/`],
+    ["mixed case", DOMAIN.toUpperCase()]
+  ];
+
+  for (const [label, value] of cases) {
+    it(`matches when DOMAIN carries ${label}`, async () => {
+      // An un-normalized compare against URL.hostname matches nothing, and
+      // the prune reports a misleading zero rather than an error.
+      const kv = makeKv(sitemapWith("/c/a", "/c/b"), ["c:a"]);
+      const result = await pruneRedirectedFromSitemap(kv, value);
+      expect(result.removed).toBe(1);
+    });
+  }
+
+  it("removes nothing when DOMAIN is empty", async () => {
+    const kv = makeKv(sitemapWith("/c/a"), ["c:a"]);
+    const result = await pruneRedirectedFromSitemap(kv, "   ");
+    expect(result.removed).toBe(0);
+    expect(result.changed).toBe(false);
   });
 });
