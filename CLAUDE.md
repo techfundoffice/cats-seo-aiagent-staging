@@ -2,13 +2,14 @@
 
 ## Secrets: every token lives in Doppler
 
-**There is no other source of truth.** Any credential you need — `ADMIN_API_TOKEN`,
-`PAGESPEED_API_KEY`, `CLOUDFLARE_API_TOKEN`, `OPENROUTER_API_KEY`,
-`GITHUB_TOKEN_SECRET`, all of them — is in Doppler. Do not ask the user to paste a
-token, do not assume a credential does not exist because it is absent from the
-environment, and never hardcode one.
+**There is no other source of truth.** Every credential this project uses —
+`ADMIN_API_TOKEN`, `PAGESPEED_API_KEY`, `CLOUDFLARE_API_TOKEN`,
+`OPENROUTER_API_KEY`, `GITHUB_TOKEN_SECRET`, all of them — lives in Doppler. Do
+not ask the user to paste a token, do not assume a credential does not exist
+because it is absent from the environment, and never hardcode one.
 
-- **Project:** `replit-n8n-catsluvus` — **Config:** `prd` (the only ones)
+- **Project:** `replit-n8n-catsluvus` — **Config:** `prd` (the only project and
+  the only config)
 
 ```bash
 doppler secrets get <KEY> --plain --no-read-env \
@@ -27,12 +28,16 @@ If Doppler is unreachable, say so plainly and name the specific secret that is
 blocking you — that is a missing-access problem the user can fix in one step, not
 a reason to call the task impossible or to invent a workaround. Once a
 `DOPPLER_TOKEN` is present, prefer the CLI above; the Doppler REST API
-(`https://api.doppler.com/v3/configs/config/secret`) is the fallback and is what
-`src/pipeline/kimi-model.ts` already uses for the OpenRouter key self-heal.
+(`https://api.doppler.com/v3/configs/config/secret`) is the fallback. The Worker
+already uses it for the OpenRouter key self-heal: the REST call lives in
+`SEOArticleAgent.rotateOpenRouterKeyFromDoppler()` (`src/server.ts`), triggered
+from `src/pipeline/kimi-model.ts` when a 401 is detected.
 
-> Ignore the `composio tool run doppler …` snippets further down this file. They
-> are legacy prod-repo context — Composio was removed from this repo (see below)
-> and those commands cannot work here.
+> Everything under **§ Sandbox Bootstrap (LEGACY)** and **§ Connected Composio
+> Toolkits (LEGACY)** below is dead in this repo — including every
+> `composio tool run doppler …` snippet. Composio was removed on 2026-07-22.
+> Those sections are retained only as prod-repo history; do not run anything in
+> them.
 
 > **⚠️ STAGING REPO — COMPOSIO REMOVED (2026-07-22).** This repo no longer
 > uses Composio anywhere: no `@composio/*` deps, no `.mcp.json`, no
@@ -48,7 +53,11 @@ a reason to call the task impossible or to invent a workaround. Once a
 >   Sections below that mention Composio/Rube bootstrap are legacy prod-repo
 >   context — do not follow them in this repo.
 
-## Sandbox Bootstrap
+## Sandbox Bootstrap (LEGACY — Composio removed, do not follow)
+
+> **None of this section works in this repo.** There is no `.mcp.json`, no
+> `COMPOSIO_API_KEY`, and no `.claude/secrets.env`. It is kept as prod-repo
+> history. For secrets, see § Secrets at the top of this file.
 
 **Every new Claude session running in this repo auto-connects to Composio via `.mcp.json` at the repo root.** That file maps to `https://connect.composio.dev/mcp` with `x-consumer-api-key: ${COMPOSIO_API_KEY}` — this is the official post-Rube endpoint, protocol version `2024-11-05`. After the bootstrap below, Composio tools are available in-session without any CLI.
 
@@ -91,7 +100,10 @@ composio tool run doppler DOPPLER_SECRETS_GET --project replit-n8n-catsluvus --c
 #   RUBE_MULTI_EXECUTE_TOOL → DOPPLER_SECRETS_GET { project, config, name }
 ```
 
-## Connected Composio Toolkits
+## Connected Composio Toolkits (LEGACY — not available in this repo)
+
+> Historical inventory from the prod repo. Composio is gone here, so none of
+> these toolkits are reachable. Secrets come from Doppler directly (§ Secrets).
 
 Inventory verified on 2026-04-22. Active toolkits can be used immediately with no further auth.
 
