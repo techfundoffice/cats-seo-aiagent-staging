@@ -356,6 +356,19 @@ export async function publishArticleToProduction(
   await articlesKv.put(`redirect:${kvKey}`, prodUrl);
   await articlesKv.delete(kvKey);
 
+  // Drop the now-redirecting staging URL from the staging sitemap. A sitemap
+  // must advertise canonical, indexable URLs; a promoted URL only 301s to
+  // production, so leaving it listed surfaces it in Search Console as "Page
+  // with redirect" and wastes crawl budget. Best-effort — the promotion has
+  // already succeeded and must not be failed by sitemap bookkeeping.
+  if (stagingHost) {
+    const { removeUrlFromSitemap } = await import("./indexing");
+    await removeUrlFromSitemap(
+      articlesKv,
+      `https://${stagingHost}/${categorySlug}/${slug}`
+    );
+  }
+
   // 5. Ledger bookkeeping (best-effort — the publish already happened).
   if (keywordsDb) {
     try {

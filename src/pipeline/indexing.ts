@@ -386,6 +386,52 @@ export function buildEmptySitemap(): string {
 }
 
 /**
+ * Remove a URL from the flat sitemap.
+ *
+ * Called when a staging article is promoted to production: the staging URL
+ * becomes a 301 to the production copy, and a sitemap must list canonical,
+ * indexable URLs — not redirects. Leaving promoted URLs in place makes every
+ * one of them surface in Search Console as "Page with redirect" and burns
+ * crawl budget re-fetching URLs that only point elsewhere.
+ *
+ * Takes the KV namespace rather than the agent because the promotion path
+ * (`publishArticleToProduction`) runs from the admin API with no agent in
+ * scope.
+ *
+ * @returns true when an entry was removed and the sitemap rewritten.
+ */
+export async function removeUrlFromSitemap(
+  articlesKv: KVNamespace,
+  url: string
+): Promise<boolean> {
+  try {
+    const existing = await articlesKv.get(SITEMAP_KV_KEY);
+    if (!existing) return false;
+
+    const loc = `<loc>${escXml(url)}</loc>`;
+    if (!existing.includes(loc)) return false;
+
+    // Drop whole `<url>…</url>` entries whose <loc> is this URL, along with
+    // their leading indentation and trailing newline, so the document stays
+    // tidy. Matching on the extracted entry with `includes` (rather than
+    // interpolating the URL into a regex) avoids escaping pitfalls with
+    // characters that are regex-significant.
+    const updated = existing.replace(
+      /[ \t]*<url>[\s\S]*?<\/url>\n?/g,
+      (entry) => (entry.includes(loc) ? "" : entry)
+    );
+    if (updated === existing) return false;
+
+    await articlesKv.put(SITEMAP_KV_KEY, updated);
+    return true;
+  } catch {
+    // Best-effort: the promotion itself has already succeeded, and a stale
+    // sitemap entry is a crawl-efficiency problem, not a correctness one.
+    return false;
+  }
+}
+
+/**
  * Update the flat sitemap in KV.
  * Reads existing sitemap, adds new URL, writes back.
  */
