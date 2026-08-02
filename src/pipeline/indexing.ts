@@ -431,6 +431,110 @@ export async function removeUrlFromSitemap(
   }
 }
 
+/** Outcome of a one-shot sitemap prune. */
+export interface SitemapPruneResult {
+  /** Entries in the sitemap before pruning. */
+  before: number;
+  /** Entries remaining after pruning. */
+  after: number;
+  /** How many redirecting entries were dropped. */
+  removed: number;
+  /** A sample of removed URLs, for the operator to eyeball. */
+  removedSample: string[];
+  /** True when the sitemap was rewritten. */
+  changed: boolean;
+}
+
+/**
+ * One-shot backlog cleanup: drop every sitemap entry whose article has since
+ * been promoted to production.
+ *
+ * `removeUrlFromSitemap()` keeps the sitemap clean going forward, but articles
+ * promoted before it existed left their staging URLs behind. Those URLs now
+ * 301 to production, so the sitemap advertises redirects — Search Console
+ * reports them as "Page with redirect" and Googlebot spends crawl budget
+ * rediscovering the same redirect.
+ *
+ * Authority is the `redirect:<kvKey>` tombstone that promotion writes, not an
+ * HTTP probe: it is the same signal the serving path uses, needs no network
+ * round-trip per URL, and cannot be confused by a transient 5xx.
+ *
+ * Idempotent — a second run over an already-clean sitemap removes nothing.
+ *
+ * @param domain Host whose URLs are eligible for pruning. Entries on any other
+ *               host are left alone, so a sitemap that ever gains
+ *               cross-published URLs is not silently gutted.
+ */
+export async function pruneRedirectedFromSitemap(
+  articlesKv: KVNamespace,
+  domain: string
+): Promise<SitemapPruneResult> {
+  const empty: SitemapPruneResult = {
+    before: 0,
+    after: 0,
+    removed: 0,
+    removedSample: [],
+    changed: false
+  };
+
+  const existing = await articlesKv.get(SITEMAP_KV_KEY);
+  if (!existing) return empty;
+
+  const entries = existing.match(/[ \t]*<url>[\s\S]*?<\/url>\n?/g) ?? [];
+  if (entries.length === 0) return empty;
+
+  const removed: string[] = [];
+  const survivors = new Set<string>();
+
+  for (const entry of entries) {
+    const locMatch = /<loc>([\s\S]*?)<\/loc>/.exec(entry);
+    const loc = locMatch?.[1]?.trim();
+    if (!loc) continue;
+
+    // `&amp;` back to `&` so the parsed URL is the real one.
+    const rawUrl = loc.replace(/&amp;/g, "&");
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      continue; // Unparseable entry — leave it rather than guess.
+    }
+    if (parsed.hostname !== domain) continue;
+
+    // `/categorySlug/slug` → `categorySlug:slug`, the KV key convention.
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length !== 2) continue;
+    const kvKey = `${parts[0]}:${parts[1]}`;
+
+    const redirect = await articlesKv.get(`redirect:${kvKey}`);
+    if (redirect) removed.push(rawUrl);
+  }
+
+  if (removed.length === 0) {
+    return { ...empty, before: entries.length, after: entries.length };
+  }
+
+  for (const url of removed) survivors.add(`<loc>${escXml(url)}</loc>`);
+  const updated = existing.replace(
+    /[ \t]*<url>[\s\S]*?<\/url>\n?/g,
+    (entry) => {
+      for (const loc of survivors) {
+        if (entry.includes(loc)) return "";
+      }
+      return entry;
+    }
+  );
+
+  await articlesKv.put(SITEMAP_KV_KEY, updated);
+  return {
+    before: entries.length,
+    after: entries.length - removed.length,
+    removed: removed.length,
+    removedSample: removed.slice(0, 10),
+    changed: true
+  };
+}
+
 /**
  * Update the flat sitemap in KV.
  * Reads existing sitemap, adds new URL, writes back.

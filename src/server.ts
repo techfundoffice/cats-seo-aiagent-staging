@@ -5187,6 +5187,52 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         return Response.json(result);
       }
 
+      // POST /api/admin/sitemap/prune — one-shot backlog cleanup. Drops every
+      // sitemap entry whose article has since been promoted to production and
+      // therefore only 301s. Articles promoted before `removeUrlFromSitemap()`
+      // existed left their staging URLs behind; this clears that backlog.
+      // Idempotent, so it is safe to re-run. Body `{ dryRun?: boolean }`.
+      if (
+        url.pathname === "/api/admin/sitemap/prune" &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json().catch(() => ({}))) as {
+          dryRun?: boolean;
+        };
+        const { pruneRedirectedFromSitemap, SITEMAP_KV_KEY } =
+          await import("./pipeline/indexing");
+        const domain = this.envBindings.DOMAIN || "";
+        if (!domain) {
+          return Response.json(
+            { ok: false, error: "DOMAIN binding is empty" },
+            { status: 500 }
+          );
+        }
+        if (body.dryRun) {
+          // Report what would go without touching KV: snapshot the sitemap,
+          // prune a detached copy, then restore. Cheap enough at this size
+          // and keeps the dry run honest about the real count.
+          const before = await this.envBindings.ARTICLES_KV.get(SITEMAP_KV_KEY);
+          const result = await pruneRedirectedFromSitemap(
+            this.envBindings.ARTICLES_KV,
+            domain
+          );
+          if (result.changed && before !== null) {
+            await this.envBindings.ARTICLES_KV.put(SITEMAP_KV_KEY, before);
+          }
+          return Response.json({ ok: true, dryRun: true, ...result });
+        }
+        const result = await pruneRedirectedFromSitemap(
+          this.envBindings.ARTICLES_KV,
+          domain
+        );
+        this.log(
+          "info",
+          `Sitemap prune: removed ${result.removed} redirecting entries (${result.before} → ${result.after})`
+        );
+        return Response.json({ ok: true, ...result });
+      }
+
       // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post
       // artifact generated for one channel of one article.
       if (
