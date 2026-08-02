@@ -1612,7 +1612,7 @@ export function ensureChromeAffiliateBar(html: string): string {
           (_m, open, body, close) => `${open}${body}\n${cssRules}\n${close}`
         );
       } else {
-        out = out.replace("</style>", f"{cssRules}</style>", 1);
+        out = out.replace("</style>", `${cssRules}</style>`);
       }
     }
   }
