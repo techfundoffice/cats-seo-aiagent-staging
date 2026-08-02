@@ -2,6 +2,7 @@ import { generateText } from "ai";
 import type { SEOArticleAgent } from "../server";
 import { errMsg, extractFirstJsonObject, repairJson } from "./http-utils";
 import { getKimiModel, getKimiProviderOptions } from "./kimi-model";
+import { notifyN8nTrafficCopyReady } from "./n8n-webhook";
 
 /**
  * traffic-sources.ts — fill in EVERY traffic source for a published
@@ -31,11 +32,12 @@ import { getKimiModel, getKimiProviderOptions } from "./kimi-model";
  *     variant kicked off by generateArticle() so the fill runs *while*
  *     the next article is being written.
  *
- * Nothing here auto-posts to a social network: none of these platforms
- * gives this project a posting API, so the artifacts are ready-to-paste
- * copy stored in KV and surfaced over /api/admin/traffic-sources. The
- * machine channels (sitemap/IndexNow/RSS/WebSub/Q&A JSON) DO perform
+ * Machine channels (sitemap/IndexNow/RSS/WebSub/Q&A JSON) DO perform
  * real network + KV work.
+ *
+ * Human channels generate ready-to-paste copy AND fire a `traffic.copy.ready`
+ * event to the existing n8n webhook so n8n can actually post them to the
+ * live platforms (X, Reddit, Pinterest, newsletter, etc.).
  */
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -137,13 +139,13 @@ const COPY_CALL_TIMEOUT_MS = 90_000;
 
 function decodeEntities(s: string): string {
   return s
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
+    .replace(/</g, "<")
+    .replace(/>/g, ">")
+    .replace(/"/g, '"')
     .replace(/&#0?39;/g, "'")
-    .replace(/&apos;/g, "'")
+    .replace(/'/g, "'")
     .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&");
+    .replace(/&/g, "&");
 }
 
 function stripTags(s: string): string {
@@ -413,9 +415,6 @@ export const COPY_CHANNELS: CopyChannel[] = [
     build(raw, _facts, url) {
       const thread = list(raw.thread, 5, X_POST_MAX_CHARS);
       if (thread.length < 3) return null;
-      // list() already clamps each post to the cap, so appending the URL
-      // to a full-budget post would push the paste-ready text over it.
-      // Trim the tail post to make room first.
       const room = Math.max(0, X_POST_MAX_CHARS - url.length - 1);
       const withLink = thread.some((t) => t.includes(url))
         ? thread
@@ -761,20 +760,10 @@ export async function readLedger(
           : {}
     };
   } catch {
-    // Malformed ledger self-heals rather than stranding the article.
     return emptyLedger(kvKey, url, keyword);
   }
 }
 
-/**
- * Combine a ledger read back from KV with the one this run mutated.
- *
- * A fill can outrun the 60s lock (two model calls plus the machine
- * channels), which lets a second pass start on the same article. A blind
- * write would then last-writer-wins away the other pass's attempts and
- * artifact keys. Per source, keep whichever entry knows more: more
- * attempts wins, and on a tie a terminal outcome beats a `failed` one.
- */
 export function mergeLedgers(
   stored: TrafficSourceLedger,
   local: TrafficSourceLedger
@@ -815,12 +804,6 @@ async function writeLedger(
   return merged;
 }
 
-/**
- * Push the lock's expiry back out to the full TTL. Called before each
- * slow phase so a long fill keeps exclusivity for its whole run instead
- * of only its first 60 seconds. Best-effort: a failed renew degrades to
- * the old behaviour (lock lapses, ledger merge catches the overlap).
- */
 async function renewLock(agent: SEOArticleAgent): Promise<void> {
   try {
     await agent.envBindings.ARTICLES_KV.put(
@@ -908,16 +891,10 @@ async function fillWebSub(agent: SEOArticleAgent): Promise<MachineOutcome> {
   const { notifyWebSubHubs } = await import("./feed-syndication");
   const domain = agent.envBindings.DOMAIN || "catsluvus.com";
   const feedUrl = `https://${domain}/feed.rss`;
-  // notifyWebSubHubs never throws — hub failures are logged as warnings.
   await notifyWebSubHubs(agent, feedUrl);
   return { status: "filled", detail: `hubs pinged for ${feedUrl}` };
 }
 
-/**
- * Answer-engine Q&A JSON. Step 22 writes it at publish time; this rebuilds
- * it from the published page when that write never happened, so the
- * `/api/qa/*` surface is never missing an article.
- */
 async function fillQaJson(
   agent: SEOArticleAgent,
   facts: ArticleFacts,
@@ -1098,8 +1075,6 @@ export async function fillArticleTrafficSources(
       (c) => c.batch === batch && pending.includes(c.id)
     );
     if (channels.length === 0) continue;
-    // Each batch is a bounded-but-slow model call; refresh the lock before
-    // it so a fill that runs past 60s still excludes a concurrent pass.
     await renewLock(agent);
 
     let generated: Record<
@@ -1162,17 +1137,41 @@ export async function fillArticleTrafficSources(
         );
         continue;
       }
+
+      // ── Real traffic generation: hand the ready-to-post copy to n8n ──
+      // so the existing n8n workflow can actually publish it to X / Reddit /
+      // Pinterest / newsletter / etc. Non-fatal — ledger still marks filled.
+      try {
+        await notifyN8nTrafficCopyReady(agent, {
+          kvKey,
+          keyword: row.keyword,
+          articleUrl: url,
+          channelId: channel.id,
+          channelLabel: channel.label,
+          kind: channel.kind,
+          postText: built.postText,
+          fields: built.fields,
+          artifactKey: key
+        });
+      } catch (n8nErr: unknown) {
+        agent.log(
+          "warning",
+          `Traffic source n8n handoff failed for ${channel.id} (non-fatal): ${errMsg(n8nErr)}`,
+          "marketing"
+        );
+      }
+
       record(
         ledger,
         channel.id,
         "filled",
-        `${built.postText.length} chars of ${channel.label} copy`,
+        `${built.postText.length} chars of ${channel.label} copy + n8n notified`,
         key
       );
       filled++;
       agent.log(
         "info",
-        `Traffic source ✅ ${channel.id} — ${kvKey}: ${channel.label} copy ready (${key})`,
+        `Traffic source ✅ ${channel.id} — ${kvKey}: ${channel.label} copy ready + handed to n8n (${key})`,
         "marketing",
         { kanbanStage: "done" }
       );
@@ -1215,21 +1214,11 @@ function candidateRows(agent: SEOArticleAgent, kvKey?: string): ArticleRow[] {
 }
 
 export interface TrafficSourceFillOptions {
-  /** Fill this article specifically instead of scanning for pending work. */
   kvKey?: string;
-  /** Never touch this article (the one currently being generated). */
   excludeKvKey?: string;
-  /** Re-run sources already marked filled (admin force-refresh). */
   force?: boolean;
 }
 
-/**
- * Fill the next article that still has pending traffic sources.
- *
- * Deliberately does NOT skip while the pipeline is generating — using the
- * generation wait is the entire point. Collisions are prevented by a KV
- * lock plus the excludeKvKey guard rather than by idling.
- */
 export async function runTrafficSourceFill(
   agent: SEOArticleAgent,
   opts: TrafficSourceFillOptions = {}
@@ -1313,11 +1302,6 @@ export async function runTrafficSourceFill(
   }
 }
 
-/**
- * Fire-and-forget wrapper used by generateArticle(): the previous
- * article's traffic sources fill in while the next one is being written.
- * Swallows everything — distribution must never affect generation.
- */
 export function backfillTrafficSourcesInBackground(
   agent: SEOArticleAgent,
   opts: TrafficSourceFillOptions = {}
