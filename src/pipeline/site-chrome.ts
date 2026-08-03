@@ -1401,7 +1401,7 @@ const CHROME_FOOTER = `<footer class="universal-footer">
         </div>
         <div class="footer-reviews-disclosure">
           <div class="footer-heading">Our Cat Product Reviews</div>
-          <p>At CatsLuvUs.com, many of the products we feature are the same ones used every day by our feline guests at Cats Luv Us Boarding Hotel in Laguna Niguel, California, where we've specialized in cat boarding and grooming for over 30 years. Drawing on real-world experience with thousands of cats of different breeds, ages, and personalities, our team focuses on how products actually perform in everyday use, from comfort and enrichment to ease of cleaning and safety. When we've personally tested an item in our facility, we explain how we used it and what we observed, and we regularly update our recommendations as we see what works best for the cats in our care.</p>
+          <p>At CatsLuvUs.com, product guides are written for cat owners using public manufacturer specs, Amazon listing data, and customer review patterns. We cross-reference that research with what we see caring for boarding cats at Cats Luv Us Boarding Hotel in Laguna Niguel, California (cats-only boarding & grooming for over 30 years) — general comfort, enrichment, and safety considerations, not lab-style product trials. We do not run physical product tests, we do not accept free samples in exchange for coverage, and affiliate links never change which products we recommend. If you buy through links on a guide, we may earn a commission at no extra cost to you.</p>
         </div>
         <div class="footer-bottom">
           <p>&copy; 2026 <a href="https://catsluvus.com/">CatsLuvUs</a>. All rights reserved. Made with ❤️ for cat lovers.</p>
@@ -1599,7 +1599,10 @@ export function ensureChromeAffiliateBar(html: string): string {
     out.includes("clu-universal-chrome-css") ||
     out.includes(".clu-services-bar")
   ) {
-    if (!out.includes(".clu-affiliate-bar{") && !out.includes(".clu-affiliate-bar {")) {
+    if (
+      !out.includes(".clu-affiliate-bar{") &&
+      !out.includes(".clu-affiliate-bar {")
+    ) {
       const cssRules =
         `.clu-affiliate-bar{display:block;width:100%;background:linear-gradient(90deg,#fff7ed 0%,#ffedd5 50%,#fff7ed 100%);border-bottom:1px solid #fdba74;padding:8px 20px;text-align:center;box-sizing:border-box}` +
         `.clu-affiliate-bar__inner{max-width:1100px;margin:0 auto;font-family:'Open Sans',system-ui,sans-serif;font-size:0.8125rem;line-height:1.45;color:#9a3412;font-weight:500;letter-spacing:0.01em}` +

@@ -62,7 +62,7 @@ export function ensureWhyWeLikeMarker(
   // (pickReasons generation down), the identical "fits the brief for
   // <keyword>." line shipped 5x on 2026-06-11 — and the keyword-thinning
   // pass then mangled the repeats into "fits the brief for it." /
-  // "…for one.". Leading with the product name makes each line distinct
+  // "...for one.". Leading with the product name makes each line distinct
   // and survives thinning grammatically.
   const productLead = (context.productName ?? "")
     .trim()
@@ -92,9 +92,9 @@ export function ensureWhyWeLikeMarker(
   }
   const firstFeature = (context.features ?? "").split(/[|;•\n]/)[0]?.trim();
   if (firstFeature && firstFeature.length >= 20) {
-    const clipped = `${firstFeature.slice(0, 140)}${firstFeature.length > 140 ? "…" : ""}`;
+    const clipped = `${firstFeature.slice(0, 140)}${firstFeature.length > 140 ? "..." : ""}`;
     extras.push(
-      /[.!?…]$/.test(clipped)
+      /[.!?...]$/.test(clipped)
         ? `Standout detail: ${clipped}`
         : `Standout detail: ${clipped}.`
     );
@@ -222,7 +222,7 @@ export function isHowToKeyword(keyword: string): boolean {
  * Step text is the first complete sentence of each section's content
  * (HTML stripped), capped at 320 chars per Google's HowTo guidance.
  *
- * Each step gets a stable URL anchor (#section-1, #section-2, …)
+ * Each step gets a stable URL anchor (#section-1, #section-2, ...)
  * mirroring the html-builder's section-id emission so the rich
  * result deep-links into the actual section.
  */
@@ -403,8 +403,8 @@ export function stripPricesFromHtml(
  * so that both checks always agree on the same set of markers.
  *
  * Covers every top-level `ArticleData` prose field so that a partial schema
- * leak (e.g. Kimi truncates mid-JSON and only `"title":"…` and
- * `"introduction":"…` escape into rendered text) is still caught even when
+ * leak (e.g. Kimi truncates mid-JSON and only `"title":"...` and
+ * `"introduction":"...` escape into rendered text) is still caught even when
  * none of the other markers are present.
  */
 export const SCHEMA_FIELD_MARKERS = [
@@ -422,9 +422,9 @@ export const SCHEMA_FIELD_MARKERS = [
 
 /**
  * Whitespace-tolerant regex form of `SCHEMA_FIELD_MARKERS`. The literal
- * markers only match Kimi's compact JSON (`"quickAnswer":"…`); on
+ * markers only match Kimi's compact JSON (`"quickAnswer":"...`); on
  * 2026-06-11 a leak shipped to production in pretty-printed form
- * (`"quickAnswer": "A natural cat…`, space after the colon) and slipped
+ * (`"quickAnswer": "A natural cat...`, space after the colon) and slipped
  * past BOTH the per-field sanitizer and the Step 14 publish gate because
  * both matched the compact literals only. These patterns allow optional
  * whitespace (including newlines) around the colon and before the
@@ -802,7 +802,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       "@context": "https://schema.org",
       "@type": "ItemList",
       name: `Best ${itemListKeyword} Comparison`,
-      description: `Comparison of top ${itemListKeyword} products with real Amazon prices and ratings`,
+      description: `Comparison of top ${itemListKeyword} products with Amazon ratings and review signal`,
       itemListElement: products.slice(0, 5).map((p, idx) => ({
         "@type": "ListItem",
         position: idx + 1,
@@ -887,7 +887,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
           );
           amazonUrl = `https://www.amazon.com/s?k=${searchTerm}&tag=${tag}`;
         }
-        const amazonBtnHtml = `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn">View on Amazon</a>`;
+        const amazonBtnHtml = `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn">Check price on Amazon</a>`;
 
         // When an Amazon image URL is available, stack a clickable
         // image above the button in a CTA column. Both anchors share
@@ -964,6 +964,84 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       })
       .join("");
 
+    // Role labels for comparison matrix (editorial, not claims of testing).
+    const roleLabels = [
+      "Best overall",
+      "Strong alternative",
+      "Also consider",
+      "Value pick",
+      "Premium option"
+    ];
+    const compareRows = products
+      .slice(0, 5)
+      .map((product, idx) => {
+        const shortName =
+          product.displayName ||
+          (product.name.length > 48
+            ? product.name.substring(0, 48).replace(/\s+\S*$/, "...")
+            : product.name);
+        const ratingVal =
+          product.ratingValue ||
+          Math.min(parseFloat(product.rating || "0") || 0, 5);
+        const reviews = product.reviewCount
+          ? product.reviewCount.toLocaleString()
+          : "—";
+        const role =
+          reasoningByAsin.get(product.asin || "")?.label ||
+          roleLabels[idx] ||
+          `Pick #${idx + 1}`;
+        let amazonUrl: string;
+        if (product.asin) {
+          amazonUrl = `https://www.amazon.com/dp/${product.asin}?tag=${tag}`;
+        } else {
+          const searchTerm = encodeURIComponent(
+            product.name
+              .replace(/[^a-zA-Z0-9\s]/g, "")
+              .split(" ")
+              .slice(0, 5)
+              .join(" ")
+          );
+          amazonUrl = `https://www.amazon.com/s?k=${searchTerm}&tag=${tag}`;
+        }
+        return (
+          `<tr>` +
+          `<td class="cmp-name">${escapeHtml(shortName)}</td>` +
+          `<td class="cmp-rating">${ratingVal > 0 ? ratingVal.toFixed(1) : "—"}</td>` +
+          `<td class="cmp-reviews">${reviews}</td>` +
+          `<td class="cmp-role">${escapeHtml(role)}</td>` +
+          `<td class="cmp-cta"><a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn amazon-btn-sm">Check price</a></td>` +
+          `</tr>`
+        );
+      })
+      .join("");
+    const compareTableHtml =
+      products.length >= 2
+        ? `<div class="pick-compare" aria-label="Product comparison">` +
+          `<h3 class="pick-compare-title">Quick comparison</h3>` +
+          `<div class="pick-compare-scroll"><table class="pick-compare-table">` +
+          `<thead><tr><th>Product</th><th>Rating</th><th>Reviews</th><th>Best for</th><th></th></tr></thead>` +
+          `<tbody>${compareRows}</tbody></table></div></div>`
+        : "";
+    const topPick = products[0];
+    let topPickUrl = "";
+    if (topPick?.asin) {
+      topPickUrl = `https://www.amazon.com/dp/${topPick.asin}?tag=${tag}`;
+    } else if (topPick) {
+      topPickUrl = `https://www.amazon.com/s?k=${encodeURIComponent(
+        topPick.name
+          .replace(/[^a-zA-Z0-9\s]/g, "")
+          .split(" ")
+          .slice(0, 5)
+          .join(" ")
+      )}&tag=${tag}`;
+    }
+    const stickyCtaHtml = topPickUrl
+      ? `<div class="amazon-cta-bar" role="region" aria-label="Shop top pick">` +
+        `<span class="amazon-cta-bar-text">See the top pick's current price on Amazon</span>` +
+        `<a href="${topPickUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn">Check price on Amazon</a>` +
+        `</div>`
+      : "";
+
     comparisonTableHtml =
       `<div class="top-picks">` +
       `<div class="top-picks-header">` +
@@ -971,6 +1049,8 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       `<h2 class="top-picks-title">Our Top Picks</h2>` +
       `</div>` +
       `<ul class="top-picks-list">${pickItems}</ul>` +
+      compareTableHtml +
+      stickyCtaHtml +
       `</div>`;
   }
 
@@ -1005,7 +1085,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
           <lite-youtube videoid="${videoId}" style="background-image: url('https://img.youtube.com/vi/${videoId}/hqdefault.jpg');" title="${safeTitle}"></lite-youtube>
         </div>
         ${safeChannel ? `<div class="video-hero-meta"><strong>${safeChannel}</strong></div>` : ""}
-        <div class="video-hero-cta">Continue reading below for our complete written guide with pricing, comparisons, and FAQs.</div>
+        <div class="video-hero-cta">Continue reading below for our complete written guide with comparisons, buying criteria, and FAQs.</div>
       </section>
     `;
   }
@@ -1055,7 +1135,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
     <section class="wc-methodology" style="margin:32px 0;padding:24px;background:#fff;border:1px solid #e2e8f0;border-radius:8px">
       <h2 style="margin:0 0 12px;font-size:22px">How We Picked</h2>
       <p style="margin:0 0 12px;color:#374151">
-        We compared ${products.length} ${keyword}${/s$/i.test(keyword) ? "" : " products"} sold on Amazon. For each pick we weighed:
+        We reviewed ${products.length === 1 ? "1 product" : `${products.length} products`} matching "${escapeHtml(keyword)}" on Amazon (public listing data and review aggregates). For each pick we weighed:
       </p>
       <ul style="margin:0 0 12px 20px;color:#374151;line-height:1.6">
         <li><strong>Manufacturer specifications</strong> — dimensions, materials, and stated durability from the listing page.</li>
@@ -1381,6 +1461,17 @@ article *{max-width:100%}
 .pick-features{font-size:13px;color:#4a5568}
 .amazon-btn{display:inline-flex;align-items:center;padding:8px 16px;background:#f0c040;color:#111;border-radius:6px;text-decoration:none;font-weight:700;font-size:13px;white-space:nowrap;word-break:normal;overflow-wrap:normal;flex-shrink:0;transition:background 0.2s}
 .amazon-btn:hover{background:#e6b020}
+.amazon-btn-sm{padding:6px 12px;font-size:12px}
+.pick-compare{padding:16px 20px 20px;border-top:1px solid #e2e8f0;background:#f8fafc}
+.pick-compare-title{margin:0 0 12px;font-size:16px;font-weight:800;color:#1a202c}
+.pick-compare-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.pick-compare-table{width:100%;border-collapse:collapse;font-size:13px;min-width:520px}
+.pick-compare-table th,.pick-compare-table td{padding:10px 12px;text-align:left;border-bottom:1px solid #e2e8f0;vertical-align:middle}
+.pick-compare-table th{font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#64748b;font-weight:700}
+.pick-compare-table .cmp-name{font-weight:600;color:#1a202c;max-width:220px}
+.pick-compare-table .cmp-cta{white-space:nowrap}
+.amazon-cta-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:14px 20px;background:linear-gradient(90deg,#fffbeb,#fef3c7);border-top:1px solid #fcd34d}
+.amazon-cta-bar-text{font-size:14px;font-weight:600;color:#78350f}
 .pick-cta{flex-shrink:0;display:flex;flex-direction:column;align-items:stretch;gap:10px;max-width:140px}
 .pick-image-link{display:block;line-height:0;border-radius:6px;position:relative}
 .pick-award{position:absolute;top:-10px;left:-10px;width:54px;height:54px;line-height:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.3));pointer-events:none}
