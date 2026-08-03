@@ -1,5 +1,9 @@
 import type { AmazonProduct } from "./amazon";
 import { escXml as escapeHtml, unescapeHtml } from "./http-utils";
+import {
+  buildAnalyticsBodyHtml,
+  buildAnalyticsHeadHtml
+} from "./article-analytics";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -1563,6 +1567,7 @@ input::placeholder{color:#767676 !important}
   body{padding-top:0}
 }
 </style>
+${buildAnalyticsHeadHtml()}
 </head>
 <body>
 <a href="#main-content" class="skip-link">Skip to main content</a>
@@ -1648,6 +1653,7 @@ input::placeholder{color:#767676 !important}
 </div>
 </main>
 ${liteYoutubeScript}
+${buildAnalyticsBodyHtml()}
 <style id="a11y-overrides">
 body .clu-search-form input::placeholder{color:#767676 !important}
 body .clu-search-form button svg{fill:#767676 !important}

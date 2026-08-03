@@ -47,7 +47,11 @@ import {
 } from "./pipeline/http-utils";
 import { appendToRingBuffer } from "./pipeline/ring-buffer";
 import { createArticleResponseHeaders } from "./article-response";
-import { ensureChromeAffiliateBar, wrapWithSiteChrome } from "./pipeline/site-chrome";
+import {
+  ensureChromeAffiliateBar,
+  wrapWithSiteChrome
+} from "./pipeline/site-chrome";
+import { ensureArticleAnalytics } from "./pipeline/article-analytics";
 import {
   getMissingBrowserRenderingBindings,
   renderPage
@@ -5413,6 +5417,36 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       // Returns one row per article with ITS TARGET KEYWORD's ranking (the
       // keyword the article was written to rank for, from `articles.keyword`).
       // Drives the Rankings panel's main table without N round-trips.
+
+      // GET /api/admin/affiliate-clicks?day=YYYY-MM-DD — first-party Amazon click tallies
+      if (
+        url.pathname === "/api/admin/affiliate-clicks" &&
+        request.method === "GET"
+      ) {
+        const day =
+          url.searchParams.get("day") || new Date().toISOString().slice(0, 10);
+        const dayKey = `affiliate-clicks:day:${day}`;
+        const raw = await this.envBindings.ARTICLES_KV.get(dayKey);
+        let data: Record<string, number> = {};
+        if (raw) {
+          try {
+            data = JSON.parse(raw) as Record<string, number>;
+          } catch {
+            data = {};
+          }
+        }
+        const total = data._total || 0;
+        const rows = Object.entries(data)
+          .filter(([k]) => k !== "_total")
+          .map(([k, clicks]) => {
+            const [page, asin] = k.split("|");
+            return { page: page || "", asin: asin || "", clicks };
+          })
+          .sort((a, b) => b.clicks - a.clicks)
+          .slice(0, 200);
+        return Response.json({ ok: true, day, total, rows });
+      }
+
       if (
         url.pathname === "/api/admin/analytics-summary" &&
         request.method === "GET"
@@ -8644,6 +8678,90 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
+    // ── First-party Amazon click beacon (public, CORS) ───────────────────────
+    // Browser sendBeacon from article pages. Stores daily aggregates in
+    // ARTICLES_KV for EPC / ASIN reporting. No auth — payload is tiny and
+    // validated; abuse is limited by Workers rate limits + size caps.
+    if (
+      url.pathname === "/api/affiliate-click" &&
+      (request.method === "POST" || request.method === "OPTIONS")
+    ) {
+      const cors: Record<string, string> = {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "86400"
+      };
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: cors });
+      }
+      try {
+        const { normalizeAffiliateClick, pathToKvKey } =
+          await import("./pipeline/article-analytics");
+        const raw = await request.json().catch(() => null);
+        const click = normalizeAffiliateClick(raw);
+        if (!click) {
+          return new Response(JSON.stringify({ ok: false, error: "invalid" }), {
+            status: 400,
+            headers: { ...cors, "content-type": "application/json" }
+          });
+        }
+        const day = new Date(click.ts || Date.now()).toISOString().slice(0, 10);
+        const kvKey = pathToKvKey(click.path || "") || "unknown";
+        const asin = click.asin || "unknown";
+        const dayKey = `affiliate-clicks:day:${day}`;
+        const pageKey = `affiliate-clicks:page:${kvKey}`;
+        const asinKey = `affiliate-clicks:asin:${asin}`;
+
+        const bump = async (key: string, field: string) => {
+          try {
+            const prev = await env.ARTICLES_KV.get(key);
+            let obj: Record<string, number> = {};
+            if (prev) {
+              try {
+                obj = JSON.parse(prev) as Record<string, number>;
+              } catch {
+                obj = {};
+              }
+            }
+            obj[field] = (obj[field] || 0) + 1;
+            obj._total = (obj._total || 0) + 1;
+            // Cap cardinality of day keys
+            const keys = Object.keys(obj);
+            if (keys.length > 800) {
+              // keep _total + top fields by dropping arbitrary extras later;
+              // for now just write — rare at this scale
+            }
+            await env.ARTICLES_KV.put(key, JSON.stringify(obj), {
+              expirationTtl: 60 * 60 * 24 * 120 // 120 days
+            });
+          } catch {
+            // best-effort analytics
+          }
+        };
+
+        ctx.waitUntil(
+          Promise.all([
+            bump(dayKey, `${kvKey}|${asin}`),
+            bump(pageKey, asin),
+            bump(asinKey, kvKey)
+          ]).then(() => undefined)
+        );
+
+        return new Response(null, {
+          status: 204,
+          headers: cors
+        });
+      } catch (err: unknown) {
+        return new Response(JSON.stringify({ ok: false }), {
+          status: 204,
+          headers: {
+            "access-control-allow-origin": "*"
+          }
+        });
+      }
+    }
+
     // Real robots.txt (the SPA shell used to swallow this path). The
     // staging domain is DELIBERATELY indexable — the incubation strategy
     // lets Google crawl staging articles and vote with impressions before
@@ -8936,7 +9054,9 @@ export default {
         trackArticleServe(env, ctx, kvKey, request);
         // Staging/clone: inject Cats Luv Us Universal Chrome (header/nav/menus).
         // No-op on production DOMAIN (catsluvus.com) — live consumer owns chrome.
-        const body = ensureChromeAffiliateBar(wrapWithSiteChrome(articleHtml, env.DOMAIN));
+        const body = ensureArticleAnalytics(
+          ensureChromeAffiliateBar(wrapWithSiteChrome(articleHtml, env.DOMAIN))
+        );
         return new Response(request.method === "HEAD" ? null : body, {
           status: 200,
           headers: createArticleResponseHeaders()
