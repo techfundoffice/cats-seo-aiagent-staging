@@ -7,6 +7,7 @@ import {
   repairJson
 } from "./http-utils";
 import { runKimiWithPoll } from "./kimi-model";
+import { evaluateCommercialKeyword } from "./commercial-keyword-gate";
 import {
   extractEmbeddedJsonCandidates,
   MAX_JSON_PARSE_CANDIDATES
@@ -308,6 +309,7 @@ export async function generateKeywords(
       const rejectedIntent: string[] = [];
       const rejectedTooLong: string[] = [];
       const rejectedDegenerate: string[] = [];
+      const rejectedCommercial: string[] = [];
       const keywords: string[] = [];
       for (const k of allRawKeywords) {
         if (containsPrice(k)) {
@@ -318,6 +320,8 @@ export async function generateKeywords(
           rejectedTooLong.push(k);
         } else if (isDegenerate(k)) {
           rejectedDegenerate.push(k);
+        } else if (!evaluateCommercialKeyword(k, categorySlug).ok) {
+          rejectedCommercial.push(k);
         } else {
           keywords.push(k);
         }
@@ -338,6 +342,7 @@ export async function generateKeywords(
       logRejected("question/intent-prefix", rejectedIntent);
       logRejected("too-long (>7 words)", rejectedTooLong);
       logRejected("degenerate/template-echo", rejectedDegenerate);
+      logRejected("non-commercial/blocked", rejectedCommercial);
       if (keywords.length === 0) {
         agent.log(
           "warning",

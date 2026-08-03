@@ -53,6 +53,10 @@ import {
 } from "./pipeline/site-chrome";
 import { ensureArticleAnalytics } from "./pipeline/article-analytics";
 import {
+  evaluateCommercialKeyword,
+  commercialGateLogReason
+} from "./pipeline/commercial-keyword-gate";
+import {
   getMissingBrowserRenderingBindings,
   renderPage
 } from "./tools/browser-rendering";
@@ -3199,6 +3203,30 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
    * scout NEVER invents keywords; rows arrive only via
    * POST /api/admin/keywords/import (or a future refill-producer).
    */
+
+  /**
+   * Skip a pending runtime keyword that fails the commercial-intent gate.
+   * Marks status='skipped' so the loop never burns Kimi/Amazon on it again.
+   */
+  private skipNonCommercialKeyword(
+    id: string,
+    keyword: string,
+    categorySlug: string,
+    reason: string
+  ): void {
+    try {
+      this.sql`UPDATE keywords SET status='skipped' WHERE id=${id}`;
+    } catch {
+      this.sql`UPDATE keywords SET status='abandoned' WHERE id=${id}`;
+    }
+    this.log(
+      "info",
+      `Commercial gate: skipped "${keyword}" (${categorySlug}) — ${reason}`,
+      "orchestrator",
+      { categorySlug, kanbanStage: "queue" }
+    );
+  }
+
   private async claimNextScoutKeyword(): Promise<{
     keyword: string;
     slug: string;
@@ -3266,6 +3294,36 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           "analyst"
         );
         claimed = { ...claimed, keyword: tidied };
+      }
+
+      const commercial = evaluateCommercialKeyword(
+        claimed.keyword,
+        claimed.category_slug
+      );
+      if (!commercial.ok) {
+        try {
+          await db
+            .prepare(
+              `UPDATE scout_keywords
+                  SET status = 'failed', error = ?1,
+                      finished_at = datetime('now')
+                WHERE slug = ?2 AND status = 'generating'`
+            )
+            .bind(
+              `commercial-gate:${commercial.reason}`.slice(0, 500),
+              claimed.slug
+            )
+            .run();
+        } catch {
+          /* best-effort */
+        }
+        this.log(
+          "info",
+          `Commercial gate: scout rejected "${claimed.keyword}" — ${commercialGateLogReason(commercial)}`,
+          "analyst",
+          { kanbanStage: "queue", categorySlug: claimed.category_slug }
+        );
+        continue;
       }
 
       const { checkKeywordOwnership } =
@@ -3418,13 +3476,35 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
 
         // 1. Find next pending keyword
-        const pending = this.sql<{
+        // Drain non-commercial pending rows (up to 25/tick) so the queue
+        // cannot stuck-loop on memorial/dog/junk keywords.
+        let pending = this.sql<{
           id: string;
           keyword: string;
           slug: string;
           category_slug: string;
           retry_count: number;
         }>`SELECT id, keyword, slug, category_slug, retry_count FROM keywords WHERE status='pending' ORDER BY ROWID LIMIT 1`;
+        for (let drain = 0; drain < 25 && pending.length > 0; drain++) {
+          const gate = evaluateCommercialKeyword(
+            pending[0].keyword,
+            pending[0].category_slug
+          );
+          if (gate.ok) break;
+          this.skipNonCommercialKeyword(
+            pending[0].id,
+            pending[0].keyword,
+            pending[0].category_slug,
+            commercialGateLogReason(gate)
+          );
+          pending = this.sql<{
+            id: string;
+            keyword: string;
+            slug: string;
+            category_slug: string;
+            retry_count: number;
+          }>`SELECT id, keyword, slug, category_slug, retry_count FROM keywords WHERE status='pending' ORDER BY ROWID LIMIT 1`;
+        }
 
         // #region agent log
         emitAgentDebugLog(this, {
@@ -5417,6 +5497,124 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       // Returns one row per article with ITS TARGET KEYWORD's ranking (the
       // keyword the article was written to rank for, from `articles.keyword`).
       // Drives the Rankings panel's main table without N round-trips.
+
+      // POST /api/admin/purge-non-commercial-pending — mark non-commercial
+      // pending keywords as skipped so the factory stops burning quota.
+      if (
+        url.pathname === "/api/admin/purge-non-commercial-pending" &&
+        request.method === "POST"
+      ) {
+        const rows = this.sql<{
+          id: string;
+          keyword: string;
+          category_slug: string;
+        }>`SELECT id, keyword, category_slug FROM keywords WHERE status='pending' LIMIT 2000`;
+        let skipped = 0;
+        const samples: string[] = [];
+        for (const row of rows) {
+          const gate = evaluateCommercialKeyword(
+            row.keyword,
+            row.category_slug
+          );
+          if (gate.ok) continue;
+          try {
+            this.sql`UPDATE keywords SET status='skipped' WHERE id=${row.id}`;
+          } catch {
+            this.sql`UPDATE keywords SET status='abandoned' WHERE id=${row.id}`;
+          }
+          skipped++;
+          if (samples.length < 15) {
+            samples.push(`${row.keyword} (${gate.reason})`);
+          }
+        }
+        this.log(
+          "info",
+          `Commercial gate purge: skipped ${skipped}/${rows.length} pending keywords`,
+          "orchestrator"
+        );
+        return Response.json({
+          ok: true,
+          scanned: rows.length,
+          skipped,
+          samples
+        });
+      }
+
+      // POST /api/admin/requeue-commercial-refresh
+      // Body: { limit?: number, minScore?: number }
+      // Requeues completed commercial keywords for multi-pick regeneration.
+      if (
+        url.pathname === "/api/admin/requeue-commercial-refresh" &&
+        request.method === "POST"
+      ) {
+        let limit = 50;
+        let minScore = 50;
+        let purgeKv = true;
+        try {
+          const body = (await request.json()) as {
+            limit?: number;
+            minScore?: number;
+            purgeKv?: boolean;
+          };
+          if (typeof body.limit === "number")
+            limit = Math.max(1, Math.min(200, Math.floor(body.limit)));
+          if (typeof body.minScore === "number")
+            minScore = Math.max(0, Math.min(100, body.minScore));
+          if (typeof body.purgeKv === "boolean") purgeKv = body.purgeKv;
+        } catch {
+          /* defaults */
+        }
+        const rows = this.sql<{
+          id: string;
+          keyword: string;
+          slug: string;
+          category_slug: string;
+          seo_score: number;
+        }>`SELECT id, keyword, slug, category_slug, seo_score FROM keywords WHERE status='completed' ORDER BY seo_score DESC, ROWID DESC LIMIT 500`;
+        const picked: Array<{
+          keyword: string;
+          category_slug: string;
+          score: number;
+          seo_score: number;
+        }> = [];
+        for (const row of rows) {
+          const gate = evaluateCommercialKeyword(
+            row.keyword,
+            row.category_slug
+          );
+          if (!gate.ok || gate.score < minScore) continue;
+          picked.push({
+            keyword: row.keyword,
+            category_slug: row.category_slug,
+            score: gate.score,
+            seo_score: row.seo_score ?? 0
+          });
+          this
+            .sql`UPDATE keywords SET status='pending', retry_count=0 WHERE id=${row.id}`;
+          if (purgeKv) {
+            const kvKey = `${row.category_slug}:${row.slug}`;
+            try {
+              await this.envBindings.ARTICLES_KV.delete(kvKey);
+            } catch {
+              /* best-effort */
+            }
+          }
+          if (picked.length >= limit) break;
+        }
+        picked.sort((a, b) => b.score - a.score || b.seo_score - a.seo_score);
+        this.log(
+          "info",
+          `Commercial refresh: requeued ${picked.length} completed commercial keywords (minScore=${minScore}, purgeKv=${purgeKv})`,
+          "orchestrator"
+        );
+        return Response.json({
+          ok: true,
+          requeued: picked.length,
+          minScore,
+          purgeKv,
+          samples: picked.slice(0, 20)
+        });
+      }
 
       // GET /api/admin/affiliate-clicks?day=YYYY-MM-DD — first-party Amazon click tallies
       if (
