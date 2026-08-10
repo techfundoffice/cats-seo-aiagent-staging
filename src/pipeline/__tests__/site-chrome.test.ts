@@ -67,7 +67,9 @@ describe("ensureChromeAffiliateBar", () => {
     const out = ensureChromeAffiliateBar(existing);
     expect(out).toContain("clu-affiliate-bar");
     expect(out).toContain("earn a commission");
-    expect(out.indexOf("clu-affiliate-bar")).toBeLessThan(out.indexOf("</header>"));
+    expect(out.indexOf("clu-affiliate-bar")).toBeLessThan(
+      out.indexOf("</header>")
+    );
     expect(ensureChromeAffiliateBar(out)).toBe(out);
   });
 
