@@ -45,4 +45,4 @@ import MermaidChart from "./MermaidChart";
  */
 const CLAUDE_OAUTH_SS_KEY = "claude_oauth_pkce_v1";
 
-_INCOMPLETE_SENTINEL_ABORT_
+// TRUNCATION_MARKER_DO_NOT_USE
