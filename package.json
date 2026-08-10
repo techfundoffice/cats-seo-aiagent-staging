@@ -23,6 +23,7 @@
     "debug:pull-ndjson": "node ./scripts/pull-debug-ndjson.mjs"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.107",
     "@cloudflare/ai-chat": "^0.4.1",
     "@cloudflare/kumo": "^1.18.0",
     "@openrouter/ai-sdk-provider": "^2.9.0",
