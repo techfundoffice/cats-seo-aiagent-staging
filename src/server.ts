@@ -2189,6 +2189,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       FOREIGN KEY (category_slug) REFERENCES categories(slug)
     )`;
 
+    this.sql`CREATE TABLE IF NOT EXISTS pipeline_secrets (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`;
+
     this.sql`CREATE TABLE IF NOT EXISTS google_sheets (
       url TEXT PRIMARY KEY,
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
