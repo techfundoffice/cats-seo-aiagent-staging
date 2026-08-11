@@ -257,6 +257,34 @@ declare namespace Cloudflare {
 		 */
 		DATAFORSEO_LOGIN?: string;
 		DATAFORSEO_PASSWORD?: string;
+		/**
+		 * Official Claude Code long-lived OAuth token from
+		 * `claude setup-token` (Pro/Max/Team/Enterprise subscription).
+		 * Docs: https://code.claude.com/docs/en/authentication
+		 * Dashboard `setClaudeCodeSubscription` is preferred (DO SQLite +
+		 * 1-year expiry default). When active, Claude is tried before
+		 * OpenRouter Kimi and Workers AI. Sent as Authorization: Bearer.
+		 */
+		CLAUDE_CODE_OAUTH_TOKEN?: string;
+		/**
+		 * Legacy alias for CLAUDE_CODE_OAUTH_TOKEN (dashboard / older deploys).
+		 */
+		CLAUDE_CODE_SUBSCRIPTION_TOKEN?: string;
+		/**
+		 * Optional ISO-8601 expiry for env OAuth token.
+		 * Defaults to ~1 year from resolve time when unset.
+		 */
+		CLAUDE_CODE_SUBSCRIPTION_EXPIRES_AT?: string;
+		/**
+		 * Optional Anthropic model id for the Claude Code primary path.
+		 * Default: claude-sonnet-4-20250514
+		 */
+		CLAUDE_CODE_MODEL?: string;
+		/**
+		 * Claude Console pay-per-token API key (x-api-key). Not the same as
+		 * subscription OAuth from `claude setup-token`.
+		 */
+		ANTHROPIC_API_KEY?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

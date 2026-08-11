@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type MouseEvent,
   type ReactNode
 } from "react";
 import { useAgent } from "agents/react";
@@ -28,6 +29,12 @@ import type {
   SEOAgentState
 } from "./server";
 import MermaidChart from "./MermaidChart";
+import {
+  createClaudeOAuthPendingSession,
+  exchangeClaudeOAuthCode
+} from "./pipeline/claude-oauth-flow";
+
+const CLAUDE_OAUTH_SS_KEY = "claude_oauth_pkce_v1";
 
 // ── Types for the Generate-1-Article audit panel ─────────────────────────────
 interface SeoCheck {
@@ -943,10 +950,683 @@ const ActivityLogRow = memo(function ActivityLogRow({
   );
 });
 
+function ClaudeCodeSubscriptionPanel({
+  state,
+  agent,
+  claudeTokenInput: _claudeTokenInput,
+  setClaudeTokenInput,
+  claudeSaveBusy,
+  setClaudeSaveBusy,
+  claudeSaveMsg,
+  setClaudeSaveMsg
+}: {
+  state: SEOAgentState;
+  agent: ReturnType<typeof useAgent<SEOArticleAgent, SEOAgentState>>;
+  claudeTokenInput: string;
+  setClaudeTokenInput: (v: string) => void;
+  claudeSaveBusy: boolean;
+  setClaudeSaveBusy: (v: boolean) => void;
+  claudeSaveMsg: string | null;
+  setClaudeSaveMsg: (v: string | null) => void;
+}) {
+  const [oauthAwaitingCode, setOauthAwaitingCode] = useState(false);
+  /** Single paste field: CODE#STATE (OAuth) or sk-ant-oat… (access token). */
+  const [authCodeInput, setAuthCodeInput] = useState("");
+  /** Fallback clickable authorize URL if popup blocked */
+  const [authUrlFallback, setAuthUrlFallback] = useState<string | null>(null);
+  const sub = state.claudeCodeSubscription;
+  const ui =
+    sub?.uiStatus ??
+    (sub?.active ? "active" : sub?.configured ? "expired" : "none");
+  const days = sub?.daysRemaining ?? null;
+  const badge = (() => {
+    if (ui === "active")
+      return {
+        label:
+          days !== null && days <= 30
+            ? `Active — primary · ${days}d left`
+            : "Active — primary model",
+        bg: "#dcfce7",
+        color: "#166534"
+      };
+    if (ui === "expiring_soon")
+      return {
+        label: `Expiring soon — ${days ?? "?"} days left`,
+        bg: "#fef3c7",
+        color: "#92400e"
+      };
+    if (ui === "expired")
+      return {
+        label: "Expired — re-authorize",
+        bg: "#fee2e2",
+        color: "#991b1b"
+      };
+    return {
+      label: "None — not configured",
+      bg: "#f3f4f6",
+      color: "#4b5563"
+    };
+  })();
+
+  /**
+   * Open Claude authorize ONLY in a separate tab. Never touch window.location
+   * on this dashboard. Guard against browsers that return the current window
+   * from window.open when popups are blocked (that was wiping the dashboard).
+   */
+  const startOAuth = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Unique name so we never reuse this dashboard window
+    const popupName = `claude_oauth_${Date.now()}`;
+    let popup: Window | null = null;
+    try {
+      popup = window.open("about:blank", popupName);
+    } catch {
+      popup = null;
+    }
+
+    // If open failed or (danger) returned this same window — do NOT navigate
+    if (!popup || popup === window) {
+      popup = null;
+    }
+
+    if (popup) {
+      try {
+        popup.document.write(
+          "<!doctype html><title>Claude login</title><body style='font-family:system-ui;padding:2rem'>" +
+            "<p><strong>Loading Claude login…</strong></p>" +
+            "<p>This is a separate tab. Keep the SEO dashboard tab open.</p>" +
+            "</body>"
+        );
+        popup.document.close();
+      } catch {
+        /* ok */
+      }
+    }
+
+    setClaudeSaveBusy(true);
+    setClaudeSaveMsg(null);
+    setAuthUrlFallback(null);
+    setOauthAwaitingCode(false);
+
+    void (async () => {
+      try {
+        const { session, authUrl } = await createClaudeOAuthPendingSession();
+        try {
+          sessionStorage.setItem(CLAUDE_OAUTH_SS_KEY, JSON.stringify(session));
+        } catch {
+          /* private mode */
+        }
+        setAuthUrlFallback(authUrl);
+        try {
+          await agent.stub.saveClaudeCodeOAuthPending(session);
+        } catch {
+          /* complete still has sessionStorage */
+        }
+        setOauthAwaitingCode(true);
+
+        let openedInOtherTab = false;
+        if (popup && popup !== window && !popup.closed) {
+          try {
+            popup.location.replace(authUrl);
+            popup.focus();
+            openedInOtherTab = true;
+          } catch {
+            openedInOtherTab = false;
+          }
+        }
+
+        // Second try: named window open with full URL (still not this tab)
+        if (!openedInOtherTab) {
+          try {
+            const p2 = window.open(authUrl, popupName);
+            if (p2 && p2 !== window) {
+              openedInOtherTab = true;
+              try {
+                p2.focus();
+              } catch {
+                /* ok */
+              }
+            }
+          } catch {
+            /* ok */
+          }
+        }
+
+        // Absolute fallback: show a real <a target=_blank> — user click cannot
+        // steal this tab. Never assign window.location.
+        setClaudeSaveMsg(
+          openedInOtherTab
+            ? "Claude opened in a NEW tab. Leave this dashboard open. Copy CODE#STATE from Claude, paste below."
+            : "Could not auto-open a tab. Use the green “Open Claude in a NEW tab” link below (right‑click → Open in new tab if needed)."
+        );
+      } catch (err: unknown) {
+        try {
+          if (popup && popup !== window) popup.close();
+        } catch {
+          /* ok */
+        }
+        setClaudeSaveMsg(errMsg(err));
+      } finally {
+        setClaudeSaveBusy(false);
+      }
+    })();
+  };
+
+  const completeOAuth = (raw?: string) => {
+    const paste = (raw ?? authCodeInput).replace(/\s+/g, "").trim();
+    if (!paste) {
+      setClaudeSaveMsg("Paste the full CODE#STATE from the Claude tab.");
+      return;
+    }
+    let codeVerifier = "";
+    let oauthState = "";
+    try {
+      const rawSs = sessionStorage.getItem(CLAUDE_OAUTH_SS_KEY);
+      if (rawSs) {
+        const parsed = JSON.parse(rawSs) as {
+          codeVerifier?: string;
+          state?: string;
+        };
+        if (parsed.codeVerifier) codeVerifier = parsed.codeVerifier;
+        if (parsed.state) oauthState = parsed.state;
+      }
+    } catch {
+      /* ignore */
+    }
+    // Do NOT use the #STATE half as code_verifier — state is independent.
+    // Verifier must come from sessionStorage from the Authorize click on this tab.
+    if (!codeVerifier) {
+      setClaudeSaveMsg(
+        "Missing PKCE session on this tab. Click “Authorize Claude (new tab only)” here first, open Claude, then paste CODE#STATE from that attempt."
+      );
+      return;
+    }
+
+    setClaudeSaveBusy(true);
+    setClaudeSaveMsg(null);
+
+    void (async () => {
+      try {
+        // Exchange in the browser first (your IP) so the Worker does not
+        // get Anthropic 429s on shared edge IPs.
+        let tokens: {
+          accessToken: string;
+          refreshToken?: string;
+          expiresAtMs: number;
+        } | null = null;
+        try {
+          tokens = await exchangeClaudeOAuthCode({
+            code: paste,
+            codeVerifier,
+            state: oauthState || undefined,
+            rawPaste: paste
+          });
+        } catch (browserErr: unknown) {
+          // CORS or network — one Worker-side exchange
+          const r = await agent.stub.completeClaudeCodeOAuth({
+            code: paste,
+            codeVerifier
+          });
+          const err = getResultErrorMessage(r);
+          if (err) {
+            setClaudeSaveMsg(
+              `${errMsg(browserErr)} · server: ${err}`.slice(0, 400)
+            );
+            return;
+          }
+          setAuthCodeInput("");
+          setOauthAwaitingCode(false);
+          try {
+            sessionStorage.removeItem(CLAUDE_OAUTH_SS_KEY);
+          } catch {
+            /* ignore */
+          }
+          setClaudeSaveMsg(
+            "Authorized — Claude is primary before OpenRouter/Workers AI."
+          );
+          return;
+        }
+
+        const stored = await agent.stub.storeClaudeOAuthTokens({
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          expiresAtMs: tokens.expiresAtMs
+        });
+        const err = getResultErrorMessage(stored);
+        if (err) {
+          setClaudeSaveMsg(err);
+          return;
+        }
+        setAuthCodeInput("");
+        setOauthAwaitingCode(false);
+        setClaudeTokenInput("");
+        try {
+          sessionStorage.removeItem(CLAUDE_OAUTH_SS_KEY);
+        } catch {
+          /* ignore */
+        }
+        setClaudeSaveMsg(
+          "Authorized — Claude is primary before OpenRouter/Workers AI."
+        );
+      } catch (e: unknown) {
+        setClaudeSaveMsg(errMsg(e));
+      } finally {
+        setClaudeSaveBusy(false);
+      }
+    })();
+  };
+
+  return (
+    <div
+      id="claude-oauth-section"
+      style={{
+        background: "#fff",
+        borderRadius: "0.75rem",
+        border: "1px solid #e9d5ff",
+        padding: "1.25rem",
+        marginBottom: "1.5rem"
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "0.75rem",
+          marginBottom: "0.75rem"
+        }}
+      >
+        <div>
+          <h2
+            style={{
+              fontSize: "1rem",
+              fontWeight: 700,
+              color: "#111827",
+              margin: 0
+            }}
+          >
+            Claude Pro / Max subscription
+          </h2>
+          <p
+            style={{
+              fontSize: "0.8rem",
+              color: "#6b7280",
+              margin: "0.25rem 0 0",
+              maxWidth: "46rem",
+              lineHeight: 1.45
+            }}
+          >
+            Sign in with your Claude.ai Pro/Max plan via OAuth (Claude Code
+            client PKCE). No CLI required — authorize in the browser, paste the
+            code back here. Tokens stay on the Worker (never localStorage).
+          </p>
+        </div>
+        <span
+          id="token-status"
+          style={{
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            padding: "0.35rem 0.65rem",
+            borderRadius: "999px",
+            background: badge.bg,
+            color: badge.color
+          }}
+        >
+          {badge.label}
+        </span>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(11rem, 1fr))",
+          gap: "0.5rem",
+          marginBottom: "0.85rem"
+        }}
+      >
+        {[
+          {
+            step: "1",
+            title: "Prepare",
+            body: "Purple button — stay on this page"
+          },
+          {
+            step: "2",
+            title: "New tab",
+            body: "Green button opens Claude (not this tab)"
+          },
+          {
+            step: "3",
+            title: "Paste here",
+            body: "CODE#STATE back on this dashboard"
+          }
+        ].map((s) => (
+          <div
+            key={s.step}
+            style={{
+              border: "1px solid #ede9fe",
+              borderRadius: "0.5rem",
+              padding: "0.55rem 0.7rem",
+              background: "#faf5ff"
+            }}
+          >
+            <div
+              style={{
+                fontSize: "0.7rem",
+                fontWeight: 700,
+                color: "#7c3aed"
+              }}
+            >
+              Step {s.step} · {s.title}
+            </div>
+            <div style={{ fontSize: "0.75rem", color: "#4b5563" }}>
+              {s.body}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {(oauthAwaitingCode || authUrlFallback) && (
+        <div
+          style={{
+            background: "#fef3c7",
+            border: "1px solid #f59e0b",
+            borderRadius: "0.5rem",
+            padding: "0.65rem 0.85rem",
+            marginBottom: "0.75rem",
+            fontSize: "0.85rem",
+            color: "#92400e",
+            fontWeight: 600
+          }}
+        >
+          Stay on this dashboard tab. Claude must open in a separate tab. When
+          you have CODE#STATE, paste it in the box below on THIS page.
+        </div>
+      )}
+
+      {sub?.configured && (
+        <div
+          style={{
+            fontSize: "0.8rem",
+            color: "#4b5563",
+            marginBottom: "0.75rem",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.75rem 1.25rem"
+          }}
+        >
+          <span>
+            Token{" "}
+            {sub.maskedToken ?? (sub.tokenLast4 ? `…${sub.tokenLast4}` : "—")}
+          </span>
+          <span>
+            Expires{" "}
+            {sub.expiresAt ? new Date(sub.expiresAt).toLocaleDateString() : "—"}
+          </span>
+          <span>
+            {days !== null ? `${days} days left` : "—"}
+            {ui === "expiring_soon" ? " · renew soon" : ""}
+          </span>
+          <span>Source: {sub.source ?? "—"}</span>
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: "0.65rem"
+        }}
+      >
+        <button
+          id="authorize-claude-btn"
+          type="button"
+          disabled={claudeSaveBusy}
+          onClick={startOAuth}
+          style={{
+            padding: "0.55rem 0.95rem",
+            border: "none",
+            borderRadius: "0.375rem",
+            background: "#7c3aed",
+            color: "#fff",
+            fontWeight: 600,
+            cursor: claudeSaveBusy ? "not-allowed" : "pointer",
+            fontSize: "0.85rem"
+          }}
+        >
+          Authorize Claude (new tab only)
+        </button>
+        {authUrlFallback ? (
+          <a
+            id="open-claude-authorize-tab"
+            href={authUrlFallback}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(ev) => {
+              // Force new tab; never allow same-tab navigation
+              ev.preventDefault();
+              const u = authUrlFallback;
+              const w = window.open(u, `claude_oauth_link_${Date.now()}`);
+              if (!w || w === window) {
+                // Last resort: open via temporary anchor that cannot be this frame
+                const a = document.createElement("a");
+                a.href = u;
+                a.target = "_blank";
+                a.rel = "noopener noreferrer";
+                a.style.display = "none";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
+              setOauthAwaitingCode(true);
+              setClaudeSaveMsg(
+                "Claude should be in a NEW tab. Stay on this dashboard to paste CODE#STATE."
+              );
+            }}
+            style={{
+              display: "inline-block",
+              padding: "0.55rem 0.95rem",
+              borderRadius: "0.375rem",
+              background: "#059669",
+              color: "#fff",
+              fontWeight: 700,
+              fontSize: "0.85rem",
+              textDecoration: "none"
+            }}
+          >
+            Open Claude in a NEW tab ↗
+          </a>
+        ) : null}
+        <button
+          id="refresh-token-btn"
+          type="button"
+          disabled={claudeSaveBusy || sub?.source !== "dashboard"}
+          onClick={() => {
+            setClaudeSaveBusy(true);
+            setClaudeSaveMsg(null);
+            agent.stub
+              .refreshClaudeCodeSubscription()
+              .then((r) => {
+                const err = getResultErrorMessage(r);
+                if (err) {
+                  setClaudeSaveMsg(err);
+                  return;
+                }
+                setClaudeSaveMsg("Refreshed OAuth token.");
+              })
+              .catch((e: unknown) => setClaudeSaveMsg(errMsg(e)))
+              .finally(() => setClaudeSaveBusy(false));
+          }}
+          style={{
+            padding: "0.55rem 0.9rem",
+            border: "1px solid #d1d5db",
+            borderRadius: "0.375rem",
+            background: "#fff",
+            color: "#374151",
+            fontWeight: 600,
+            cursor:
+              claudeSaveBusy || sub?.source !== "dashboard"
+                ? "not-allowed"
+                : "pointer",
+            fontSize: "0.85rem",
+            opacity: sub?.source === "dashboard" ? 1 : 0.5
+          }}
+        >
+          Refresh token
+        </button>
+        <button
+          id="clear-token-btn"
+          type="button"
+          disabled={claudeSaveBusy || !sub?.configured}
+          onClick={() => {
+            setClaudeSaveBusy(true);
+            setClaudeSaveMsg(null);
+            agent.stub
+              .clearClaudeCodeSubscription()
+              .then((r) => {
+                const err = getResultErrorMessage(r);
+                if (err) {
+                  setClaudeSaveMsg(err);
+                  return;
+                }
+                setClaudeSaveMsg("Cleared dashboard token.");
+              })
+              .catch((e: unknown) => setClaudeSaveMsg(errMsg(e)))
+              .finally(() => setClaudeSaveBusy(false));
+          }}
+          style={{
+            padding: "0.55rem 0.9rem",
+            border: "1px solid #fecaca",
+            borderRadius: "0.375rem",
+            background: "#fff",
+            color: "#b91c1c",
+            fontWeight: 600,
+            cursor:
+              claudeSaveBusy || !sub?.configured ? "not-allowed" : "pointer",
+            fontSize: "0.85rem",
+            opacity: sub?.configured ? 1 : 0.5
+          }}
+        >
+          Clear token
+        </button>
+      </div>
+
+      {/* ONE paste field — CODE#STATE from Claude authorize page */}
+      <div
+        style={{
+          display: "flex",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: "0.5rem"
+        }}
+      >
+        <input
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          value={authCodeInput}
+          onChange={(e) => setAuthCodeInput(e.target.value)}
+          onPaste={(e) => {
+            const text = e.clipboardData.getData("text");
+            if (!text) return;
+            e.preventDefault();
+            const cleaned = text.replace(/\s+/g, "").trim();
+            setAuthCodeInput(cleaned);
+            // Auto-complete when paste looks like CODE#STATE
+            if (cleaned.includes("#") && cleaned.length > 40) {
+              completeOAuth(cleaned);
+            }
+          }}
+          placeholder={
+            oauthAwaitingCode
+              ? "Paste full CODE#STATE here (only this box)"
+              : "After Authorize → paste full CODE#STATE here (only this box)"
+          }
+          style={{
+            flex: "1 1 18rem",
+            minWidth: "16rem",
+            padding: "0.55rem 0.7rem",
+            border: oauthAwaitingCode
+              ? "2px solid #7c3aed"
+              : "1px solid #d1d5db",
+            borderRadius: "0.375rem",
+            fontSize: "0.85rem",
+            fontFamily: "ui-monospace, monospace"
+          }}
+        />
+        <button
+          type="button"
+          disabled={claudeSaveBusy || !authCodeInput.trim()}
+          onClick={() => completeOAuth()}
+          style={{
+            padding: "0.55rem 0.95rem",
+            border: "none",
+            borderRadius: "0.375rem",
+            background: "#5b21b6",
+            color: "#fff",
+            fontWeight: 600,
+            cursor:
+              claudeSaveBusy || !authCodeInput.trim()
+                ? "not-allowed"
+                : "pointer",
+            fontSize: "0.85rem",
+            opacity: claudeSaveBusy || !authCodeInput.trim() ? 0.6 : 1
+          }}
+        >
+          {claudeSaveBusy ? "Exchanging…" : "Complete authorization"}
+        </button>
+      </div>
+      <p
+        style={{
+          fontSize: "0.72rem",
+          color: "#6b7280",
+          margin: "0 0 0.35rem"
+        }}
+      >
+        Use only the field above. Example shape:{" "}
+        <code style={{ fontSize: "0.7rem" }}>
+          ZjWtui43…BMWgjhCF#nCiiv1A9…v1OUAcg
+        </code>{" "}
+        — the whole string including the <code>#</code>.
+      </p>
+
+      {(claudeSaveBusy || claudeSaveMsg) && (
+        <div
+          id={claudeSaveBusy ? "auth-loading" : "auth-error"}
+          style={{
+            fontSize: "0.8rem",
+            marginTop: "0.65rem",
+            color:
+              claudeSaveMsg?.startsWith("Authorized") ||
+              claudeSaveMsg?.startsWith("Saved") ||
+              claudeSaveMsg?.startsWith("Refreshed")
+                ? "#166534"
+                : claudeSaveMsg?.startsWith("Browser") ||
+                    claudeSaveMsg?.startsWith("Cleared")
+                  ? "#1e40af"
+                  : "#b45309"
+          }}
+        >
+          {claudeSaveBusy ? "Working…" : claudeSaveMsg}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [state, setState] = useState<SEOAgentState | null>(null);
   const [connected, setConnected] = useState(false);
   const [sheetInput, setSheetInput] = useState("");
+  const [claudeTokenInput, setClaudeTokenInput] = useState("");
+  const [claudeSaveBusy, setClaudeSaveBusy] = useState(false);
+  const [claudeSaveMsg, setClaudeSaveMsg] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [auditResult, setAuditResult] = useState<GenerateOneResult | null>(
     null
@@ -1341,6 +2021,18 @@ export default function Dashboard() {
             🔍 Scout Now
           </button>
         </div>
+
+        {/* ── Claude Code subscription (primary AI path) ───────────────── */}
+        <ClaudeCodeSubscriptionPanel
+          state={state}
+          agent={agent}
+          claudeTokenInput={claudeTokenInput}
+          setClaudeTokenInput={setClaudeTokenInput}
+          claudeSaveBusy={claudeSaveBusy}
+          setClaudeSaveBusy={setClaudeSaveBusy}
+          claudeSaveMsg={claudeSaveMsg}
+          setClaudeSaveMsg={setClaudeSaveMsg}
+        />
 
         {/* ── Generate 1 Article & Audit ─────────────────────────────────── */}
         <div

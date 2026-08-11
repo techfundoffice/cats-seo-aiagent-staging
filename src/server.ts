@@ -6,6 +6,26 @@ import {
   setRotatedOpenRouterKey
 } from "./pipeline/kimi-model";
 import {
+  CLAUDE_CODE_SECRET_KEY,
+  claudeCodeSubscriptionStatus,
+  configureClaudeCodeSubscription,
+  defaultExpiresAtMs,
+  getClaudeCodeCachedRecord,
+  parseClaudeCodeSubscriptionJson,
+  setClaudeCodePersistHandler,
+  validateClaudeCodeTokenInput,
+  type ClaudeCodeSubscriptionRecord
+} from "./pipeline/claude-code-subscription";
+import {
+  createClaudeOAuthPendingSession,
+  exchangeClaudeOAuthCode,
+  parseAuthorizationCodePaste,
+  refreshClaudeOAuthToken,
+  type ClaudeOAuthPendingSession
+} from "./pipeline/claude-oauth-flow";
+
+const CLAUDE_OAUTH_PENDING_KEY = "claude_code_oauth_pending";
+import {
   escalateToCodingAgent,
   isDurableObjectResetError,
   maybeEscalateParserError
@@ -1363,6 +1383,21 @@ export type SEOAgentState = {
     /** UTC ISO timestamp when these counters were last reset (DO instance start). */
     resetAt: string;
   };
+  /**
+   * Claude Code subscription status for the dashboard (never includes the
+   * raw token). When `active`, Claude is primary before OpenRouter / Workers AI.
+   */
+  claudeCodeSubscription?: {
+    configured: boolean;
+    active: boolean;
+    uiStatus?: "active" | "expiring_soon" | "expired" | "none";
+    expiresAt: string | null;
+    daysRemaining: number | null;
+    tokenLast4: string | null;
+    maskedToken?: string | null;
+    savedAt: string | null;
+    source: "dashboard" | "env" | null;
+  };
 };
 
 // ── Agent ────────────────────────────────────────────────────────────────────
@@ -1407,8 +1442,406 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       reasons: {},
       skipReasons: {},
       resetAt: new Date().toISOString()
+    },
+    claudeCodeSubscription: {
+      configured: false,
+      active: false,
+      uiStatus: "none",
+      expiresAt: null,
+      daysRemaining: null,
+      tokenLast4: null,
+      maskedToken: null,
+      savedAt: null,
+      source: null
     }
   };
+
+  /**
+   * Load Claude Code subscription token from DO SQL into the module cache
+   * and refresh `state.claudeCodeSubscription` (masked status only).
+   */
+  private hydrateClaudeCodeSubscriptionFromSql(): void {
+    // Persist tokens minted by the pipeline's on-401 auto-refresh, otherwise a
+    // refreshed access_token would be lost when the isolate recycles and every
+    // article would burn another refresh round-trip.
+    setClaudeCodePersistHandler((record) => {
+      this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+        VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
+        ON CONFLICT(key) DO UPDATE SET
+          value=excluded.value,
+          updated_at=excluded.updated_at`;
+      this.setState({
+        ...this.state,
+        claudeCodeSubscription: claudeCodeSubscriptionStatus(this.env)
+      });
+    });
+    try {
+      const rows = this.sql<{ value: string }>`
+        SELECT value FROM pipeline_secrets WHERE key=${CLAUDE_CODE_SECRET_KEY} LIMIT 1`;
+      const record = parseClaudeCodeSubscriptionJson(rows[0]?.value);
+      configureClaudeCodeSubscription(record, record ? "dashboard" : null);
+    } catch {
+      configureClaudeCodeSubscription(null);
+    }
+    this.setState({
+      ...this.state,
+      claudeCodeSubscription: claudeCodeSubscriptionStatus(this.env)
+    });
+  }
+
+  /** Soft rate limit — only blocks obvious spam, not normal retries. */
+  private _claudeTokenSaveAttempts: number[] = [];
+
+  private claudeTokenSaveRateLimited(): boolean {
+    const now = Date.now();
+    this._claudeTokenSaveAttempts = this._claudeTokenSaveAttempts.filter(
+      (t) => now - t < 30_000
+    );
+    if (this._claudeTokenSaveAttempts.length >= 12) return true;
+    this._claudeTokenSaveAttempts.push(now);
+    return false;
+  }
+
+  /**
+   * Start Claude Pro/Max OAuth (server-side PKCE). Prefer client-side
+   * createClaudeOAuthPendingSession + saveClaudeCodeOAuthPending so the
+   * browser can open the auth URL without waiting on this RPC.
+   */
+  @callable()
+  async startClaudeCodeOAuth() {
+    const { session, authUrl } = await createClaudeOAuthPendingSession();
+    this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+      VALUES (${CLAUDE_OAUTH_PENDING_KEY}, ${JSON.stringify(session)}, unixepoch())
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at`;
+    this.log(
+      "info",
+      "Claude Code OAuth: authorize URL issued — complete browser login, paste CODE or CODE#STATE back",
+      "orchestrator"
+    );
+    return {
+      success: true,
+      authUrl,
+      session,
+      instructions:
+        "Browser will open Claude authorize. After approving, copy the code shown (CODE or CODE#STATE) and paste it into Complete authorization."
+    };
+  }
+
+  /** Store PKCE session generated in the browser (so tab can open auth URL immediately). */
+  @callable()
+  async saveClaudeCodeOAuthPending(input: {
+    codeVerifier?: string;
+    state?: string;
+    createdAt?: number;
+  }) {
+    const codeVerifier = (input?.codeVerifier || "").trim();
+    const state = (input?.state || codeVerifier).trim();
+    if (codeVerifier.length < 20) {
+      return { error: "Invalid PKCE code_verifier" };
+    }
+    const session: ClaudeOAuthPendingSession = {
+      codeVerifier,
+      state: state || codeVerifier,
+      createdAt: input?.createdAt || Date.now()
+    };
+    this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+      VALUES (${CLAUDE_OAUTH_PENDING_KEY}, ${JSON.stringify(session)}, unixepoch())
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at`;
+    return { success: true };
+  }
+
+  /**
+   * Finish OAuth: exchange pasted `CODE#STATE` for access_token + refresh_token.
+   * Prefer `codeVerifier` from the browser sessionStorage (passed by the
+   * dashboard); fall back to DO pending or `#STATE` half of the paste.
+   */
+  /**
+   * Store tokens already exchanged (browser-side exchange preferred so we
+   * don't burn Anthropic's rate limit on the Worker IP).
+   */
+  @callable()
+  async storeClaudeOAuthTokens(input: {
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAtMs?: number;
+  }) {
+    const accessToken = (input?.accessToken || "").trim();
+    if (!accessToken || accessToken.length < 20) {
+      return { error: "accessToken required" };
+    }
+    const expiresAtMs =
+      typeof input?.expiresAtMs === "number" && input.expiresAtMs > Date.now()
+        ? input.expiresAtMs
+        : defaultExpiresAtMs();
+    const record: ClaudeCodeSubscriptionRecord = {
+      token: accessToken,
+      refreshToken: input?.refreshToken?.trim() || undefined,
+      expiresAtMs,
+      savedAt: new Date().toISOString()
+    };
+    this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+      VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at`;
+    this
+      .sql`DELETE FROM pipeline_secrets WHERE key=${CLAUDE_OAUTH_PENDING_KEY}`;
+    configureClaudeCodeSubscription(record, "dashboard");
+    const status = claudeCodeSubscriptionStatus(this.env);
+    this.setState({
+      ...this.state,
+      claudeCodeSubscription: status
+    });
+    this.log(
+      "info",
+      `Claude OAuth tokens stored (…${status.tokenLast4 ?? "????"}) — Claude is primary`,
+      "orchestrator"
+    );
+    return { success: true, claudeCodeSubscription: status };
+  }
+
+  @callable()
+  async completeClaudeCodeOAuth(input: {
+    code?: string;
+    /** Client-generated PKCE verifier (sessionStorage) — preferred */
+    codeVerifier?: string;
+    /** If browser already exchanged, skip server-side exchange */
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAtMs?: number;
+  }) {
+    // Prefer pre-exchanged tokens from the browser (avoids Worker IP 429s)
+    if (input?.accessToken && input.accessToken.trim().length >= 20) {
+      return this.storeClaudeOAuthTokens({
+        accessToken: input.accessToken,
+        refreshToken: input.refreshToken,
+        expiresAtMs: input.expiresAtMs
+      });
+    }
+
+    const pasted = (input?.code || "").replace(/\s+/g, "").trim();
+    if (!pasted) {
+      return {
+        error: "Paste CODE#STATE from the Claude page."
+      };
+    }
+    if (/^sk-ant-oat/i.test(pasted) || /^sk-ant-api/i.test(pasted)) {
+      return this.setClaudeCodeSubscription({ token: pasted });
+    }
+
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM pipeline_secrets WHERE key=${CLAUDE_OAUTH_PENDING_KEY} LIMIT 1`;
+    let pending: ClaudeOAuthPendingSession | null = null;
+    try {
+      pending = rows[0]?.value
+        ? (JSON.parse(rows[0].value) as ClaudeOAuthPendingSession)
+        : null;
+    } catch {
+      pending = null;
+    }
+
+    const { code, state } = parseAuthorizationCodePaste(pasted);
+    if (!code) {
+      return { error: "Could not parse CODE#STATE paste." };
+    }
+
+    const clientVerifier = (input?.codeVerifier || "").trim();
+    // Never treat OAuth state as code_verifier — they are independent.
+    const codeVerifier =
+      (clientVerifier.length >= 20 ? clientVerifier : "") ||
+      pending?.codeVerifier ||
+      "";
+    if (!codeVerifier) {
+      return {
+        error:
+          "Missing PKCE verifier. Click Authorize on this dashboard first, open Claude in a new tab, then paste CODE#STATE from that attempt."
+      };
+    }
+
+    try {
+      const tokens = await exchangeClaudeOAuthCode({
+        code,
+        codeVerifier,
+        state: state || pending?.state,
+        rawPaste: pasted
+      });
+      return this.storeClaudeOAuthTokens({
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresAtMs: tokens.expiresAtMs
+      });
+    } catch (e: unknown) {
+      const msg = errMsg(e);
+      this.log(
+        "warning",
+        `Claude OAuth token exchange failed: ${msg}`,
+        "orchestrator"
+      );
+      return { error: msg };
+    }
+  }
+
+  /**
+   * Dashboard: save Claude Code OAuth access token manually (fallback).
+   * Prefer startClaudeCodeOAuth + completeClaudeCodeOAuth.
+   */
+  @callable()
+  async setClaudeCodeSubscription(input: {
+    token?: string;
+    expiresAt?: string;
+  }) {
+    if (this.claudeTokenSaveRateLimited()) {
+      return {
+        error: "Too many token save attempts. Try again in 30–60 seconds."
+      };
+    }
+    const token = (input?.token || "").trim();
+    const validation = validateClaudeCodeTokenInput(token);
+    if (!validation.ok) {
+      return { error: validation.error ?? "Invalid token" };
+    }
+    let expiresAtMs = defaultExpiresAtMs();
+    const rawExp = (input?.expiresAt || "").trim();
+    if (rawExp) {
+      const parsed = Date.parse(rawExp);
+      if (!Number.isFinite(parsed)) {
+        return { error: "expiresAt must be a valid ISO-8601 date" };
+      }
+      if (parsed <= Date.now()) {
+        return { error: "expiresAt must be in the future" };
+      }
+      expiresAtMs = parsed;
+    }
+    const record: ClaudeCodeSubscriptionRecord = {
+      token,
+      expiresAtMs,
+      savedAt: new Date().toISOString()
+    };
+    this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+      VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at`;
+    configureClaudeCodeSubscription(record, "dashboard");
+    const status = claudeCodeSubscriptionStatus(this.env);
+    this.setState({
+      ...this.state,
+      claudeCodeSubscription: status
+    });
+    this.log(
+      "info",
+      `Claude Code OAuth setup-token saved (…${status.tokenLast4 ?? "????"}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is primary before OpenRouter/Workers AI`,
+      "orchestrator"
+    );
+    return {
+      success: true,
+      claudeCodeSubscription: status,
+      warning: validation.warning
+    };
+  }
+
+  /**
+   * Refresh Claude OAuth access_token via refresh_token when available;
+   * otherwise extend local expiry only.
+   */
+  @callable()
+  async refreshClaudeCodeSubscription() {
+    this.hydrateClaudeCodeSubscriptionFromSql();
+    const current = getClaudeCodeCachedRecord();
+    if (!current?.token) {
+      return {
+        error:
+          "No dashboard token to refresh. Click Authorize Claude Code first. (Env-only tokens cannot be refreshed here.)"
+      };
+    }
+    if (current.refreshToken) {
+      try {
+        const tokens = await refreshClaudeOAuthToken(current.refreshToken);
+        const record: ClaudeCodeSubscriptionRecord = {
+          token: tokens.accessToken,
+          refreshToken: tokens.refreshToken ?? current.refreshToken,
+          expiresAtMs: tokens.expiresAtMs,
+          savedAt: new Date().toISOString()
+        };
+        this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+          VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
+          ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            updated_at=excluded.updated_at`;
+        configureClaudeCodeSubscription(record, "dashboard");
+        const status = claudeCodeSubscriptionStatus(this.env);
+        this.setState({
+          ...this.state,
+          claudeCodeSubscription: status
+        });
+        this.log(
+          "info",
+          `Claude OAuth refresh_token exchange ok (…${status.tokenLast4 ?? "????"})`,
+          "orchestrator"
+        );
+        return { success: true, claudeCodeSubscription: status };
+      } catch (e: unknown) {
+        return {
+          error: `OAuth refresh failed: ${errMsg(e)}. Click Authorize Claude Code again.`
+        };
+      }
+    }
+    const record: ClaudeCodeSubscriptionRecord = {
+      token: current.token,
+      refreshToken: current.refreshToken,
+      expiresAtMs: defaultExpiresAtMs(),
+      savedAt: new Date().toISOString()
+    };
+    this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+      VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at`;
+    configureClaudeCodeSubscription(record, "dashboard");
+    const status = claudeCodeSubscriptionStatus(this.env);
+    this.setState({
+      ...this.state,
+      claudeCodeSubscription: status
+    });
+    this.log(
+      "info",
+      `Claude Code local expiry extended to ${status.expiresAt ?? "n/a"} (no refresh_token on file)`,
+      "orchestrator"
+    );
+    return { success: true, claudeCodeSubscription: status };
+  }
+
+  /** Dashboard: remove the stored Claude Code token (env secret still applies if set). */
+  @callable()
+  async clearClaudeCodeSubscription() {
+    this.sql`DELETE FROM pipeline_secrets WHERE key=${CLAUDE_CODE_SECRET_KEY}`;
+    configureClaudeCodeSubscription(null);
+    const status = claudeCodeSubscriptionStatus(this.env);
+    this.setState({
+      ...this.state,
+      claudeCodeSubscription: status
+    });
+    this.log(
+      "info",
+      "Claude Code subscription cleared from dashboard storage",
+      "orchestrator"
+    );
+    return { success: true, claudeCodeSubscription: status };
+  }
+
+  /** Masked status only — for REST clients / dashboard refresh. */
+  @callable()
+  async getClaudeCodeSubscriptionStatus() {
+    this.hydrateClaudeCodeSubscriptionFromSql();
+    return {
+      success: true,
+      claudeCodeSubscription: claudeCodeSubscriptionStatus(this.env)
+    };
+  }
 
   /**
    * Transient in-memory buffer for QC prompt cells that must be attached to
