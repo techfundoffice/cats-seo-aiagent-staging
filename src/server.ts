@@ -8950,7 +8950,7 @@ export default {
           status: 204,
           headers: cors
         });
-      } catch (err: unknown) {
+      } catch (_err: unknown) {
         return new Response(JSON.stringify({ ok: false }), {
           status: 204,
           headers: {
