@@ -139,13 +139,13 @@ const COPY_CALL_TIMEOUT_MS = 90_000;
 
 function decodeEntities(s: string): string {
   return s
-    .replace(/</g, "<")
-    .replace(/>/g, ">")
-    .replace(/"/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
     .replace(/&#0?39;/g, "'")
-    .replace(/'/g, "'")
+    .replace(/&apos;/g, "'")
     .replace(/&nbsp;/g, " ")
-    .replace(/&/g, "&");
+    .replace(/&amp;/g, "&");
 }
 
 function stripTags(s: string): string {
