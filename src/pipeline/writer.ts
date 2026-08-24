@@ -200,6 +200,22 @@ export interface ArticleResult {
    * Step 24 — RSS Feed Syndication: canonical feed URL after update.
    */
   rssFeedUrl?: string;
+  /**
+   * Final: Production Publish — the catsluvus.com URL this article was
+   * promoted to. Set only when the prod publish succeeded; `url` (the
+   * staging workers.dev URL) only 301s here afterwards, so this is the
+   * address that actually serves the article to readers and crawlers.
+   */
+  prodUrl?: string;
+  /**
+   * Final: Production Publish outcome. `"published-prod"` means the
+   * article cleared PROD_PUBLISH_MIN_SCORE and is live on the money
+   * site; `"staging-only"` means it is reachable on the staging host
+   * and nowhere else (below the bar, or the promotion failed). The
+   * dashboard needs this to stop advertising staging-only articles as
+   * "live" — see the Published Article Log panel in src/app.tsx.
+   */
+  promotionStatus?: "published-prod" | "staging-only";
 }
 
 /**
@@ -3975,6 +3991,12 @@ async function generateArticleUnsafe(
     const prodPublishMinScore = Number.isFinite(Number(prodPublishMinScoreRaw))
       ? Number(prodPublishMinScoreRaw ?? 90)
       : 90;
+    // Captured for the ArticleResult so the dashboard can link readers at
+    // the URL that actually serves the article. `url` is the staging host;
+    // after a successful promotion it only 301s to `prodUrl`, and when the
+    // promotion is skipped the article never reaches catsluvus.com at all.
+    let prodUrl: string | undefined;
+    let promotionStatus: "published-prod" | "staging-only" = "staging-only";
     if (seoResult.score >= prodPublishMinScore) {
       try {
         const { publishArticleToProduction } = await import("./prod-publish");
@@ -3986,6 +4008,8 @@ async function generateArticleUnsafe(
           false
         );
         if (prodPublish.ok) {
+          prodUrl = prodPublish.prodUrl;
+          promotionStatus = "published-prod";
           agent.log(
             "info",
             `${(prodPublish.trustBoxRemoved ?? 0) > 0 ? `⚠️ Removed ${prodPublish.trustBoxRemoved} hallucinated "Why You Should Trust Us" block(s) at the prod boundary — the template no longer emits one. | ` : ""}${(prodPublish.ftcRemoved ?? 0) > 0 ? `⚠️ FTC gate excised ${prodPublish.ftcRemoved} fabricated-claim sentence(s) at the prod boundary — a post-Step-14.7 model rewrite reintroduced them. Sample: "${prodPublish.ftcSample ?? ""}" | ` : ""}✅ Production publish: ${prodPublish.prodUrl} (score ${seoResult.score} ≥ ${prodPublishMinScore}; ${prodPublish.replacements} host refs rewritten; indexes cat=${prodPublish.indexes?.category} global=${prodPublish.indexes?.global}; staging URL now 301s)`,
@@ -4088,7 +4112,9 @@ async function generateArticleUnsafe(
         ...(sissDelta != null ? { sissDelta } : {}),
         ...(sissRemediated != null ? { sissRemediated } : {}),
         ...(reverseLinksInjected > 0 ? { reverseLinksInjected } : {}),
-        ...(rssFeedUrl != null ? { rssFeedUrl } : {})
+        ...(rssFeedUrl != null ? { rssFeedUrl } : {}),
+        ...(prodUrl != null && prodUrl !== "" ? { prodUrl } : {}),
+        promotionStatus
       }
     );
   });

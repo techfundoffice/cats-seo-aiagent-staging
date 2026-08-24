@@ -22,6 +22,7 @@ import {
 import { degradedProviders } from "./externalProviderHealth";
 import { filterObjectArrayEntries, parseJsonStringValue } from "./objectLike";
 import { computeObserverHealth } from "./observerHealth";
+import { resolvePublishedArticleLink } from "./publishedArticleLiveLink";
 import { errMsg, normalizeSingleLine } from "./pipeline/http-utils";
 import type {
   ActivityLogEntry,
@@ -6468,7 +6469,16 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
 // articles, newest first. Reads `state.recentPublishedArticles`, populated
 // from the success block in server.ts where `articlesGenerated` increments.
 // One row per article: keyword, category, SEO score, word count, published
-// timestamp, and direct links to the live page + KV admin endpoint.
+// timestamp, a Live column, and direct links to the live page + KV admin
+// endpoint.
+//
+// The "live" link deliberately prefers `prodUrl` (catsluvus.com) over `url`
+// (the staging workers.dev host). After a successful promotion the staging
+// URL is a tombstone that only 301s to production, and an article that never
+// cleared PROD_PUBLISH_MIN_SCORE is not on catsluvus.com at all — it 404s
+// there. Linking `url` for both cases made every row look shipped while
+// roughly a quarter of them were staging-only, so the Live column now states
+// which of the two an article actually is.
 function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
   const rows = state.recentPublishedArticles ?? [];
 
@@ -6517,8 +6527,12 @@ function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
             }}
           >
             Last {rows.length === 0 ? "50" : rows.length} published articles,
-            newest first. SEO score ≥70 is a pass; click the URL to load the
-            live page or the kvKey to fetch the raw HTML via /api/admin/kv.
+            newest first. SEO score ≥70 is a pass. <b>Live</b> says where the
+            article actually serves: <code>prod</code> = promoted to
+            catsluvus.com, <code>staging only</code> = it never cleared
+            PROD_PUBLISH_MIN_SCORE and 404s on catsluvus.com. The link opens
+            whichever of the two is real; <code>kv</code> fetches the raw HTML
+            via /api/admin/kv.
           </p>
         </div>
         <div
@@ -6606,13 +6620,16 @@ function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
                 >
                   Words
                 </th>
-                <th style={{ padding: "0.5rem 0.625rem", width: "20%" }}>
+                <th style={{ padding: "0.5rem 0.625rem", width: "16%" }}>
                   Published
+                </th>
+                <th style={{ padding: "0.5rem 0.625rem", width: "12%" }}>
+                  Live
                 </th>
                 <th
                   style={{
                     padding: "0.5rem 1.25rem 0.5rem 0.625rem",
-                    width: "18%"
+                    width: "10%"
                   }}
                 >
                   Links
@@ -6626,6 +6643,11 @@ function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
                 const ts = r.publishedAt
                   ? new Date(r.publishedAt).toLocaleString()
                   : "—";
+                const {
+                  promoted,
+                  promotionKnown,
+                  href: liveHref
+                } = resolvePublishedArticleLink(r);
                 return (
                   <tr
                     key={`${r.kvKey || r.url}-${r.publishedAt}`}
@@ -6688,21 +6710,60 @@ function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
                     </td>
                     <td
                       style={{
+                        padding: "0.5rem 0.625rem",
+                        whiteSpace: "nowrap"
+                      }}
+                      title={
+                        promoted
+                          ? `Promoted to production — serving at ${r.prodUrl || "catsluvus.com"}`
+                          : promotionKnown
+                            ? "Staging-only: below PROD_PUBLISH_MIN_SCORE (or the promotion failed). This article 404s on catsluvus.com."
+                            : "Published before promotion tracking existed — promotion state unknown."
+                      }
+                    >
+                      <span
+                        style={{
+                          fontSize: "0.6875rem",
+                          fontWeight: 600,
+                          padding: "0.125rem 0.375rem",
+                          borderRadius: "0.25rem",
+                          background: promoted
+                            ? "#d1fae5"
+                            : promotionKnown
+                              ? "#fee2e2"
+                              : "#f3f4f6",
+                          color: promoted
+                            ? "#065f46"
+                            : promotionKnown
+                              ? "#991b1b"
+                              : "#6b7280"
+                        }}
+                      >
+                        {promoted
+                          ? "prod"
+                          : promotionKnown
+                            ? "staging only"
+                            : "unknown"}
+                      </span>
+                    </td>
+                    <td
+                      style={{
                         padding: "0.5rem 1.25rem 0.5rem 0.625rem",
                         whiteSpace: "nowrap"
                       }}
                     >
-                      {r.url ? (
+                      {liveHref ? (
                         <a
-                          href={r.url}
+                          href={liveHref}
                           target="_blank"
                           rel="noreferrer noopener"
+                          title={liveHref}
                           style={{
-                            color: "#2563eb",
+                            color: promoted ? "#2563eb" : "#b45309",
                             marginRight: "0.75rem"
                           }}
                         >
-                          live
+                          {promoted ? "live" : "staging"}
                         </a>
                       ) : null}
                       {r.kvKey ? (
