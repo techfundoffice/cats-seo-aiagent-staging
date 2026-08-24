@@ -1349,11 +1349,28 @@ export type SEOAgentState = {
     slug: string;
     keyword: string;
     categorySlug: string;
+    /**
+     * Staging (workers.dev) URL. After a successful promotion this only
+     * 301s to `prodUrl`; when the article stayed staging-only it is the
+     * ONLY place the article exists. Never render it as "live".
+     */
     url: string;
     kvKey: string;
     seoScore: number;
     wordCount: number;
     publishedAt: number;
+    /**
+     * catsluvus.com URL, set when the article cleared
+     * PROD_PUBLISH_MIN_SCORE and shipped. Optional: rows written before
+     * this field existed, and every staging-only row, omit it.
+     */
+    prodUrl?: string;
+    /**
+     * Whether this article reached the money site. Absent on legacy rows
+     * (treated as unknown by the dashboard, which then falls back to the
+     * presence of `prodUrl`).
+     */
+    promotionStatus?: "published-prod" | "staging-only";
   }>;
   /**
    * Counters for the post-publish Editorial Agent rewrite loop. Mirrored
@@ -3170,7 +3187,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           kvKey: result.kvKey ?? "",
           seoScore: result.seoScore ?? 0,
           wordCount: result.wordCount ?? 0,
-          publishedAt: Date.now()
+          publishedAt: Date.now(),
+          ...(result.prodUrl ? { prodUrl: result.prodUrl } : {}),
+          promotionStatus: result.promotionStatus ?? "staging-only"
         };
         const nextRecentPublished = [
           publishedRow,
@@ -4244,7 +4263,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
               kvKey: result.kvKey ?? "",
               seoScore: result.seoScore ?? 0,
               wordCount: result.wordCount ?? 0,
-              publishedAt: Date.now()
+              publishedAt: Date.now(),
+              ...(result.prodUrl ? { prodUrl: result.prodUrl } : {}),
+              promotionStatus: result.promotionStatus ?? "staging-only"
             };
             const nextRecentPublished = [
               publishedRow,
@@ -6499,7 +6520,8 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
         const ledger = await db
           .prepare(
-            `SELECT kv_key, keyword, url, seo_score, word_count, published_at
+            `SELECT kv_key, keyword, url, seo_score, word_count, published_at,
+                    promotion_status, prod_url
                FROM article_ledger ORDER BY published_at DESC LIMIT 50`
           )
           .all<Record<string, unknown>>();
@@ -6511,6 +6533,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           const kvKey = String(row.kv_key ?? "");
           if (!kvKey || seen.has(kvKey)) continue;
           const m = kvKey.match(/^([^:]+):(.+)$/);
+          const ledgerProdUrl = String(row.prod_url ?? "");
+          const promoted =
+            String(row.promotion_status ?? "") === "published-prod";
           merged.push({
             slug: m?.[2] ?? kvKey,
             keyword: String(row.keyword ?? ""),
@@ -6519,7 +6544,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             kvKey,
             seoScore: Number(row.seo_score ?? 0),
             wordCount: Number(row.word_count ?? 0),
-            publishedAt: Date.parse(`${row.published_at}Z`) || Date.now()
+            publishedAt: Date.parse(`${row.published_at}Z`) || Date.now(),
+            ...(ledgerProdUrl ? { prodUrl: ledgerProdUrl } : {}),
+            promotionStatus: promoted ? "published-prod" : "staging-only"
           });
           seen.add(kvKey);
           added++;
