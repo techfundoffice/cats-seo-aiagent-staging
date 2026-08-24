@@ -1016,6 +1016,58 @@ export function dedupeProducts(products: AmazonProduct[]): AmazonProduct[] {
   return out;
 }
 
+/**
+ * Review-signal score for one product: rating × log10(reviews + 1), plus a
+ * small nudge for a real ASIN.
+ *
+ * The log gives review count diminishing returns — each 10× more reviews
+ * adds one unit of multiplier, so 100 → 1,000 counts for as much as
+ * 1,000 → 10,000 — while rating scales the whole score linearly. A large
+ * enough review gap still outranks a better rating (4.2★ × 40,000 reviews
+ * beats 4.8★ × 3,000), which is intended: at that spread the popular
+ * listing is the safer single pick. The ASIN nudge breaks ties toward a
+ * product we can deep-link (`/dp/<asin>`) instead of one that degrades to
+ * an Amazon search URL. `ratingValue` (numeric, from PA API / Creators
+ * API) wins over the scraped `rating` string when both are present.
+ */
+export function reviewSignalScore(product: AmazonProduct): number {
+  const rating =
+    typeof product.ratingValue === "number" && product.ratingValue > 0
+      ? product.ratingValue
+      : Math.min(parseFloat(String(product.rating || "0")) || 0, 5);
+  const reviews =
+    typeof product.reviewCount === "number" && product.reviewCount > 0
+      ? product.reviewCount
+      : 0;
+  return rating * Math.log10(reviews + 1) + (product.asin ? 0.05 : 0);
+}
+
+/**
+ * Single-product specialization: each article features EXACTLY ONE product
+ * — the highest review-signal candidate after dedupe — and the copy is
+ * written entirely around it (see the SINGLE-PRODUCT directive in
+ * `buildArticlePrompt`). Multi-pick roundups are retired on staging.
+ *
+ * This lives here, tested, rather than inline in the pipeline because the
+ * cut has been lost once already: it shipped inline, and a later
+ * "restore multi-pick (up to 5)" commit silently reverted articles to
+ * five-SKU roundups. One exported function is the thing a test can pin.
+ *
+ * `dropped` is the number of ranked-but-unused candidates, for logging.
+ */
+export function selectFeaturedProducts(products: AmazonProduct[]): {
+  featured: AmazonProduct[];
+  dropped: number;
+} {
+  if (products.length <= 1) return { featured: products, dropped: 0 };
+  // Stable sort: equal scores keep their incoming (tier) order, so the
+  // selection is deterministic for a given product list.
+  const ranked = [...products].sort(
+    (a, b) => reviewSignalScore(b) - reviewSignalScore(a)
+  );
+  return { featured: ranked.slice(0, 1), dropped: ranked.length - 1 };
+}
+
 // ── Price hydration removed ─────────────────────────────────────────────────
 // We do NOT fetch prices anywhere in the pipeline. Amazon Associates
 // compliance forbids displayed prices, and even handing prices to the

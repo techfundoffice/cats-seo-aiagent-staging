@@ -1,306 +1,369 @@
-# CLAUDE.md — Development Rules
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this repo is
+
+A Cloudflare Worker that autonomously researches, writes, QCs, publishes, and
+distributes SEO articles for `catsluvus.com`. One Durable Object
+(`SEOArticleAgent`) owns the whole lifecycle; a React dashboard (`src/app.tsx`)
+drives it over Agents-SDK RPC.
+
+**This is the STAGING repo** (`cats-seo-aiagent-staging`), split from
+`techfundoffice/cats-seo-aiagent-cloudflare`. `src/` matches production at the
+split point; only deploy config and the resources it binds differ. Every
+stateful binding (KV / D1 / R2 / queue) points at a **fresh** staging resource,
+so this Worker never reads or writes production data. See `STAGING-REPO.md` for
+the binding IDs and the required GitHub Actions secrets.
+
+Two staging-specific differences worth knowing before you debug something that
+"should" work:
+
+- No `PETINSURANCE` service binding (`env.d.ts` types it optional). The Step 14
+  live-URL probe falls back to a public fetch.
+- `GITHUB_TOKEN_SECRET` is deliberately unset, so the autonomous coding-agent
+  escalation (§ Autonomous Coding Agent Loop) stays dormant here — no issues
+  opened, no Copilot assigned.
+
+`README.md` is leftover from the `cloudflare/agents-starter` template and does
+**not** describe this project. Ignore it. `AGENT_CONTEXT.md` and
+`CODEBASE_ANALYSIS.md` are longer prose references carried over from the prod
+repo; parts (Composio, "15-step pipeline") are stale — this file wins.
+
+## Commands
+
+```bash
+npm run dev        # vite dev — local Worker + dashboard
+npm run check      # oxfmt --check . && oxlint src/ && tsc && vitest run  ← run before EVERY commit
+npm run format     # oxfmt --write .   (printWidth 80, trailingComma none)
+npm run lint       # oxlint src/
+npm test           # vitest run
+npm run bench      # vitest bench --run
+npm run types      # regenerate env.d.ts from wrangler.jsonc bindings
+npm run deploy     # vite build && wrangler deploy  (manual — see § Deploy)
+```
+
+Single test / filtered runs:
+
+```bash
+npx vitest run src/pipeline/__tests__/seo-score.test.ts
+npx vitest run -t "rejects degenerate keywords"     # by test name
+npx vitest src/pipeline/__tests__/traffic-sources.test.ts   # watch mode
+```
+
+Vitest is `environment: "node"`, `include: ["src/**/*.test.ts"]` — no jsdom, no
+`@cloudflare/vitest-pool-workers`. Tests target **pure helpers only**; anything
+that needs the Workers runtime or a DO is not unit-testable here, so extract the
+logic into a pure function and test that.
+
+Formatting/lint are enforced in CI (`sanity-check.yml` runs `npx oxfmt --write .`
+then `npm run check` on every push and PR to `main`), so a formatting miss fails
+the required `check (ubuntu-24.04)` status.
+
+## Deploy
+
+- **Push to `main` → `.github/workflows/deploy.yml`** (`npm ci` → `npm run check`
+  → `npx vite build` → `npx wrangler deploy`, plus a Doppler →
+  `wrangler secret bulk` step). This is the only supported release path.
+  Nothing is verified until it deploys, so do not leave work sitting on an
+  unmerged branch.
+- **Manual `npx vite build && npx wrangler deploy`** is for bypassing CI or
+  recovering a failed deploy only — never the default loop.
+- **Never add a `routes`/`route` array to `wrangler.jsonc`.** `catsluvus.com/*/*`
+  is invalid for the Routes API (error 10022 — wildcards only at hostname start
+  or path end), and `catsluvus.com/*` collides with the consumer Worker on the
+  zone (10020). This Worker _writes_ KV; other Workers serve article URLs from
+  the same KV. Production `.txt`/IndexNow routes belong in the Cloudflare
+  dashboard. (`.cursor/rules/wrangler-no-zone-routes.mdc`)
 
 ## Secrets: every token lives in Doppler
 
-**There is no other source of truth.** Every credential this project uses —
-`ADMIN_API_TOKEN`, `PAGESPEED_API_KEY`, `CLOUDFLARE_API_TOKEN`,
-`OPENROUTER_API_KEY`, `GITHUB_TOKEN_SECRET`, all of them — lives in Doppler. Do
-not ask the user to paste a token, do not assume a credential does not exist
-because it is absent from the environment, and never hardcode one.
+**There is no other source of truth.** `ADMIN_API_TOKEN`, `PAGESPEED_API_KEY`,
+`CLOUDFLARE_API_TOKEN`, `OPENROUTER_API_KEY`, `GITHUB_TOKEN_SECRET` — all of
+them. Never ask the user to paste a token, never assume a credential doesn't
+exist because it's absent from the environment, never hardcode one.
 
-- **Project:** `replit-n8n-catsluvus` — **Config:** `prd` (the only project and
-  the only config)
+**Project `replit-n8n-catsluvus`, config `prd`** — the only project, the only
+config.
 
 ```bash
 doppler secrets get <KEY> --plain --no-read-env \
   --project replit-n8n-catsluvus --config prd
 ```
 
-**A sandbox session usually cannot reach Doppler on its own.** These containers
-ship with no `doppler` CLI, no `DOPPLER_TOKEN` in the environment, and no
-`.claude/secrets.env`. Check before assuming either way:
+A sandbox session usually **cannot** reach Doppler: no `doppler` CLI, no
+`DOPPLER_TOKEN`. Check first — `which doppler; env | grep -i doppler`. If it's
+unreachable, say so plainly and name the specific secret that is blocking you;
+that's a one-step fix for the user, not a reason to call the task impossible or
+invent a workaround. With a `DOPPLER_TOKEN` present, prefer the CLI; the REST
+API (`https://api.doppler.com/v3/configs/config/secret`) is the fallback — the
+Worker already uses it in `SEOArticleAgent.rotateOpenRouterKeyFromDoppler()`
+(`src/server.ts`), triggered from `src/pipeline/kimi-model.ts` on a 401.
+
+**Composio was removed from this repo on 2026-07-22.** No `@composio/*` deps, no
+`.mcp.json`, no `COMPOSIO_API_KEY`. Anything you find referencing
+`composio tool run doppler …` or Rube MCP is dead prod-repo history. Direct
+replacements: Google Sheets mirror → `src/pipeline/google-sheets-direct.ts`
+(service account via `GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON`); Doppler reads → REST
+API via the `DOPPLER_TOKEN` Worker secret; screenshots → Cloudflare Browser
+Rendering via `CLOUDFLARE_API_TOKEN_SECRET`; Quora posting → permanently
+dry-run (no public API).
+
+### Cloudflare Worker secret writes
+
+No MCP tool exposes Worker secret writes. The pattern (Worker must already be
+deployed):
 
 ```bash
-which doppler; env | grep -i doppler
-```
-
-If Doppler is unreachable, say so plainly and name the specific secret that is
-blocking you — that is a missing-access problem the user can fix in one step, not
-a reason to call the task impossible or to invent a workaround. Once a
-`DOPPLER_TOKEN` is present, prefer the CLI above; the Doppler REST API
-(`https://api.doppler.com/v3/configs/config/secret`) is the fallback. The Worker
-already uses it for the OpenRouter key self-heal: the REST call lives in
-`SEOArticleAgent.rotateOpenRouterKeyFromDoppler()` (`src/server.ts`), triggered
-from `src/pipeline/kimi-model.ts` when a 401 is detected.
-
-> Everything under **§ Sandbox Bootstrap (LEGACY)** and **§ Connected Composio
-> Toolkits (LEGACY)** below is dead in this repo — including every
-> `composio tool run doppler …` snippet. Composio was removed on 2026-07-22.
-> Those sections are retained only as prod-repo history; do not run anything in
-> them.
-
-> **⚠️ STAGING REPO — COMPOSIO REMOVED (2026-07-22).** This repo no longer
-> uses Composio anywhere: no `@composio/*` deps, no `.mcp.json`, no
-> `COMPOSIO_API_KEY`. Direct integrations replace it:
->
-> - **Google Sheets mirror** → `src/pipeline/google-sheets-direct.ts`
->   (service account via `GOOGLE_CLOUD_SERVICE_ACCOUNT_JSON`)
-> - **Doppler reads** (OpenRouter key self-heal) → Doppler REST API via
->   `DOPPLER_TOKEN` worker secret
-> - **Editorial screenshots** → Cloudflare Browser Rendering via
->   `CLOUDFLARE_API_TOKEN_SECRET`
-> - **Quora posting** → permanently dry-run (no public Quora API)
->   Sections below that mention Composio/Rube bootstrap are legacy prod-repo
->   context — do not follow them in this repo.
-
-## Sandbox Bootstrap (LEGACY — Composio removed, do not follow)
-
-> **None of this section works in this repo.** There is no `.mcp.json`, no
-> `COMPOSIO_API_KEY`, and no `.claude/secrets.env`. It is kept as prod-repo
-> history. For secrets, see § Secrets at the top of this file.
-
-**Every new Claude session running in this repo auto-connects to Composio via `.mcp.json` at the repo root.** That file maps to `https://connect.composio.dev/mcp` with `x-consumer-api-key: ${COMPOSIO_API_KEY}` — this is the official post-Rube endpoint, protocol version `2024-11-05`. After the bootstrap below, Composio tools are available in-session without any CLI.
-
-```bash
-source .claude/secrets.env                                    # loads COMPOSIO_API_KEY (gitignored file)
-# MCP server at https://connect.composio.dev/mcp is now live for this
-# session via .mcp.json env-var interpolation. No `composio` CLI needed.
-```
-
-**Verification.** A single JSON-RPC `initialize` call confirms the MCP endpoint is alive and your key is valid:
-
-```bash
-curl -sS -X POST \
-  -H "x-consumer-api-key: $COMPOSIO_API_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
-  "https://connect.composio.dev/mcp"
-# 200 + `event: message` / `"serverInfo":{"name":"mcp-typescript server on vercel"}` = good
-# 401 = key dead, ask user for a fresh one; do NOT silently continue.
-```
-
-The secrets file `.claude/secrets.env` is gitignored and must be created by pasting a valid `COMPOSIO_API_KEY` (format: `ck_...`). Doppler-via-Composio is the source of truth for every other secret.
-
-**Optional (post-Rube Doppler CLI path):**
-
-```bash
-curl -Ls https://cli.doppler.com/install.sh | sudo sh    # no-op if already installed
-```
-
-Doppler CLI is only needed if a script wants `doppler run --` style subprocess env injection. For one-off secret fetches, call the Composio Doppler tools directly (the MCP auto-loads them).
-
-### Pulling any Doppler secret
-
-Project: `replit-n8n-catsluvus`. Only config: `prd`. Bash one-liner sessions reuse:
-
-```bash
-composio tool run doppler DOPPLER_SECRETS_GET --project replit-n8n-catsluvus --config prd --name <KEY>
-# or, equivalent via Rube MCP in-session:
-#   RUBE_MULTI_EXECUTE_TOOL → DOPPLER_SECRETS_GET { project, config, name }
-```
-
-## Connected Composio Toolkits (LEGACY — not available in this repo)
-
-> Historical inventory from the prod repo. Composio is gone here, so none of
-> these toolkits are reachable. Secrets come from Doppler directly (§ Secrets).
-
-Inventory verified on 2026-04-22. Active toolkits can be used immediately with no further auth.
-
-| Toolkit              | Status                                 | Useful tools                                                                                                                                                                                                                     | Notes                                                                                                                                                                                             |
-| -------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `doppler`            | ✅ ACTIVE (workplace `techfundoffice`) | `DOPPLER_AUTH_ME`, `DOPPLER_PROJECTS_LIST`, `DOPPLER_CONFIGS_LIST`, `DOPPLER_SECRETS_NAMES`, `DOPPLER_SECRETS_GET`, `DOPPLER_SECRETS_LIST`                                                                                       | All project secrets live here. Only project: `replit-n8n-catsluvus`, only config: `prd`.                                                                                                          |
-| `github`             | ✅ ACTIVE (user `techfundoffice`)      | `GITHUB_CREATE_OR_UPDATE_A_REPOSITORY_SECRET` (requires libsodium sealed-box encrypt — `npm i --no-save libsodium-wrappers`), `GITHUB_GET_A_REPOSITORY_PUBLIC_KEY`, `GITHUB_LIST_REPOSITORY_SECRETS`, plus PR/issue/commit tools | Use for repo-secret management; don't rely on `gh` CLI (not installed).                                                                                                                           |
-| `firecrawl`          | ✅ ACTIVE (~999k credits)              | `FIRECRAWL_SCRAPE`                                                                                                                                                                                                               | Connected but currently unused. Live `catsluvus.com/<slug>` rendering is done via `GET /api/admin/render` (Cloudflare Browser Rendering `/content`). Keep for future off-site competitor scrapes. |
-| `apify`              | ✅ ACTIVE                              | `APIFY_*`                                                                                                                                                                                                                        | Apify actor runs + their own KV stores (not Cloudflare KV).                                                                                                                                       |
-| `cloudflare`         | ❌ NOT CONNECTED                       | zone/DNS/WAF only                                                                                                                                                                                                                | Even when connected, does NOT expose worker secret writes. For CF worker secrets use the pattern in § Cloudflare Worker Secret Management below.                                                  |
-| `cloudflare_api_key` | ❌ NOT CONNECTED                       | DNSSEC/rulesets only                                                                                                                                                                                                             | Same limitation.                                                                                                                                                                                  |
-
-**Native (non-Composio) Cloudflare MCP in-sandbox** (`mcp__8fea7797*`): read-only on Workers (`workers_list`, `workers_get_worker`, `workers_get_worker_code`), full CRUD on D1/KV/R2/Hyperdrive, **no secret writes**.
-
-**Rube MCP sunset: 2026-05-15.** Already migrated — the checked-in `.mcp.json` points every session at `https://connect.composio.dev/mcp` (official Composio MCP) authenticated with `${COMPOSIO_API_KEY}` from `.claude/secrets.env`. Same toolkits, different entrypoint. The `mcp__1ef630dd-*__RUBE_*` tools still work in current sessions but will disappear after the sunset; prefer the Composio-branded tools when both are available.
-
-## Cloudflare Worker Secret Management
-
-No MCP tool exposes worker secret writes. The pattern sessions use:
-
-```bash
-# Pull CF creds from Doppler-via-Composio (drop to RUBE_MULTI_EXECUTE_TOOL if composio CLI is unavailable)
-CF_ACCOUNT=$(composio tool run doppler DOPPLER_SECRETS_GET --project replit-n8n-catsluvus --config prd --name CLOUDFLARE_ACCOUNT_ID --json | jq -r .data.value.raw)
-CF_TOKEN=$(composio tool run doppler DOPPLER_SECRETS_GET --project replit-n8n-catsluvus --config prd --name CLOUDFLARE_API_TOKEN --json | jq -r .data.value.raw)
-
-# PUT the secret (worker must already be deployed)
 curl -sS -X PUT \
-  "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/workers/scripts/cats-seo-aiagent/secrets" \
-  -H "Authorization: Bearer $CF_TOKEN" \
-  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/workers/scripts/cats-seo-aiagent-staging/secrets" \
+  -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"<NAME>","text":"<VALUE>","type":"secret_text"}'
 ```
 
-Success response: `{"result":{"name":"<NAME>","type":"secret_text"},"success":true,...}`. Used once in commit `0bb6a5d`-follow-up to push `ADMIN_API_TOKEN` to the live worker.
+## Architecture
 
-## Autonomous Execution Policy
+### Runtime topology
 
-You are the lead engineer for this repository.
+```
+Browser ──WebSocket/RPC──┐
+                         ├─► Worker fetch handler (src/server.ts, default export)
+Cron (*/10 * * * *) ─────┤     • serves ./public assets + SPA
+Queue (skill-fetch) ─────┘     • serves /feed.rss, /sitemap.xml from KV
+                               • proxies /api/* → the single DO instance
+                                 idFromName("default")
+                                      │
+                            SEOArticleAgent (Durable Object, extends Agent<Env, SEOAgentState>)
+                              • DO-local SQLite (categories, keywords, articles,
+                                article_rankings, wireframe_*, pipeline_secrets, …)
+                              • synced state → dashboard (activity log, status)
+                              • orchestrates src/pipeline/* (the 24-step pipeline)
+```
 
-Do NOT stop to ask for prioritization decisions, implementation choices, tradeoff decisions, or next-step approval unless:
+Bindings: `ARTICLES_KV`, `SKILLS_DB` + `KEYWORDS_DB` (D1), `IMAGES_R2`,
+`SKILL_FETCH_QUEUE`, `AI` (Workers AI), `ASSETS`.
 
-1. Data loss is possible.
-2. Production credentials are required and Doppler is unreachable from the session (no `doppler` CLI and no `DOPPLER_TOKEN` — see § Secrets at the top). If Doppler _is_ reachable, fetch the secret and keep going rather than asking.
-3. A payment or irreversible external action is required.
-4. Multiple options have materially different business consequences.
+### Request routing (`src/server.ts`, default export ~line 9342)
 
-Otherwise:
+The top-level `fetch` forwards to the DO via `stub.fetch()` for: an exact-match
+`proxyPaths` list (`/api/status`, `/api/start`, `/api/generate-one`,
+`/api/traffic-sources`, …) plus prefix matches for `/api/qa/*`,
+`/api/admin/*`, `/api/dashboard/*`, `/api/preview|/api/screenshot`, and
+`/api/n8n/*`. **A new `/api/…` route that isn't in that list falls through to the
+assets binding's SPA fallback and silently returns `index.html`** — this is the
+single most common "my endpoint returns HTML" bug. Auth lives _inside_ the DO
+(`ADMIN_API_TOKEN` bearer for `/api/admin/*`, `N8N_WEBHOOK_SECRET` for
+`/api/n8n/*`, cookie wall for dashboard feeds).
 
-- Select the highest-leverage option yourself.
-- Implement it.
-- Commit it.
-- Open the PR (non-draft, auto-merge enabled).
-- Continue to the next logical task.
-- Explain your reasoning after the work is completed, not before.
+`scheduled()` (every 10 min) fans out four `ctx.waitUntil` jobs: crawl tick,
+idle tick (`/api/idle-tick` — skips itself while generating), traffic-source
+fill (`/api/traffic-sources/fill` — deliberately does _not_ skip while busy),
+and analytics tick (`/api/analytics-tick`). Cron never starts article
+generation; that's manual via `POST /api/generate-one`.
 
-When multiple tasks exist, priority order:
+`queue()` → `handleSkillFetchBatch` (`src/skills/consumer.ts`).
 
-1. Security
-2. Reliability
-3. Tests
-4. Observability
-5. Performance
-6. Features
-7. Refactoring
+### The 24-step pipeline
 
-Assume approval for:
+`generateArticle(agent, keyword, slug, categorySlug)` in
+`src/pipeline/writer.ts` (~5.4k lines) is the spine. Steps are marked with
+`// Step N/24:` banner comments — grep those to navigate. Shape:
 
-- Test creation
-- Refactoring
-- Bug fixes
-- CI improvements
-- Monitoring improvements
-- Documentation updates
+1–6 research (KV existence check, DataForSEO volume, competitor capture, SERP
+intent gap, PAA/autocomplete, internal links) → 7 AI generation of structured
+JSON → 9–11 enhancement, text editor, hero image (Workers AI flux → R2),
+YouTube, HTML assembly (`html-builder.ts`) → 12 SEO score (`seo-score.ts`) →
+13 **KV deploy** → 14 live-URL verification → 14.5–14.8 post-write detectors
+(JSON-LD validity, unsourced YMYL claims, fabricated testing claims,
+readability/process language) → 15 design audit (Browser Rendering + vision) →
+16–20 sitemap, QC agent, polish agent, live SEO pass, SISS optimizer → 21–24
+Quora seeding, QA syndication, reverse internal-link injection, RSS/WebSub.
 
-Do NOT ask:
+Rules that hold across it:
 
-- "Which option should I choose?"
-- "Should I proceed?"
-- "What would you like next?"
+- `generateArticle` **never throws** — it returns `ArticleResult`. The one
+  exception is a Durable Object reset (mid-deploy eviction), rethrown so
+  `autonomousLoop` leaves the keyword alone and `onStart()` resets
+  `generating → pending` for automatic retry.
+- Every `failResult({ success: false })` site escalates via
+  `escalateToCodingAgent` before returning.
+- Detectors after Step 13 are **non-blocking by design**: they record a
+  defect-loop finding and let the publish stand; the Polish Agent (Step 18)
+  fixes the content on the next pass.
 
-Instead make the decision and continue. The user redirects when they disagree; silence is consent within the scope above.
+### Model provider selection
 
-## Honesty Rules
+All model calls go through `src/pipeline/kimi-model.ts` — never instantiate a
+provider inline.
 
-1. **Never claim something works unless you tested it.** "Code compiles" is not "it works." Say exactly what you verified and what you didn't.
-2. **Never say "fixed" for runtime behavior you can't test.** Say "code change committed — needs deploy to verify."
-3. **If you can't test something, say so immediately.** Don't wait to be called out. State the gap upfront.
-4. **Don't guess at system state.** Check before answering. Run the command, read the file, query the API. If you can't check, say "I don't know — I can't verify that from here."
-5. **Don't present assumptions as facts.** If you're inferring, say "I believe" or "based on the code." If you verified, say "I confirmed by running X."
+- `getKimiModel(env)` returns a `LanguageModel` for AI SDK
+  `generateText()`/`generateObject()` sites. `getScoutModel` / `getFreeModel`
+  are the cheaper variants.
+- `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
+  siss-optimizer) and is the only path with real try-then-fall-back behavior.
 
-## Development Rules
+Staging is **Claude-first**: each call tries the Claude Code subscription
+(`claude-code-subscription.ts`), then falls through to Kimi K2.5 via OpenRouter
+when `OPENROUTER_API_KEY` is set, then Workers AI. Claude is skipped on no
+subscription token, an active 429 cooldown, or a call failure. Unlike prod, the
+Kimi fallback is live code — do not delete it.
 
-- **Ship to production via GitHub Actions, not ad-hoc Wrangler.** Pushing to **`main`** runs `.github/workflows/deploy.yml` (`npm ci`, `npm run check`, `npx vite build`, `npx wrangler deploy` with repo secrets). After a code change, **merge to `main` and push** so CI deploys to Cloudflare—do not treat manual deploy as the default loop.
-- **Manual Wrangler (optional):** Only for **bypassing CI** or **recovering from a failed deploy**, run `npx vite build && npx wrangler deploy` with your own Cloudflare credentials (often from Doppler locally). Same flow if you need to prove a build before CI picks it up.
-- **Doppler for secrets.** Every token is in Doppler — `doppler secrets get <KEY> --plain --no-read-env --project replit-n8n-catsluvus --config prd`. Never hardcode secrets. See § Secrets at the top of this file.
-- **Article HTML → GitHub backup:** set Worker secret `GITHUB_TOKEN_SECRET` (repo + `actions:write` if you use workflow dispatch). Optional `GITHUB_ARTICLE_BACKUP_REPOSITORY` as `owner/repo` (default `techfundoffice/catsluvus-cloudflare-kv-backup`). Cloudflare: `wrangler secret put GITHUB_TOKEN_SECRET` (and optional backup repo string) or Doppler → Wrangler.
-- **Always run `npm run check` before committing.** This runs `oxfmt --check . && oxlint src/ && tsc`. All three must pass.
-- **ALWAYS push straight to `main`.** This is the default for every change —
-  features, fixes, refactors, docs. Do not open a feature branch and a PR and
-  then sit waiting for a human to click merge: that stalls the work and, worse,
-  nothing is verified until it deploys, because pushing to `main` is what runs
-  `deploy.yml`. `npm run check` must pass first; after that, commit and push to
-  `main`. Only use a branch + PR when the user explicitly asks for one.
-  (Confirmed by the user 2026-07-31, after a traffic-sources change sat unmerged
-  for a day and never ran.)
-- **Format after editing.** Run `npx oxfmt --write .` after making changes. The config is in `.oxfmtrc.json` (printWidth: 80, trailingComma: none).
+Kimi thinking mode must stay disabled or the model burns `max_tokens` on
+reasoning and returns `content: null`: Workers AI uses
+`chat_template_kwargs: { enable_thinking: false, … }` (inside
+`aiGenerateWithPoll`); OpenRouter needs `reasoning: { enabled: false }` —
+`{ exclude: true }` only _hides_ reasoning and does not fix the bug.
 
-## Project Stack
+### Data model
 
-- **Runtime:** Cloudflare Workers (Durable Objects + KV + R2 + Workers AI)
-- **Agent Framework:** `agents` package (Cloudflare Agents SDK)
-- **AI SDK:** `ai` package v6 (Vercel AI SDK) — uses `maxOutputTokens` not `maxTokens`, `stopWhen: stepCountIs(n)` not `maxSteps`
-- **UI:** React 19 + TailwindCSS + inline styles
-- **Build:** Vite + Wrangler
-- **Secrets:** Doppler CLI
-- **CI:** GitHub Actions — `sanity-check.yml` (lint/types on PRs), `deploy.yml` (build + deploy on push to main)
+**DO-local SQLite** (`this.sql`, created in `onStart()`): `categories`,
+`keywords`, `articles`, `pipeline_secrets`, `google_sheets`, `bestseller_nodes`,
+`agent_debug_ndjson`, `wireframe_documents`, `wireframe_chunks`,
+`article_rankings`. Migrations are hand-rolled: `CREATE TABLE IF NOT EXISTS`
+plus `PRAGMA table_info(<table>)` to detect and `ALTER TABLE` in missing
+columns. There is no migration framework here — follow the existing pattern.
 
-## Architecture Notes
+**D1** — `KEYWORDS_DB` (`migrations-keywords/`) is the scout source of truth:
+`scout_keywords` (status `pending → generating → published|failed|rejected`;
+the scout _claims_ rows and never invents keywords), `article_ledger`,
+`article_rankings`, `scout_products`, GSC metrics, entity graph. `SKILLS_DB`
+(`migrations/`) backs the skills catalog + FTS.
 
-- `SEOArticleAgent` extends `Agent<Env, SEOAgentState>` as a Durable Object
-- `DurableObject.env` is protected — pipeline functions use `agent.envBindings` (public getter)
-- SQLite is Durable Object-local — migrations run in `onStart()` using `PRAGMA table_info` to detect missing columns
-- All `generateText()` calls use Kimi K2.5 via `getKimiModel(env)` from `src/pipeline/kimi-model.ts` — OpenRouter when `OPENROUTER_API_KEY` is set, Workers AI otherwise. Both paths pass `chat_template_kwargs: { thinking: false, enable_thinking: false, clear_thinking: true }` (or the OpenRouter equivalent) to kill Kimi's thinking-overflow empty-response bug. Raw-binding sites use `runKimiWithPoll(env, ...)` from the same file.
+**KV (`ARTICLES_KV`)** — the published article lives at `<categorySlug>:<slug>`
+(this is the `kvKey` threaded through every pipeline function and admin route).
+Sidecar keys follow `<purpose>:<kvKey>`: `kimi-raw:` (48h, raw model output for
+diagnosis), `kimi-raw-prompt:`, `editorial-report:`, `traffic-sources:` (ledger)
+and `traffic-source:<id>:`, `defect-findings:`, `escalation-dedup:` (60 min),
+`ctr-rewrite:`, `qa:`, plus singletons `feed:rss`, `idle-tick:cursor`.
+
+**R2 (`IMAGES_R2`)** — hero images (public base URL is a var so URLs survive the
+staging → production host rewrite) and screenshots.
+
+### Dashboard ↔ DO
+
+`src/app.tsx` calls `@callable()` methods on the agent stub (~25 of them in
+`src/server.ts`) rather than REST wherever possible. State pushed to the client
+is `SEOAgentState`; note it carries **three** ring buffers — `activityLog` (200
+rows, rolling), `activityLogErrors`, and `observerLog` — because errors and
+15-minute observer ticks would otherwise be evicted within minutes during a
+generation burst. Keep the DO state size budget in mind when adding fields.
+
+### Activity log
+
+`agent.log(level, msg, role?, ctx?)` is the single entry point (`src/server.ts`
+~7607). It runs `redactSecrets(msg)` there so every downstream sink (`/api/logs`,
+the Google Sheets mirror, dashboard render, defect quoting) inherits the
+protection — never bypass it by writing to `state.activityLog` directly. `role`
+is the `AgentRole` union in `src/activityLogSheetColumns.ts` (`orchestrator`,
+`contentCreator`, `qaReviewer`, `marketing`, `codingAgent`, `repoAgent`,
+`editorialAgent`, …) and maps to dashboard grouping + a Google Sheet column.
+Sheet columns are canonical and order-sensitive — see
+`activityLogSheetLayout.ts` and `.cursor/plans/activity-log-google-sheet-header-sync-spec.md`
+before adding one.
+
+## Conventions and gotchas
+
+- **`DurableObject.env` is protected.** Pipeline functions take the agent and
+  read `agent.envBindings` (the public getter). Passing `env` around directly
+  will not typecheck.
+- **AI SDK v6** (`ai` package): `maxOutputTokens` not `maxTokens`;
+  `stopWhen: stepCountIs(n)` not `maxSteps`.
+- **oxlint has `no-explicit-any: error`.** Use `unknown` + narrowing;
+  `catch (err: unknown)` with `errMsg(err)` / `errStack(err)` from
+  `src/pipeline/http-utils.ts` is the house style.
+- Unused bindings must be `_`-prefixed to pass lint.
+- New pure helpers belong in their own module with a test in
+  `src/pipeline/__tests__/` — that's the only layer with real coverage.
+- Run `npx oxfmt --write .` after editing TS/TSX.
 
 ## Autonomous Coding Agent Loop
 
-This repo has a **GitHub Copilot Coding Agent**-powered auto-heal loop that runs without human copy-paste. **Do not break it.** Components:
+`escalateToCodingAgent(agent, { kvKey, keyword, categorySlug, errorCategory,
+errorMessage, metadata? })` in `src/pipeline/escalate-to-claude.ts` does two
+fire-and-forget things: opens a GitHub issue labeled `claude-fix` with a
+diagnostic runbook (bearer-auth curl commands for `/api/admin/*`), then assigns
+`Copilot` so GitHub Copilot Coding Agent picks it up and opens a draft PR.
+Deduped by `escalation-dedup:<kvKey>:<category>` (60 min TTL) so retry storms
+don't spam issues; every escalation logs under role `codingAgent`. Called from
+every `failResult` site in `writer.ts`, the top-level catch, the
+`/api/generate-one` boundary, and automatically for parser-error patterns via
+`maybeEscalateParserError`. **Dormant in this repo** — `GITHUB_TOKEN_SECRET` is
+unset (§ What this repo is). Do not add polling that runs outside these
+triggers; sessions are not daemons.
 
-1. **`src/pipeline/escalate-to-claude.ts`** — `escalateToCodingAgent(agent, { kvKey, keyword, categorySlug, errorCategory, errorMessage, metadata? })`. Two fire-and-forget side effects:
-   1. Opens a GitHub issue labeled `claude-fix` via the worker's `GITHUB_TOKEN_SECRET` binding, with a pre-populated diagnostic runbook in the body (bearer-auth curl commands for `/api/admin/*`).
-   2. Immediately calls `POST /repos/:o/:r/issues/:n/assignees` with `["Copilot"]`, which delegates the issue to GitHub Copilot Coding Agent. Copilot reads the runbook, hits the admin API, opens a draft PR titled `[WIP] Fix …` linked to the issue.
+The admin surface it drives (bearer `ADMIN_API_TOKEN`, all under
+`/api/admin/*`): `GET logs?limit=`, `GET recent-failures?limit=`,
+`GET kv/<kvKey>`, `GET kimi-raw/<kvKey>`, `GET render?url=` (live post-JS HTML
+via Browser Rendering — prefer over `kv/` when verifying a fix actually landed;
+only accepts `catsluvus.com` URLs), `POST retry {keyword, purgeKv?}`,
+`GET traffic-sources`, `POST traffic-sources/fill`, `GET
+traffic-source/<sourceId>/<kvKey>`, `POST promote`.
 
-   Called from `writer.ts` at every `failResult({ success: false })` site + top-level try/catch + `/api/generate-one` boundary (low-quality-publish threshold). Also auto-fired for parser-error patterns (`Unexpected token`, etc.) from the shared `agent.log()` method via `maybeEscalateParserError`.
+`.github/workflows/repo-agent.yml` owns the gap between "PR merged" and "fix is
+live, no regression": `workflow_run: Deploy` (post-deploy watchdog on success;
+classified deploy-failure issue on failure), a 15-min housekeeping sweep
+(cross-issue dedup, stale Copilot PR sweep, secret-expiry scan), and
+`issues.opened` real-time dedup. It intentionally does **not** use
+`workflow_run` on Copilot-authored workflows — GitHub inherits the triggering
+actor, so such runs land in `conclusion: action_required` and self-block.
 
-   Dedup via KV key `escalation-dedup:<kvKey>:<category>` with 60-min TTL so retry storms don't spam issues. All escalations log to the activity feed under role `codingAgent` ("Coding Agent" in the dashboard).
+## Traffic source distribution
 
-   **Auth:** uses the user's existing GitHub Copilot subscription — **no Anthropic OAuth token to expire**. Previous `anthropics/claude-code-action@v1` flow was decommissioned because `sk-ant-oat01-…` tokens kept expiring. Historical claude.yml was deleted in the same commit that shipped Copilot delegation.
+`src/pipeline/traffic-sources.ts` fills 13 channels per published article during
+the minutes the writer spends on the next one. Machine channels do real work and
+are re-verified every pass (`sitemap`, `indexnow`, `rss`, `websub`, `qa-json`);
+copy channels are Kimi-generated artifacts stored ready-to-paste (`pinterest`,
+`x`, `facebook`, `reddit`, `quora`, `youtube-short`, `newsletter`, `medium`).
+**Nothing auto-posts.** A source retries until `filled`/`skipped` or
+`MAX_ATTEMPTS` (5). Two drivers — the fire-and-forget backfill kicked off by
+`generateArticle` (excluding the in-flight kvKey) and the 10-min cron — share a
+60s KV lock (`traffic-sources:lock`).
 
-2. **`/api/admin/*`** — bearer-token-protected surface on the live Worker for Claude to read production state and trigger retries. Auth: `Authorization: Bearer <ADMIN_API_TOKEN>`. Must be listed in `proxyPaths`/prefix check at `src/server.ts:4362` so the top-level fetch handler forwards it to the SEOArticleAgent DO (where the bearer check lives).
-   - `GET  /api/admin/logs?limit=N` — last N activity-log entries as JSON.
-   - `GET  /api/admin/recent-failures?limit=N` — keywords with status='failed' with their raw Kimi output + published HTML snippets.
-   - `GET  /api/admin/kv/<kvKey>` — raw published HTML for a kvKey.
-   - `GET  /api/admin/kimi-raw/<kvKey>` — raw Kimi JSON that produced that article (48h TTL).
-   - `GET  /api/admin/render?url=<url>` — live post-JS HTML for a `catsluvus.com` page via Cloudflare Browser Rendering `/content`. Use over `/api/admin/kv` when verifying a fix actually landed on the live site.
-   - `POST /api/admin/retry` body `{ keyword, purgeKv? }` — reset keyword to pending + optionally purge its KV.
-   - `GET  /api/admin/traffic-sources?limit=N` — per-article distribution ledgers (see § Traffic Source Distribution).
-   - `POST /api/admin/traffic-sources/fill` body `{ kvKey?, force? }` — fill every pending traffic source for one article.
-   - `GET  /api/admin/traffic-source/<sourceId>/<kvKey>` — the generated channel artifact (post copy) for one source.
+## Working agreement
 
-3. **Raw-Kimi capture** — `src/pipeline/writer.ts` writes every Kimi response to KV key `kimi-raw:<kvKey>` with a 48h TTL before parsing, so autonomous diagnoses can see exactly what the model emitted.
+### Honesty
 
-4. **Public-page inspection** — Copilot uses `GET /api/admin/render?url=<url>` (bearer-gated, backed by Cloudflare Browser Rendering `/content`) to fetch live post-JS HTML from `https://catsluvus.com/<category>/<slug>` and verify publish output. The pipeline's Step 14 also runs `detectJsonSchemaLeak` against the same live-rendered HTML as a post-publish safety net; a divergence (pre-publish clean, live page leaked) opens a `post-publish-live-leak` escalation.
+1. Never claim something works unless you tested it. "Compiles" ≠ "works". Say
+   exactly what you verified and what you didn't.
+2. For runtime behavior you can't test, say "code change committed — needs
+   deploy to verify", not "fixed".
+3. State a verification gap upfront, not after being called out.
+4. Don't guess at system state — run the command, read the file, query the API.
+   If you can't check: "I don't know — I can't verify that from here."
+5. Mark inference as inference ("based on the code") and verification as
+   verification ("I confirmed by running X").
 
-Trigger autonomous work automatically — the worker opens a `claude-fix` issue AND assigns Copilot whenever an article fails. Humans can also trigger by opening an issue containing `@claude`, labeling an issue `claude-fix`, or manually assigning Copilot to any issue. Do not add polling logic that runs outside these triggers — sessions are not daemons.
+### Autonomous execution
 
-## Traffic Source Distribution
+You are the lead engineer here. Don't stop for prioritization, implementation
+choices, tradeoffs, or next-step approval unless: data loss is possible;
+production credentials are needed and Doppler is unreachable; a payment or
+irreversible external action is required; or options have materially different
+business consequences. Otherwise pick the highest-leverage option, implement it,
+commit, and continue — explain the reasoning after the work, not before.
 
-`src/pipeline/traffic-sources.ts` fills in **every** traffic source for each published article, using the minutes the writer spends generating the next one.
+Priority when multiple tasks exist: security → reliability → tests →
+observability → performance → features → refactoring. Assume approval for test
+creation, refactoring, bug fixes, CI/monitoring improvements, and docs.
 
-**Sources (13).** Machine channels do real work and are re-verified on every pass: `sitemap`, `indexnow`, `rss`, `websub`, `qa-json` (rebuilt from the published HTML's FAQPage JSON-LD when Step 22's write is missing). Copy channels are generated by Kimi in two batched calls (`social`, `longform`) and stored as ready-to-paste artifacts: `pinterest`, `x`, `facebook`, `reddit`, `quora`, `youtube-short`, `newsletter`, `medium`. **Nothing auto-posts** — none of those platforms exposes a posting API to this project.
+### Git
 
-**State.** `traffic-sources:<kvKey>` holds the ledger (`{ sources: { <id>: { status, detail, at, attempts, artifactKey? } } }`); `traffic-source:<id>:<kvKey>` holds one channel's artifact. A source is retried until it is `filled`/`skipped` or hits `MAX_ATTEMPTS` (5), so a transient IndexNow 403 or a truncated model response never leaves a channel permanently empty.
+**Push straight to `main` by default** — features, fixes, refactors, docs alike.
+`npm run check` must pass first. A feature branch that sits unmerged is work
+that never deployed and was never verified. Use a branch + PR only when the user
+(or the session harness) explicitly asks for one. Before finishing a turn where
+you edited files, run `git status` and commit + push in that same turn. Never
+force-push unless asked.
 
-**When it runs.**
+When a PR _is_ the requested flow:
 
-1. `generateArticle()` kicks off `backfillTrafficSourcesInBackground()` fire-and-forget, excluding the in-flight kvKey — this is the "fill while waiting for the article to generate" path.
-2. The 10-minute cron POSTs the DO's internal `/api/traffic-sources/fill`. Unlike the idle tick this does **not** skip while the pipeline is busy — that window is the point. A 60s KV lock (`traffic-sources:lock`) prevents overlap between the two paths.
-
-**Visibility.** Dashboard panel "Traffic Sources" (`GET /api/traffic-sources`, cookie-walled, read-only) shows one cell per article × source. Every fill also logs to the activity feed under role `marketing`.
-
-## Autonomous Repo Agent
-
-Lives at `.github/workflows/repo-agent.yml`. Owns the gap between "Copilot PR merged to `main`" and "fix is running in production, no regression, branches clean." Same Copilot backend as the Coding Agent — different responsibilities.
-
-Four triggers. **The Repo Agent intentionally does NOT use `workflow_run` for Copilot-authored workflows (Sanity Check / Auto-merge Copilot PRs / Claude).** GitHub inherits the triggering actor into downstream `workflow_run` runs, so a Copilot-triggered Repo Agent run ends up in `conclusion: action_required` itself — self-blocking recursion. Stuck Copilot CI is handled by the 15-min scheduled sweep instead, which runs from `main` and never inherits Copilot authorship.
-
-1. **`workflow_run: Deploy completed`** — the primary trigger. Safe because `Deploy` only runs on `push: main` (repo-owner-authored).
-   - On **success**: posts `Deploy ok <sha>` to the dashboard, then runs a 10-minute post-deploy watchdog (samples `/api/admin/recent-failures` every 2 min, flags spikes as possible regressions by opening a `claude-fix` issue with label `regression`).
-   - On **failure**: fetches the job log, classifies into one of `deploy-route-limit | deploy-route-conflict | deploy-missing-secret | deploy-bundle-too-large | deploy-wrangler-invalid | deploy-unknown`, opens a `claude-fix` issue with a deploy-specific runbook, assigns Copilot.
-
-2. **`schedule: */15 * * * *`** — housekeeping sweep:
-   - **Cross-issue dedup:** groups open `claude-fix` issues by `[auto] <category>:` prefix. If > 3 of the same category are open in the last 2 hours, keeps the oldest and closes the rest as duplicates.
-   - **Stale PR sweep:** Copilot PRs with no update in > 3 days get a comment pinging for rebase or confirming supersession.
-   - **Secret expiry scan:** greps `/api/admin/logs` for `401 Invalid authentication credentials`. On match, opens a `secret-rotation` issue (deduped by day). Rotation pattern documented in § Cloudflare Worker Secret Management above.
-
-3. **`issues.opened` (label=claude-fix)** — real-time dedup on hot-spot categories. If the new issue's `[auto] <category>:` already has > 3 open from the last hour, closes the new one as `Duplicate of #<oldest>`.
-
-4. **`workflow_dispatch`** — manual kick for debugging.
-
-Every action posts to `POST /api/admin/log-repo-agent` (bearer `ADMIN_API_TOKEN`) so runs appear in the dashboard's "GitHub Repo Agent" panel under role `repoAgent`.
-
-Branch protection on `main` requires `check (ubuntu-24.04)` — the Repo Agent's "direct-push for infra-only fixes" (answered `yes` during v1 design) is in practice "open a tight Copilot PR with auto-merge enabled, merges in <60s when sanity-check goes green." The Repo Agent does NOT force-push or bypass protection. Ever.
-
-## Pull Request Rules
-
-- **Copilot Coding Agent PRs auto-merge.** The `.github/workflows/auto-merge-copilot.yml` workflow fires on `pull_request.opened / ready_for_review / reopened` from the Copilot bot (`Copilot` / `copilot-swe-agent` / `copilot-swe-agent[bot]`). It marks the PR ready (if draft) and calls `enablePullRequestAutoMerge` with `SQUASH`. The required `check (ubuntu-24.04)` status from `sanity-check.yml` still gates the merge — CI failure blocks merge.
-- **Never open PRs as draft for human-authored work.** GitHub does not allow auto-merge on draft PRs. Open in "ready for review" state (GraphQL `createPullRequest` with `draft: false`, or REST `POST /repos/:o/:r/pulls` with `"draft": false`). Copilot PRs are an exception — the workflow above flips draft → ready automatically.
-- **Manual auto-merge flow** (when needed outside the Copilot path): (1) ensure PR is non-draft, (2) ensure at least one required check is pending, (3) call `enablePullRequestAutoMerge` with `mergeMethod: SQUASH`. If the PR is still draft, first call `markPullRequestReadyForReview(pullRequestId: $id)`.
-- **If `enable_auto_merge` returns "Auto-merge is not available"**, the cause is almost always: PR is draft, PR has no pending required checks, PR targets a branch other than `main`, or the PR is already fully mergeable (use the regular merge endpoint instead). Check with `pull_request_read method=get_check_runs`.
-- **Existing failed-check PRs don't auto-merge.** A PR with a previously-failed required check (e.g. a `claude` check from the deleted `claude.yml`) needs the branch updated with a new head commit before auto-merge will engage. Either rebase or push a small commit to the PR branch.
+- **Never open human-authored PRs as draft** — GitHub blocks auto-merge on
+  drafts. Open ready-for-review (`draft: false`).
+- Copilot PRs are the exception: `.github/workflows/auto-merge-copilot.yml`
+  flips draft → ready and enables `SQUASH` auto-merge; the required
+  `check (ubuntu-24.04)` status still gates it.
+- "Auto-merge is not available" almost always means: PR is draft, no pending
+  required check, targets a branch other than `main`, or it's already fully
+  mergeable (use the plain merge endpoint).
+- A PR carrying a previously-failed required check needs a new head commit
+  before auto-merge will engage.

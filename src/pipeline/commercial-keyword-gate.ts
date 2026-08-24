@@ -2,8 +2,8 @@
  * Commercial-intent keyword gate for the article factory.
  *
  * Goal: spend generation quota on buyer-intent queries that can carry
- * multi-pick Amazon CTAs — not memorial spam, dog-only queries, bare
- * brand strings, or pure informational long-tails.
+ * an Amazon CTA — not memorial spam, dog-only queries, bare brand
+ * strings, or pure informational long-tails.
  *
  * Used at:
  *  - keyword generation filter (`keywords.ts`)
