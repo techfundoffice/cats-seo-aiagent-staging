@@ -32,6 +32,7 @@ import {
   fetchViaPaApi,
   fetchViaApify,
   dedupeProducts,
+  selectFeaturedProducts,
   buildProductPromptText,
   hydrateProductSlots,
   stripAsinParentheticals,
@@ -1041,42 +1042,30 @@ async function generateArticleUnsafe(
           priceValue: undefined
         }));
 
-        // Multi-pick commercial mode: keep up to 5 distinct products,
-        // ranked by review-signal score (rating × log10(reviews+1)).
-        // Methodology + Top Picks UI expect a real shortlist, not a
-        // single-SKU monologue.
-        const scoreProduct = (p: (typeof products)[number]): number => {
-          const rating =
-            typeof p.ratingValue === "number" && p.ratingValue > 0
-              ? p.ratingValue
-              : Math.min(parseFloat(String(p.rating || "0")) || 0, 5);
-          const reviews =
-            typeof p.reviewCount === "number" && p.reviewCount > 0
-              ? p.reviewCount
-              : 0;
-          return rating * Math.log10(reviews + 1) + (p.asin ? 0.05 : 0);
-        };
-        if (products.length > 1) {
-          products = [...products].sort(
-            (a, b) => scoreProduct(b) - scoreProduct(a)
-          );
-        }
-        if (products.length > 5) {
+        // Single-product specialization: each article features EXACTLY ONE
+        // product — the highest review-signal candidate after dedupe — and
+        // the copy focuses entirely on it (see the SINGLE-PRODUCT directive
+        // in buildArticlePrompt). Multi-pick roundups are retired on
+        // staging. The cut itself lives in `selectFeaturedProducts` so it
+        // is unit-testable; see amazon.ts.
+        const selection = selectFeaturedProducts(products);
+        if (selection.dropped > 0) {
           agent.log(
             "info",
-            `Amazon: multi-pick mode — keeping top 5 of ${products.length} after score sort`,
-            "productManager"
-          );
-          products = products.slice(0, 5);
-        } else if (products.length > 1) {
-          agent.log(
-            "info",
-            `Amazon: multi-pick mode — featuring ${products.length} products after score sort`,
+            `Amazon: single-product mode — featuring "${(selection.featured[0].name ?? "").slice(0, 60)}" (dropping ${selection.dropped} other pick${selection.dropped === 1 ? "" : "s"})`,
             "productManager"
           );
         }
+        products = selection.featured;
 
-        // Product-image continuity per ASIN (all picks, not only #1).
+        // Product-image continuity: the same ASIN can arrive with or
+        // without an imageUrl depending on which tier served it (Creators
+        // API includes images; some PA API/Apify responses don't). Cache
+        // the last-seen image per ASIN in KV and backfill a missing one,
+        // so a product that has ever rendered with an image never
+        // publishes imageless again. Single-product mode leaves exactly
+        // one pick here; the loop stays list-shaped so it keeps working
+        // unchanged if the cut above is ever revisited.
         for (const pick of products) {
           if (!pick?.asin) continue;
           const imageCacheKey = `product-image:${pick.asin}`;
@@ -4230,11 +4219,8 @@ WORD COUNT REQUIREMENT (READ FIRST):
 ${productGrounding}${
     singleProduct
       ? `
-- SINGLE-PRODUCT FOCUS: only one product had enough listing data to feature. Write a deep, honest review of that product for the keyword's use case — who it fits, who it doesn't, maintenance, and value. Do not invent competitor brand names.`
-      : products.length > 1
-        ? `
-- MULTI-PICK COMPARISON: this article features ${products.length} real Amazon products in Our Top Picks. Cover the top pick thoroughly, then briefly differentiate runners-up (who each is best for). Do not invent products or ASINs beyond the product list provided. Prefer comparative framing over a monologue about one SKU.`
-        : ""
+- SINGLE-PRODUCT SPECIALIZATION: this article features EXACTLY ONE product. Write the entire article as a deep, focused review of that one product for the keyword's use case — no comparisons to other named products, no runner-up or alternatives sections. Every section should build the case for (or honestly qualify) this single pick: who it fits, who it doesn't, real-world usage detail, maintenance, and value. Do not invent competitor brand names.`
+      : ""
   }
 ${competitorBlock}
 ${competitorHeadingsBlock}

@@ -6002,7 +6002,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
 
       // POST /api/admin/requeue-commercial-refresh
       // Body: { limit?: number, minScore?: number }
-      // Requeues completed commercial keywords for multi-pick regeneration.
+      // Requeues completed commercial keywords for regeneration.
       if (
         url.pathname === "/api/admin/requeue-commercial-refresh" &&
         request.method === "POST"

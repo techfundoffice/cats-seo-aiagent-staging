@@ -1018,6 +1018,10 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
         );
       })
       .join("");
+    // Inert under the writer's single-product cut (one pick per article,
+    // see the SINGLE-PRODUCT specialization in writer.ts): the >= 2 guard
+    // means this renders nothing today. Kept intact so the comparison
+    // matrix comes back for free if that cut is ever lifted.
     const compareTableHtml =
       products.length >= 2
         ? `<div class="pick-compare" aria-label="Product comparison">` +
