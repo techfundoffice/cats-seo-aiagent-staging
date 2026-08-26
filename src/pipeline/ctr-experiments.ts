@@ -67,6 +67,52 @@ function pct(fraction: number): string {
   return `${(fraction * 100).toFixed(2)}%`;
 }
 
+export type RollbackDecision =
+  | { rollback: true }
+  | { rollback: false; reason: string };
+
+/**
+ * Decide whether a losing snippet may be restored.
+ *
+ * Twenty-eight days pass between applying a rewrite and judging it, and the
+ * Editorial, QC and Polish agents all edit pages in that window. If the live
+ * title is no longer the one we wrote, restoring the original would revert
+ * whatever came after ours rather than undoing our own change — so the guard
+ * refuses, and the experiment is left recorded but unreverted.
+ *
+ * Split out from the rollback's fetch/write plumbing so the rule itself is
+ * testable; the surrounding I/O is not.
+ */
+export function shouldRollbackSnippet(input: {
+  /** Title currently live on the page. */
+  liveTitle: string;
+  /** Title this experiment wrote. */
+  appliedTitle: string;
+  /** Title that was live before this experiment. */
+  originalTitle: string;
+}): RollbackDecision {
+  const live = input.liveTitle.trim();
+  const applied = input.appliedTitle.trim();
+  const original = input.originalTitle.trim();
+
+  if (!original) {
+    return { rollback: false, reason: "no recorded original title" };
+  }
+  if (!live) {
+    return { rollback: false, reason: "live page has no title to compare" };
+  }
+  if (live === original) {
+    return { rollback: false, reason: "snippet already matches the original" };
+  }
+  if (applied && live !== applied) {
+    return {
+      rollback: false,
+      reason: `live title has since changed to "${live.slice(0, 60)}"`
+    };
+  }
+  return { rollback: true };
+}
+
 export function classifyCtrExperiment(
   before: CtrWindow,
   after: CtrWindow,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyCtrExperiment,
+  shouldRollbackSnippet,
   windowCtr,
   type CtrWindow
 } from "../ctr-experiments";
@@ -114,5 +115,82 @@ describe("classifyCtrExperiment", () => {
     expect(
       classifyCtrExperiment(before, after, { minCtrDelta: 0.02 }).outcome
     ).toBe("inconclusive");
+  });
+});
+
+describe("shouldRollbackSnippet", () => {
+  const applied = "Best Automatic Litter Boxes: One Clear Winner";
+  const original = "Best Automatic Litter Boxes of 2026";
+
+  it("allows the rollback when our title is still the live one", () => {
+    const decision = shouldRollbackSnippet({
+      liveTitle: applied,
+      appliedTitle: applied,
+      originalTitle: original
+    });
+
+    expect(decision.rollback).toBe(true);
+  });
+
+  it("refuses when something edited the title after our rewrite", () => {
+    // 28 days pass before a verdict; Editorial, QC and Polish all edit
+    // pages in that window. Restoring here reverts their work, not ours.
+    const decision = shouldRollbackSnippet({
+      liveTitle: "A Human Wrote This Title By Hand",
+      appliedTitle: applied,
+      originalTitle: original
+    });
+
+    expect(decision).toEqual({
+      rollback: false,
+      reason:
+        'live title has since changed to "A Human Wrote This Title By Hand"'
+    });
+  });
+
+  it("refuses when the page is already back on the original", () => {
+    const decision = shouldRollbackSnippet({
+      liveTitle: original,
+      appliedTitle: applied,
+      originalTitle: original
+    });
+
+    expect(decision).toEqual({
+      rollback: false,
+      reason: "snippet already matches the original"
+    });
+  });
+
+  it("refuses when there is nothing to restore to", () => {
+    expect(
+      shouldRollbackSnippet({
+        liveTitle: applied,
+        appliedTitle: applied,
+        originalTitle: "   "
+      })
+    ).toEqual({ rollback: false, reason: "no recorded original title" });
+  });
+
+  it("refuses when the live page has no title at all", () => {
+    expect(
+      shouldRollbackSnippet({
+        liveTitle: "",
+        appliedTitle: applied,
+        originalTitle: original
+      })
+    ).toEqual({
+      rollback: false,
+      reason: "live page has no title to compare"
+    });
+  });
+
+  it("ignores surrounding whitespace when comparing", () => {
+    expect(
+      shouldRollbackSnippet({
+        liveTitle: `  ${applied}  `,
+        appliedTitle: applied,
+        originalTitle: original
+      }).rollback
+    ).toBe(true);
   });
 });
