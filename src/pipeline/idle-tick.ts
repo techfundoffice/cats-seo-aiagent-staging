@@ -6,6 +6,7 @@ import {
   enforceTitleSerpWindow
 } from "./title-meta-normalizer";
 import { prodKvRestApi } from "./prod-publish";
+import { classifyCtrExperiment } from "./ctr-experiments";
 
 /**
  * idle-tick.ts — productive use of the quiet minutes between article
@@ -45,6 +46,21 @@ interface CtrCandidate {
   impressions: number;
   clicks: number;
   position: number;
+}
+
+/** One pending experiment joined to its current Search Console row. */
+interface ResolvableExperiment {
+  id: number;
+  kv_key: string;
+  new_title: string;
+  before_impressions: number;
+  before_clicks: number;
+  before_ctr: number | null;
+  before_position: number | null;
+  after_impressions: number | null;
+  after_clicks: number | null;
+  after_ctr: number | null;
+  after_position: number | null;
 }
 
 /** Extract current title + meta description from a full HTML document. */
@@ -228,6 +244,40 @@ Write a MORE CLICKABLE replacement. Rules: title 48-60 characters, keep the main
       expirationTtl: CTR_REWRITE_MARKER_TTL_S
     });
 
+    // Record the before-window so this rewrite can be judged later. Without
+    // this row the change is unfalsifiable: gsc_pages is overwritten on the
+    // next sync and the old numbers are gone.
+    try {
+      await db
+        .prepare(
+          `INSERT INTO ctr_experiments
+             (kv_key, page_url, old_title, new_title, old_meta, new_meta,
+              before_impressions, before_clicks, before_ctr, before_position)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+        )
+        .bind(
+          candidate.kv_key,
+          candidate.page_url ?? "",
+          current.title,
+          nextTitle,
+          current.metaDescription ?? "",
+          nextMeta,
+          candidate.impressions,
+          candidate.clicks,
+          candidate.impressions > 0
+            ? candidate.clicks / candidate.impressions
+            : 0,
+          candidate.position
+        )
+        .run();
+    } catch (err: unknown) {
+      agent.log(
+        "warning",
+        `CTR rewrite: applied to ${candidate.kv_key} but the experiment row failed to write (${errMsg(err)}) — this rewrite will not be measurable`,
+        "analyst"
+      );
+    }
+
     agent.log(
       "info",
       `CTR rewrite: ${candidate.kv_key} (pos ${candidate.position.toFixed(1)}, ${candidate.impressions} impr, ${candidate.clicks} clicks) — title "${current.title}" → "${nextTitle}" (backup kept 30d)`,
@@ -248,11 +298,124 @@ Write a MORE CLICKABLE replacement. Rules: title 48-60 characters, keep the main
   };
 }
 
+/**
+ * Resolve CTR experiments whose after-window has fully turned over.
+ *
+ * Search Console reports a trailing 28-day window, so an experiment is only
+ * readable once 28 days of post-rewrite data have accumulated — before that
+ * the window still contains pre-rewrite days and the comparison is a blend
+ * of both snippets.
+ */
+async function resolveCtrExperiments(
+  agent: SEOArticleAgent
+): Promise<IdleTickResult> {
+  const env = agent.envBindings;
+  const db = env.KEYWORDS_DB;
+  if (!db) return { ok: false, task: "ctr-resolve", detail: "no KEYWORDS_DB" };
+
+  const due = await db
+    .prepare(
+      `SELECT e.id, e.kv_key, e.new_title,
+              e.before_impressions, e.before_clicks, e.before_ctr,
+              e.before_position,
+              p.impressions AS after_impressions, p.clicks AS after_clicks,
+              p.ctr AS after_ctr, p.position AS after_position
+         FROM ctr_experiments e
+         LEFT JOIN gsc_pages p ON p.kv_key = e.kv_key
+        WHERE e.outcome = 'pending'
+          AND e.applied_at <= datetime('now', '-28 day')
+        ORDER BY e.applied_at ASC
+        LIMIT 10`
+    )
+    .all<ResolvableExperiment>();
+
+  const rows = due.results ?? [];
+  if (rows.length === 0) {
+    return {
+      ok: true,
+      task: "ctr-resolve",
+      detail: "no experiments past their 28-day window"
+    };
+  }
+
+  const tally: Record<string, number> = {};
+  for (const row of rows) {
+    if (row.after_impressions == null) {
+      // The page dropped out of Search Console entirely — no after-window.
+      await db
+        .prepare(
+          `UPDATE ctr_experiments
+              SET outcome = 'inconclusive',
+                  outcome_detail = 'page absent from Search Console at resolve time',
+                  resolved_at = datetime('now')
+            WHERE id = ?1`
+        )
+        .bind(row.id)
+        .run();
+      tally.inconclusive = (tally.inconclusive ?? 0) + 1;
+      continue;
+    }
+
+    const verdict = classifyCtrExperiment(
+      {
+        impressions: row.before_impressions,
+        clicks: row.before_clicks,
+        ctr: row.before_ctr,
+        position: row.before_position
+      },
+      {
+        impressions: row.after_impressions,
+        clicks: row.after_clicks ?? 0,
+        ctr: row.after_ctr,
+        position: row.after_position
+      }
+    );
+
+    await db
+      .prepare(
+        `UPDATE ctr_experiments
+            SET after_impressions = ?1, after_clicks = ?2, after_ctr = ?3,
+                after_position = ?4, ctr_delta = ?5, outcome = ?6,
+                outcome_detail = ?7, resolved_at = datetime('now')
+          WHERE id = ?8`
+      )
+      .bind(
+        row.after_impressions,
+        row.after_clicks ?? 0,
+        verdict.afterCtr,
+        row.after_position,
+        verdict.ctrDelta,
+        verdict.outcome,
+        verdict.detail,
+        row.id
+      )
+      .run();
+
+    tally[verdict.outcome] = (tally[verdict.outcome] ?? 0) + 1;
+
+    agent.log(
+      verdict.outcome === "regressed" ? "warning" : "info",
+      `CTR experiment ${verdict.outcome}: ${row.kv_key} — ${verdict.detail} (title "${row.new_title}")`,
+      "analyst",
+      { kanbanStage: "done" }
+    );
+  }
+
+  const summary = Object.entries(tally)
+    .map(([outcome, n]) => `${n} ${outcome}`)
+    .join(", ");
+  return {
+    ok: true,
+    task: "ctr-resolve",
+    detail: `resolved ${rows.length} experiment(s): ${summary}`
+  };
+}
+
 /** Round-robin task cursor persisted in KV. */
 async function nextTask(env: {
   ARTICLES_KV: KVNamespace;
-}): Promise<"gsc-sync" | "ctr-rewrite"> {
-  const tasks = ["gsc-sync", "ctr-rewrite"] as const;
+}): Promise<"gsc-sync" | "ctr-rewrite" | "ctr-resolve"> {
+  const tasks = ["gsc-sync", "ctr-rewrite", "ctr-resolve"] as const;
   const raw = await env.ARTICLES_KV.get("idle-tick:cursor");
   const cursor = Number(raw ?? "0") || 0;
   await env.ARTICLES_KV.put("idle-tick:cursor", String(cursor + 1));
@@ -280,7 +443,7 @@ export async function runIdleTick(
     const { runGscSync } = await import("./gsc-sync");
     const result = await runGscSync(env, db);
     const detail = result.ok
-      ? `${result.rows} pages from ${result.property}; ${result.totals?.impressions} impressions / ${result.totals?.clicks} clicks (28d)`
+      ? `${result.rows} pages from ${result.property}; ${result.totals?.impressions} impressions / ${result.totals?.clicks} clicks (28d); ${result.historyRows ?? 0} history rows`
       : (result.error ?? "failed");
     agent.log(
       result.ok ? "info" : "warning",
@@ -288,6 +451,15 @@ export async function runIdleTick(
       "analyst"
     );
     return { ok: result.ok, task, detail };
+  }
+  if (task === "ctr-resolve") {
+    const result = await resolveCtrExperiments(agent);
+    agent.log(
+      result.ok ? "info" : "warning",
+      `Idle tick (ctr-resolve): ${result.detail}`,
+      "analyst"
+    );
+    return result;
   }
   return ctrTriageRewrite(agent);
 }

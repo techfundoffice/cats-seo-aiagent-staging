@@ -108,6 +108,8 @@ export interface GscSyncResult {
   property?: string;
   rows?: number;
   matched?: number;
+  /** Rows appended to gsc_page_history; 0 when the append was skipped. */
+  historyRows?: number;
   totals?: { impressions: number; clicks: number };
   error?: string;
 }
@@ -182,6 +184,13 @@ export async function runGscSync(
   let impressions = 0;
   let clicks = 0;
   const statements: D1PreparedStatement[] = [];
+  // Kept out of the main batch on purpose. CI applies D1 migrations with
+  // `|| true`, so `gsc_page_history` can legitimately be missing on a
+  // deploy where the migration failed — and a missing table inside the
+  // main batch would take the whole sync down with it, including the
+  // gsc_pages upserts that CTR triage depends on. History is additive
+  // measurement; it must never cost us the primary sync.
+  const historyStatements: D1PreparedStatement[] = [];
   const update = keywordsDb.prepare(
     `UPDATE article_ledger
         SET gsc_impressions = ?1, gsc_clicks = ?2, gsc_ctr = ?3,
@@ -194,6 +203,16 @@ export async function runGscSync(
   // queries across the whole site.
   const upsertPage = keywordsDb.prepare(
     `INSERT OR REPLACE INTO gsc_pages
+       (page_url, kv_key, impressions, clicks, ctr, position, synced_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))`
+  );
+  // Append-only companion to the upsert above. `gsc_pages` holds only the
+  // latest reading, which is what destroyed our ability to tell whether a
+  // CTR snippet rewrite helped; this keeps the series. Restricted to our
+  // own articles with real impressions so a 5,000-row sync doesn't write
+  // 5,000 history rows every time.
+  const insertHistory = keywordsDb.prepare(
+    `INSERT INTO gsc_page_history
        (page_url, kv_key, impressions, clicks, ctr, position, synced_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))`
   );
@@ -221,6 +240,18 @@ export async function runGscSync(
           kvKey
         )
       );
+      if (row.impressions >= 1) {
+        historyStatements.push(
+          insertHistory.bind(
+            pageUrl,
+            kvKey,
+            Math.round(row.impressions),
+            Math.round(row.clicks),
+            row.ctr,
+            row.position
+          )
+        );
+      }
       matched++;
     }
     impressions += row.impressions;
@@ -230,11 +261,38 @@ export async function runGscSync(
     await keywordsDb.batch(statements);
   }
 
+  let historyRows = 0;
+  if (historyStatements.length > 0) {
+    try {
+      await keywordsDb.batch(historyStatements);
+      historyRows = historyStatements.length;
+    } catch (err: unknown) {
+      // Most likely cause: migration 0008 has not been applied yet.
+      console.warn(
+        `[gsc-sync] history append skipped (${historyStatements.length} rows): ${errMsg(err)}`
+      );
+    }
+  }
+
+  // Retention: the history table grows by one row per article per sync.
+  // Six months is well past the 28-day comparison window any experiment
+  // needs, and keeps the table from growing without bound.
+  try {
+    await keywordsDb
+      .prepare(
+        `DELETE FROM gsc_page_history WHERE synced_at < datetime('now', '-180 day')`
+      )
+      .run();
+  } catch {
+    /* best-effort prune — never fail a sync over retention */
+  }
+
   return {
     ok: true,
     property,
     rows: rows.length,
     matched,
+    historyRows,
     totals: {
       impressions: Math.round(impressions),
       clicks: Math.round(clicks)
