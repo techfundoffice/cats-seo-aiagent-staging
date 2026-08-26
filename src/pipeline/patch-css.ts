@@ -47,3 +47,60 @@ export function applyArticleCssFixes(html: string): ArticleCssPatchResult {
 
   return { patched, fixes };
 }
+
+/**
+ * Marker for the fold fix below. Presence makes the patch idempotent, so
+ * repeated audit passes on the same article never stack duplicate rules.
+ */
+export const FOLD_FIX_MARKER = "clu-fold-fix";
+
+export interface ConversionCssOptions {
+  /**
+   * Cap the hero image on small viewports so a product and a buy button
+   * reach the first fold.
+   *
+   * The builder ships `.article-hero img{max-height:430px}`. On the 390x844
+   * viewport the design audit screenshots, 430px is over half the fold
+   * before site chrome, the affiliate bar, and the title are counted — so
+   * the reader's first screen is frequently all picture and no product.
+   * 200px leaves room for the title and the top of the content.
+   */
+  tightenMobileHero?: boolean;
+}
+
+/**
+ * Layout fixes derived from a design audit's above-the-fold measurements.
+ *
+ * Kept separate from `applyArticleCssFixes` because these are *conditional*
+ * — driven by what the vision audit measured on a specific article — while
+ * that function is a set of unconditional repairs safe on any article.
+ *
+ * This is the destination the audit's non-content findings never had: an
+ * issue categorised `layout` or `mobile` is `contentAddressable: false`, so
+ * the Polish Agent skips it and, until now, nothing else picked it up.
+ */
+export function applyConversionCssFixes(
+  html: string,
+  opts: ConversionCssOptions
+): ArticleCssPatchResult {
+  let patched = html;
+  const fixes: string[] = [];
+
+  if (opts.tightenMobileHero && !patched.includes(FOLD_FIX_MARKER)) {
+    const rule =
+      `<style>/* ${FOLD_FIX_MARKER} */@media(max-width:480px){` +
+      `.article-hero img{max-height:200px}` +
+      `.article-hero{margin:0.75rem 0}` +
+      `}</style>`;
+    // Prefer </head>; fall back to prepending so a fragment without a head
+    // still gets the rule rather than silently dropping it.
+    if (/<\/head>/i.test(patched)) {
+      patched = patched.replace(/<\/head>/i, `${rule}</head>`);
+    } else {
+      patched = rule + patched;
+    }
+    fixes.push("mobile fold: capped .article-hero img at 200px (was 430px)");
+  }
+
+  return { patched, fixes };
+}
