@@ -3207,6 +3207,37 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         result.kvKey ?? "",
         ""
       );
+
+      // Fire the Published Article Editorial Agent, exactly as the
+      // autonomous loop does. Without this, a manually generated article
+      // was the ONLY publish path that never got a look at its finished
+      // rendered page: the Step 15 design audit screenshots the article
+      // as it stood at the Step 13 KV write, and Steps 17/18/20 rewrite
+      // it afterwards. The Editorial Agent is the one pass that captures
+      // the page as it actually ships, so both publish paths need it.
+      //
+      // Skipped runs (existing kvKey, nothing regenerated) are excluded —
+      // there is no new page to audit.
+      if (!skipped && result.kvKey) {
+        const referenceUrl = pickEditorialReferenceUrl(category);
+        this.ctx.waitUntil(
+          runEditorialAgent(this, {
+            kvKey: result.kvKey,
+            referenceUrl,
+            applyFix: true
+          }).then(
+            () => undefined,
+            (err: unknown) => {
+              this.log(
+                "error",
+                `Editorial Agent: post-publish orchestrator threw for ${result.kvKey}: ${errMsg(err)}`,
+                "editorialAgent"
+              );
+            }
+          )
+        );
+      }
+
       const mirrorCompetitorUrl = this.state.currentCompetitorUrl?.trim() ?? "";
       this.log(
         "info",

@@ -26,6 +26,7 @@ import type { SEOArticleAgent } from "../server";
 import { DEFAULT_PROMOTION_TARGET_DOMAIN, prodKvRestApi } from "./prod-publish";
 import { extractKeywordPriceTokens, stripPricesFromHtml } from "./html-builder";
 import { runKimiWithPoll } from "./kimi-model";
+import { assessRenderedFreshness } from "./audit-freshness";
 import {
   capturePageScreenshot,
   renderPage,
@@ -349,6 +350,36 @@ export async function runEditorialAgent(
     `Editorial Agent [step 2/4]: captured ${screenshots.urls.length} screenshots, extracted ${screenshots.extractedText.length} chars of rendered text`,
     "editorialAgent"
   );
+
+  // Does the page we just screenshotted actually match the article we read
+  // from KV? The live URL is served by a different Worker off the same
+  // namespace, so an edge-cached or lagging copy would have us critiquing
+  // — and rewriting from — a version that is not the one that shipped.
+  // Report-only: a stale render still yields a usable audit, but the log
+  // now says so instead of leaving it to be discovered by hand.
+  const freshness = assessRenderedFreshness(
+    bodyText,
+    screenshots.extractedText
+  );
+  if (freshness.drifted) {
+    agent.log(
+      "warning",
+      `Editorial Agent [step 2/4]: rendered/stored drift — ${freshness.summary} (stored ${freshness.storedWords} words, rendered ${freshness.renderedWords}); vision findings may describe a version that is no longer in KV`,
+      "editorialAgent"
+    );
+  } else if (freshness.checked) {
+    agent.log(
+      "info",
+      `Editorial Agent [step 2/4]: audited page verified against KV — ${freshness.summary}`,
+      "editorialAgent"
+    );
+  } else {
+    agent.log(
+      "info",
+      `Editorial Agent [step 2/4]: freshness check ${freshness.summary}`,
+      "editorialAgent"
+    );
+  }
 
   // ── Step 3: visual audit + merged report ──────────────────────────────────
   agent.log(
