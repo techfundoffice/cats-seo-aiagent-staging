@@ -3798,6 +3798,49 @@ async function generateArticleUnsafe(
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Step 20.5/24: Fold fix — act on the design audit's layout findings
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The audit's non-content findings had nowhere to go: anything
+    // categorised layout/mobile is `contentAddressable: false`, so the
+    // Polish Agent skips it and nothing else consumed it. This applies the
+    // one deterministic fix that moves the needle — capping the hero on
+    // small viewports so a product and a buy button reach the first screen.
+    //
+    // Placed AFTER Step 20 on purpose: Steps 17, 18 and 20 each rewrite and
+    // re-put the article, so a CSS patch applied any earlier is silently
+    // clobbered by the next content rewrite.
+    if (
+      designAuditReport &&
+      !designAuditReport.skipped &&
+      (designAuditReport.signals.mobile.ctaAboveFold === false ||
+        designAuditReport.signals.mobile.productVisibleAboveFold === false)
+    ) {
+      try {
+        const currentHtml = await agent.envBindings.ARTICLES_KV.get(kvKey);
+        if (currentHtml) {
+          const { applyConversionCssFixes } = await import("./patch-css");
+          const { patched, fixes } = applyConversionCssFixes(currentHtml, {
+            tightenMobileHero: true
+          });
+          if (fixes.length > 0) {
+            await agent.envBindings.ARTICLES_KV.put(kvKey, patched);
+            agent.log(
+              "info",
+              `Step 20.5: fold fix applied — ${fixes.join("; ")} (mobile fold had ${designAuditReport.signals.mobile.ctaAboveFold === false ? "no CTA" : "no product"})`,
+              "qaReviewer",
+              { kanbanStage: "aiReview" }
+            );
+          }
+        }
+      } catch (foldErr: unknown) {
+        agent.log(
+          "warning",
+          `Step 20.5: fold fix failed for ${kvKey} (${errMsg(foldErr)}); publish stands unchanged`
+        );
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Step 21/24: Quora Answer Seeder — post AI-synthesised answers to Quora
     //               questions matching the keyword / PAA questions, citing the
     //               live article URL.  Non-fatal; degrades to dry-run when
