@@ -93,6 +93,7 @@ import {
   type UnsourcedClaimFinding
 } from "./unsourced-claims";
 import { runDesignAudit, type DesignAuditReport } from "./design-audit";
+import { EMPTY_CONVERSION_SIGNALS } from "../tools";
 import { formatActivityLogModelPromptCell } from "../activityLogSheetColumns";
 import {
   estimateCompetitorOverlapPercent,
@@ -3327,6 +3328,11 @@ async function generateArticleUnsafe(
                 mobileScreenshotKey: null,
                 issues: [],
                 contentIssues: [],
+                signals: {
+                  desktop: { ...EMPTY_CONVERSION_SIGNALS },
+                  mobile: { ...EMPTY_CONVERSION_SIGNALS }
+                },
+                signalSummary: "no signals returned",
                 analysisErrors: [],
                 skipped: true,
                 skipReason: `budget exceeded (${AUDIT_BUDGET_MS}ms); pipeline continues without design feedback`
@@ -3343,10 +3349,26 @@ async function generateArticleUnsafe(
       } else {
         agent.log(
           "info",
-          `Design Audit: ${designAuditReport.issues.length} issues (${designAuditReport.contentIssues.length} content-addressable)`,
+          `Design Audit: ${designAuditReport.issues.length} issues (${designAuditReport.contentIssues.length} content-addressable) — ${designAuditReport.signalSummary}`,
           "qaReviewer",
           { kanbanStage: "aiReview" }
         );
+        // The above-fold signals are the part that predicts affiliate
+        // clicks, so a miss gets its own warning rather than being buried
+        // in the issue count. Mobile only: desktop folds are tall enough
+        // that a CTA almost always makes it in.
+        const mobileSignals = designAuditReport.signals.mobile;
+        if (
+          mobileSignals.ctaAboveFold === false ||
+          mobileSignals.productVisibleAboveFold === false
+        ) {
+          agent.log(
+            "warning",
+            `Design Audit: mobile fold shows ${mobileSignals.ctaAboveFold === false ? "no buy CTA" : "a CTA"} and ${mobileSignals.productVisibleAboveFold === false ? "no product" : "a product"} — readers must scroll before anything is clickable`,
+            "qaReviewer",
+            { kanbanStage: "aiReview" }
+          );
+        }
       }
     } catch (err: unknown) {
       agent.log(

@@ -16,10 +16,13 @@
  */
 import type { SEOArticleAgent } from "../server";
 import {
-  analyzeScreenshotWithLlava,
+  analyzeScreenshotWithVision,
   capturePageScreenshot,
   DESIGN_AUDIT_VIEWPORTS,
+  EMPTY_CONVERSION_SIGNALS,
   getMissingBrowserRenderingBindings,
+  summarizeConversionSignals,
+  type ConversionSignals,
   type DesignAuditIssue,
   type VisionAnalysisResult
 } from "../tools";
@@ -49,9 +52,19 @@ export interface DesignAuditReport {
   analysisErrors: string[];
   /**
    * Raw model text per viewport, truncated. Useful to distinguish "page
-   * is clean" from "Llava emitted malformed JSON" when `issues` is empty.
+   * is clean" from "the model emitted malformed JSON" when `issues` is
+   * empty.
    */
   rawVisionResponses?: { desktop?: string; mobile?: string };
+  /**
+   * Above-the-fold conversion measurements per viewport. Mobile is the one
+   * that matters for affiliate clicks — it is where a tall hero pushes the
+   * first buy button out of sight — so it is kept separate rather than
+   * merged with desktop.
+   */
+  signals: { desktop: ConversionSignals; mobile: ConversionSignals };
+  /** One-line summary of `signals.mobile`, for the activity log. */
+  signalSummary: string;
   skipped: boolean;
   skipReason?: string;
 }
@@ -62,7 +75,7 @@ export interface DesignAuditReport {
  * Captures desktop (1440×900) and mobile (390×844) screenshots of `url`
  * via Cloudflare Browser Rendering, stores the JPEG frames in R2 under
  * `design-audits/<slug>/{desktop,mobile}.jpg`, then runs each frame through
- * Llava vision analysis (`analyzeScreenshotWithLlava`) and merges the
+ * Llava vision analysis (`analyzeScreenshotWithVision`) and merges the
  * per-viewport issue lists into a deduplicated `DesignAuditReport`.
  *
  * Skips gracefully (returns `{ skipped: true }`) when either
@@ -90,6 +103,11 @@ export async function runDesignAudit(
     mobileScreenshotKey: null,
     issues: [],
     contentIssues: [],
+    signals: {
+      desktop: { ...EMPTY_CONVERSION_SIGNALS },
+      mobile: { ...EMPTY_CONVERSION_SIGNALS }
+    },
+    signalSummary: "no signals returned",
     analysisErrors: [],
     skipped: false
   };
@@ -182,13 +200,16 @@ export async function runDesignAudit(
     };
   }
 
-  const emptyAnalysis: VisionAnalysisResult = { issues: [] };
+  const emptyAnalysis: VisionAnalysisResult = {
+    issues: [],
+    signals: { ...EMPTY_CONVERSION_SIGNALS }
+  };
   const [desktopAnalysis, mobileAnalysis] = await Promise.all([
     desktopPng
-      ? analyzeScreenshotWithLlava(agent, desktopPng, url, "desktop")
+      ? analyzeScreenshotWithVision(agent, desktopPng, url, "desktop")
       : Promise.resolve(emptyAnalysis),
     mobilePng
-      ? analyzeScreenshotWithLlava(agent, mobilePng, url, "mobile")
+      ? analyzeScreenshotWithVision(agent, mobilePng, url, "mobile")
       : Promise.resolve(emptyAnalysis)
   ]);
 
@@ -215,6 +236,11 @@ export async function runDesignAudit(
     ...base,
     issues,
     contentIssues: issues.filter((i) => i.contentAddressable),
+    signals: {
+      desktop: desktopAnalysis.signals,
+      mobile: mobileAnalysis.signals
+    },
+    signalSummary: `mobile — ${summarizeConversionSignals(mobileAnalysis.signals)}`,
     analysisErrors,
     rawVisionResponses: {
       desktop: desktopAnalysis.rawText,
