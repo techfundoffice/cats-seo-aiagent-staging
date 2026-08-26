@@ -11,7 +11,11 @@
  *     the vision model for design findings on an arbitrary URL.
  */
 import { errMsg, getEnvBinding, repairJson } from "../pipeline/http-utils";
-import { tool } from "ai";
+import { generateText, tool } from "ai";
+import {
+  getClaudeCodeLanguageModel,
+  getClaudeRateLimitCooldownRemainingMs
+} from "../pipeline/claude-code-subscription";
 import { z } from "zod";
 import type { SEOArticleAgent } from "../server";
 import { extractEmbeddedJsonCandidates } from "../objectLike";
@@ -123,20 +127,41 @@ export const CATEGORY_CONTENT_ADDRESSABLE: Record<
 };
 
 /**
- * Build the strict JSON-only prompt used for screenshot design audits.
+ * Build the strict JSON-only prompt used for screenshot audits.
+ *
+ * This asks a conversion question, not a design-critique question. The page
+ * exists to move a reader to an affiliate link, so what matters is what is
+ * reachable without scrolling — and the answers come back as booleans and a
+ * fraction that can be tracked across the corpus, rather than prose that
+ * can only be read once and forgotten.
+ *
+ * The screenshot is the first viewport only, so every question is scoped to
+ * it; nothing here asks the model to guess at what lies below.
  */
 export function buildVisionPrompt(url: string, viewportLabel: string): string {
-  return `You are a senior web-design auditor. Inspect this ${viewportLabel} screenshot of ${url} and return STRICT JSON only (no prose, no markdown fences, no commentary):
+  const dims =
+    viewportLabel === "mobile"
+      ? `${DESIGN_AUDIT_VIEWPORTS.mobile.width}x${DESIGN_AUDIT_VIEWPORTS.mobile.height}`
+      : `${DESIGN_AUDIT_VIEWPORTS.desktop.width}x${DESIGN_AUDIT_VIEWPORTS.desktop.height}`;
 
-{"issues":[{"severity":"critical|major|minor","category":"layout|typography|color|mobile|cta|nav|hero|content","description":"...","contentAddressable":true|false,"suggestion":"..."}]}
+  return `You are auditing whether a product-review page earns affiliate clicks. This is a ${viewportLabel} screenshot (${dims}) of ${url}, showing ONLY the first viewport — what a reader sees before scrolling.
 
-Rules:
-- Max 6 issues, ordered by severity (critical first).
-- EVERY issue MUST include all five fields: severity, category, description, contentAddressable, suggestion. Do not omit "suggestion".
-- "contentAddressable": true ONLY for issues fixable by rewriting article COPY — missing CTA text, weak hero headline, thin FAQ, generic intro, unclear section headings. Set false for CSS/theme issues (spacing, fonts, colors, mobile scaling).
-- "description" ≤ 140 chars, concrete ("hero headline 'Untitled' is generic" not "text needs work").
-- "suggestion" ≤ 140 chars, actionable ("Replace with 'Best Disposable Litter Boxes for Cat Travel, Reviewed'" not "improve it").
-- If the page looks clean and well-designed, return exactly {"issues":[]}.`;
+Return STRICT JSON only (no prose, no markdown fences, no commentary):
+
+{"signals":{"ctaAboveFold":true|false,"productVisibleAboveFold":true|false,"contentStartsAboveFold":true|false,"heroFraction":0.0},"issues":[{"severity":"critical|major|minor","category":"layout|typography|color|mobile|cta|nav|hero|content","description":"...","contentAddressable":true|false,"suggestion":"..."}]}
+
+Signals — answer ONLY from what is visible in this screenshot:
+- "ctaAboveFold": is a buy/affiliate control visible ("Check price on Amazon", "View on Amazon", a price button)? Site navigation and newsletter signups do NOT count.
+- "productVisibleAboveFold": is an actual product — a pick card, product photo, or named product with a link — visible?
+- "contentStartsAboveFold": has the article's body copy begun, or is the viewport still all header, hero image, and title?
+- "heroFraction": share of this viewport's height taken by site header + hero image + title before any body content, as a decimal 0.0-1.0. Estimate to one decimal.
+
+Issues — max 4, ordered by severity, and ONLY ones that plausibly cost clicks:
+- EVERY issue MUST include all five fields. Do not omit "suggestion".
+- "contentAddressable": true ONLY for issues fixable by rewriting article COPY — weak CTA wording, a generic hero headline, an unclear section heading. Set false for anything needing CSS or layout changes (spacing, image height, button size, mobile scaling).
+- "description" and "suggestion" each 140 chars max, concrete and specific to what you can see.
+- Ignore purely aesthetic preferences. A plain page that puts a product and a buy button in front of the reader is a GOOD page.
+- If nothing plausibly costs a click, return "issues":[].`;
 }
 
 function coerceIssue(raw: unknown): DesignAuditIssue | null {
@@ -237,8 +262,120 @@ export function parseVisionJson(text: string): DesignAuditIssue[] {
  * `issues` is an empty array. `rawText` preserves the raw model response for
  * debugging.
  */
+/**
+ * Measurable above-the-fold facts about a published article, as read off a
+ * screenshot.
+ *
+ * These exist because prose findings ("the CTA could be more prominent")
+ * cannot be tracked across a corpus or compared before and after a change,
+ * and affiliate clicks are the thing a screenshot is genuinely qualified to
+ * predict.
+ *
+ * Scope note: `capturePageScreenshot` captures the **viewport only** — no
+ * `fullPage` — so every signal here is a first-fold fact. How far down the
+ * page a CTA sits when it is *not* above the fold is deliberately absent
+ * rather than guessed; measuring that needs a full-page capture, which
+ * would multiply image size and vision cost.
+ *
+ * `null` means the model did not answer for that field, which is different
+ * from `false`.
+ */
+export interface ConversionSignals {
+  /** An affiliate / "check price" control is visible in the first viewport. */
+  ctaAboveFold: boolean | null;
+  /** A product pick or card is visible in the first viewport. */
+  productVisibleAboveFold: boolean | null;
+  /** Article body copy (not just title/hero) begins in the first viewport. */
+  contentStartsAboveFold: boolean | null;
+  /** Share of the first viewport taken by hero/header before body content. */
+  heroFraction: number | null;
+}
+
+export const EMPTY_CONVERSION_SIGNALS: ConversionSignals = {
+  ctaAboveFold: null,
+  productVisibleAboveFold: null,
+  contentStartsAboveFold: null,
+  heroFraction: null
+};
+
+function coerceSignalBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "true" || v === "yes") return true;
+    if (v === "false" || v === "no") return false;
+  }
+  return null;
+}
+
+/**
+ * Read the `signals` object out of a vision response.
+ *
+ * Tolerant by design: vision models return booleans as strings, fractions
+ * as percentages, and sometimes omit the object entirely. An unreadable
+ * field becomes `null` — never a default that would be logged as a real
+ * measurement.
+ */
+export function parseConversionSignals(raw: unknown): ConversionSignals {
+  if (!raw || typeof raw !== "object") return { ...EMPTY_CONVERSION_SIGNALS };
+  const source = raw as Record<string, unknown>;
+  const nested =
+    source.signals && typeof source.signals === "object"
+      ? (source.signals as Record<string, unknown>)
+      : source;
+
+  let heroFraction: number | null = null;
+  const rawHero = nested.heroFraction;
+  const heroNumber =
+    typeof rawHero === "number"
+      ? rawHero
+      : typeof rawHero === "string"
+        ? parseFloat(rawHero.replace("%", ""))
+        : NaN;
+  if (Number.isFinite(heroNumber)) {
+    // Accept a percentage as readily as a fraction.
+    const asFraction = heroNumber > 1 ? heroNumber / 100 : heroNumber;
+    heroFraction = Math.min(1, Math.max(0, asFraction));
+  }
+
+  return {
+    ctaAboveFold: coerceSignalBoolean(nested.ctaAboveFold),
+    productVisibleAboveFold: coerceSignalBoolean(
+      nested.productVisibleAboveFold
+    ),
+    contentStartsAboveFold: coerceSignalBoolean(nested.contentStartsAboveFold),
+    heroFraction
+  };
+}
+
+/** One-line log form; omits fields the model did not answer. */
+export function summarizeConversionSignals(signals: ConversionSignals): string {
+  const parts: string[] = [];
+  if (signals.ctaAboveFold !== null) {
+    parts.push(`CTA above fold: ${signals.ctaAboveFold ? "yes" : "NO"}`);
+  }
+  if (signals.productVisibleAboveFold !== null) {
+    parts.push(
+      `product above fold: ${signals.productVisibleAboveFold ? "yes" : "NO"}`
+    );
+  }
+  if (signals.contentStartsAboveFold !== null) {
+    parts.push(
+      `body copy above fold: ${signals.contentStartsAboveFold ? "yes" : "NO"}`
+    );
+  }
+  if (signals.heroFraction !== null) {
+    parts.push(`hero takes ${Math.round(signals.heroFraction * 100)}% of fold`);
+  }
+  return parts.length > 0 ? parts.join(", ") : "no signals returned";
+}
+
 export interface VisionAnalysisResult {
   issues: DesignAuditIssue[];
+  /** Above-the-fold measurements; all-null when the model returned none. */
+  signals: ConversionSignals;
+  /** Which model produced this result, for log attribution. */
+  model?: string;
   error?: string;
   rawText?: string;
 }
@@ -300,12 +437,117 @@ function extractVisionResponseText(value: unknown, depth = 0): string {
  * the parser extracted nothing (distinguishes "clean page" from "malformed
  * model output" — both previously returned []).
  */
-export async function analyzeScreenshotWithLlava(
+/** Shared response handling for both vision backends. */
+function buildVisionResult(
+  text: string,
+  viewportLabel: string,
+  model: string
+): VisionAnalysisResult {
+  const issues = parseVisionJson(text);
+  let signals = { ...EMPTY_CONVERSION_SIGNALS };
+  for (const candidate of [
+    text.trim(),
+    ...extractEmbeddedJsonCandidates(text.trim(), VISION_JSON_CANDIDATE_LIMIT)
+  ]) {
+    try {
+      const parsed = JSON.parse(repairJson(candidate)) as unknown;
+      const found = parseConversionSignals(parsed);
+      const answered = Object.values(found).some((v) => v !== null);
+      if (answered) {
+        signals = found;
+        break;
+      }
+    } catch {
+      /* try the next candidate */
+    }
+  }
+
+  const returnedNothing =
+    issues.length === 0 &&
+    Object.values(signals).every((v) => v === null) &&
+    !/"issues"\s*:\s*\[\s*\]/.test(text);
+
+  return {
+    issues,
+    signals,
+    model,
+    error: returnedNothing
+      ? `${viewportLabel}: ${model} emitted ${text.length} chars but nothing parseable`
+      : undefined,
+    rawText: text.slice(0, 1200)
+  };
+}
+
+/**
+ * Ask Claude to read the screenshot. Returns null when no Claude Code
+ * subscription is configured, so the caller falls through to Workers AI.
+ *
+ * Claude is tried first for the same reason `kimi-model.ts` tries it first
+ * everywhere else: it is the primary provider for this Worker. It also
+ * matters more here than elsewhere — the questions in `buildVisionPrompt`
+ * ("has body copy started, or is this still all hero?") are exactly the
+ * kind of judgement a 7B captioning model answers unreliably.
+ */
+async function analyzeScreenshotWithClaude(
+  agent: SEOArticleAgent,
+  imageBytes: Uint8Array,
+  url: string,
+  viewportLabel: string
+): Promise<VisionAnalysisResult | null> {
+  const model = getClaudeCodeLanguageModel(
+    agent.envBindings as Parameters<typeof getClaudeCodeLanguageModel>[0]
+  );
+  if (!model) return null;
+  if (getClaudeRateLimitCooldownRemainingMs() > 0) return null;
+
+  try {
+    const { text } = await generateText({
+      model,
+      maxOutputTokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: buildVisionPrompt(url, viewportLabel) },
+            { type: "image", image: imageBytes, mediaType: "image/jpeg" }
+          ]
+        }
+      ]
+    });
+    const trimmed = (text ?? "").trim();
+    if (!trimmed) return null;
+    return buildVisionResult(trimmed, viewportLabel, "claude");
+  } catch (err: unknown) {
+    agent.log(
+      "warning",
+      `Vision audit: Claude call failed (${errMsg(err)}); falling back to ${VISION_MODEL}`,
+      "qaReviewer"
+    );
+    return null;
+  }
+}
+
+/**
+ * Analyze one screenshot for conversion signals and click-costing issues.
+ *
+ * Claude first, Workers AI Llava as the fallback — the same order and the
+ * same "skip Claude on no subscription / active cooldown / call failure"
+ * rule the rest of the pipeline uses.
+ */
+export async function analyzeScreenshotWithVision(
   agent: SEOArticleAgent,
   imageBytes: Uint8Array,
   url: string,
   viewportLabel: string
 ): Promise<VisionAnalysisResult> {
+  const viaClaude = await analyzeScreenshotWithClaude(
+    agent,
+    imageBytes,
+    url,
+    viewportLabel
+  );
+  if (viaClaude) return viaClaude;
+
   try {
     const runVision = agent.envBindings.AI.run as (
       model: string,
@@ -325,26 +567,27 @@ export async function analyzeScreenshotWithLlava(
     if (!text) {
       return {
         issues: [],
+        signals: { ...EMPTY_CONVERSION_SIGNALS },
+        model: "llava",
         error: `${viewportLabel}: empty Llava response`
       };
     }
-    const issues = parseVisionJson(text);
-    const error =
-      issues.length === 0 && !/"issues"\s*:\s*\[\s*\]/.test(text)
-        ? `${viewportLabel}: emitted ${text.length} chars but no parseable issues`
-        : undefined;
-    return {
-      issues,
-      error,
-      rawText: text.slice(0, 1200)
-    };
+    return buildVisionResult(text, viewportLabel, "llava");
   } catch (err: unknown) {
     return {
       issues: [],
+      signals: { ...EMPTY_CONVERSION_SIGNALS },
+      model: "llava",
       error: `${viewportLabel}: ${errMsg(err)}`
     };
   }
 }
+
+/**
+ * @deprecated Kept so existing call sites keep compiling; the routing is no
+ * longer Llava-only. Use `analyzeScreenshotWithVision`.
+ */
+export const analyzeScreenshotWithLlava = analyzeScreenshotWithVision;
 
 // ── AI-SDK tool wrappers ──────────────────────────────────────────────────────
 
@@ -464,10 +707,16 @@ export function createAuditPageDesignTool(agent: SEOArticleAgent) {
       const [desktopAnalysis, mobileAnalysis] = await Promise.all([
         desktopCap.bytes
           ? analyzeScreenshotWithLlava(agent, desktopCap.bytes, url, "desktop")
-          : Promise.resolve<VisionAnalysisResult>({ issues: [] }),
+          : Promise.resolve<VisionAnalysisResult>({
+              issues: [],
+              signals: { ...EMPTY_CONVERSION_SIGNALS }
+            }),
         mobileCap.bytes
           ? analyzeScreenshotWithLlava(agent, mobileCap.bytes, url, "mobile")
-          : Promise.resolve<VisionAnalysisResult>({ issues: [] })
+          : Promise.resolve<VisionAnalysisResult>({
+              issues: [],
+              signals: { ...EMPTY_CONVERSION_SIGNALS }
+            })
       ]);
       const deduped = new Map<string, DesignAuditIssue>();
       const analysisErrors: string[] = [...captureErrors];
