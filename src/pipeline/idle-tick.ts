@@ -6,7 +6,10 @@ import {
   enforceTitleSerpWindow
 } from "./title-meta-normalizer";
 import { prodKvRestApi } from "./prod-publish";
-import { classifyCtrExperiment } from "./ctr-experiments";
+import {
+  classifyCtrExperiment,
+  shouldRollbackSnippet
+} from "./ctr-experiments";
 
 /**
  * idle-tick.ts — productive use of the quiet minutes between article
@@ -53,6 +56,8 @@ interface ResolvableExperiment {
   id: number;
   kv_key: string;
   new_title: string;
+  old_title: string;
+  old_meta: string;
   before_impressions: number;
   before_clicks: number;
   before_ctr: number | null;
@@ -299,6 +304,87 @@ Write a MORE CLICKABLE replacement. Rules: title 48-60 characters, keep the main
 }
 
 /**
+ * Put a losing snippet back.
+ *
+ * Restores ONLY the title and meta description, from the values recorded on
+ * the experiment row — not the full-HTML `ctr-backup:` snapshot the rewrite
+ * also saves. In the 28 days between apply and resolve the Editorial Agent,
+ * QC Agent and Polish Agent may all have rewritten the body; replaying a
+ * month-old snapshot to undo a title change would throw all of that away.
+ *
+ * Best-effort by design: a page that has since been deleted, redirected, or
+ * had its title edited by something else is left alone and reported, never
+ * forced.
+ */
+async function rollbackCtrRewrite(
+  agent: SEOArticleAgent,
+  row: ResolvableExperiment
+): Promise<{ ok: boolean; detail: string }> {
+  const env = agent.envBindings;
+  const api = prodKvRestApi(env);
+  if (!api) {
+    return { ok: false, detail: "rollback skipped — CF API creds missing" };
+  }
+  try {
+    const res = await fetch(`${api.base}/${encodeURIComponent(row.kv_key)}`, {
+      headers: api.headers
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        detail: `rollback skipped — page fetch ${res.status}`
+      };
+    }
+    const html = await res.text();
+    const live = extractSerpSnippet(html);
+
+    const decision = shouldRollbackSnippet({
+      liveTitle: live.title,
+      appliedTitle: row.new_title,
+      originalTitle: row.old_title
+    });
+    if (!decision.rollback) {
+      return { ok: false, detail: `rollback skipped — ${decision.reason}` };
+    }
+
+    const restored = applySerpSnippet(html, live, {
+      title: row.old_title,
+      metaDescription: row.old_meta || live.metaDescription
+    });
+    if (restored === html) {
+      return {
+        ok: false,
+        detail: "rollback skipped — snippet unchanged"
+      };
+    }
+
+    const put = await fetch(`${api.base}/${encodeURIComponent(row.kv_key)}`, {
+      method: "PUT",
+      headers: { ...api.headers, "Content-Type": "text/plain" },
+      body: restored
+    });
+    if (!put.ok) {
+      return { ok: false, detail: `rollback write failed — ${put.status}` };
+    }
+
+    // Clear the 14-day marker so the page is eligible for a fresh attempt
+    // rather than staying locked out by the rewrite that just lost.
+    try {
+      await env.ARTICLES_KV.delete(`ctr-rewrite:${row.kv_key}`);
+    } catch {
+      /* the marker expires on its own; not worth failing the rollback */
+    }
+
+    return {
+      ok: true,
+      detail: `rolled back to "${row.old_title.slice(0, 60)}"`
+    };
+  } catch (err: unknown) {
+    return { ok: false, detail: `rollback threw — ${errMsg(err)}` };
+  }
+}
+
+/**
  * Resolve CTR experiments whose after-window has fully turned over.
  *
  * Search Console reports a trailing 28-day window, so an experiment is only
@@ -315,7 +401,7 @@ async function resolveCtrExperiments(
 
   const due = await db
     .prepare(
-      `SELECT e.id, e.kv_key, e.new_title,
+      `SELECT e.id, e.kv_key, e.new_title, e.old_title, e.old_meta,
               e.before_impressions, e.before_clicks, e.before_ctr,
               e.before_position,
               p.impressions AS after_impressions, p.clicks AS after_clicks,
@@ -399,6 +485,26 @@ async function resolveCtrExperiments(
       "analyst",
       { kanbanStage: "done" }
     );
+
+    // A rewrite that measurably lost clicks keeps losing them until it is
+    // undone, so the verdict is acted on rather than just recorded.
+    if (verdict.outcome === "regressed") {
+      const rollback = await rollbackCtrRewrite(agent, row);
+      await db
+        .prepare(
+          `UPDATE ctr_experiments
+              SET outcome_detail = outcome_detail || ' | ' || ?1
+            WHERE id = ?2`
+        )
+        .bind(rollback.detail, row.id)
+        .run();
+      agent.log(
+        rollback.ok ? "info" : "warning",
+        `CTR rollback for ${row.kv_key}: ${rollback.detail}`,
+        "analyst",
+        { kanbanStage: "done" }
+      );
+    }
   }
 
   const summary = Object.entries(tally)
