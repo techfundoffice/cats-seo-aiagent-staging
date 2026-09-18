@@ -428,7 +428,11 @@ describe("per-call abort budget", () => {
     const started = Date.now();
     await expect(
       runKimiWithPoll(
-        {} as unknown as Env,
+        // The Workers AI surface is opted back in so the budget actually
+        // reaches the `ai-poll` fallback leg this test asserts on; with the
+        // neuron kill switch at its default the call would refuse before
+        // getting there.
+        { WORKERS_AI_TEXT_ENABLED: "true" } as unknown as Env,
         { prompt: "Rewrite this article." },
         { syncTimeoutMs: 250 },
         agent as never

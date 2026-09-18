@@ -49,6 +49,10 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { aiGenerateWithPoll, type AiPollOptions } from "./ai-poll";
+import {
+  isWorkersAiEnabled,
+  WorkersAiDisabledError
+} from "./workers-ai-budget";
 import type { SEOArticleAgent } from "../server";
 import {
   callClaudeCodeText,
@@ -234,6 +238,15 @@ export function getKimiModel(env: Env): LanguageModel {
 }
 
 function makeWorkersAiKimiModel(env: Env): LanguageModel {
+  // Terminal fallback: past this there is no other provider, so the neuron
+  // kill switch has to refuse rather than degrade. Every hot call site
+  // (writer, qc, polish, traffic-sources, intent-gap, …) already wraps its
+  // `generateText`/`generateObject` in try/catch and treats a provider
+  // failure as "this step produced nothing", which is exactly the intended
+  // behavior here.
+  if (!isWorkersAiEnabled(env, "text")) {
+    throw new WorkersAiDisabledError("text");
+  }
   return createWorkersAI({ binding: env.AI })(WORKERS_AI_KIMI_MODEL, {
     // Passthrough to binding.run — kills the thinking-overflow empty-
     // response bug.
@@ -272,6 +285,16 @@ export function getFreeModel(env: Env): LanguageModel {
  * output budget and returning empty content.
  */
 export function getScoutModel(env: Env): LanguageModel {
+  // Neuron kill switch: the scout was the only surface that ran on `env.AI`
+  // unconditionally and on a short cycle (3 attempts × 2000 output tokens
+  // per tick), so it is the one surface that gets a real alternative rather
+  // than a refusal — OpenRouter's free-model router costs nothing and keeps
+  // category discovery alive. `getFreeModel` itself lands back on the
+  // Workers AI Kimi path only when no OpenRouter key is configured, where
+  // the "text" switch then applies.
+  if (!isWorkersAiEnabled(env, "scout")) {
+    return getFreeModel(env);
+  }
   return createWorkersAI({ binding: env.AI })(WORKERS_AI_QWEN_MODEL, {
     chat_template_kwargs: { enable_thinking: false }
   });
@@ -583,6 +606,16 @@ export async function runKimiWithPoll(
   // finishReason. The writer issues bounded per-section calls (≤4096 tokens),
   // so truncation is unlikely; threading finishReason through is the follow-up
   // if it recurs.
+  if (!isWorkersAiEnabled(env, "text")) {
+    agent.log(
+      "warning",
+      `[kimi-model] ${new WorkersAiDisabledError("text").message}; Claude and ` +
+        `OpenRouter both unavailable, so this call produces nothing`,
+      "contentCreator"
+    );
+    throw new WorkersAiDisabledError("text");
+  }
+
   const workersAiResult = await aiGenerateWithPoll(
     env.AI,
     WORKERS_AI_QWEN_MODEL,

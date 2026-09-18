@@ -1,5 +1,9 @@
 import type { SEOArticleAgent } from "../server";
 import { errMsg, getEnvBinding } from "./http-utils";
+import {
+  isWorkersAiEnabled,
+  workersAiDisabledReason
+} from "./workers-ai-budget";
 
 /**
  * article-image.ts — Cloudflare-native article image generation.
@@ -284,6 +288,19 @@ async function generateSingleImage(
       AI?: { run: (model: string, inputs: unknown) => Promise<unknown> };
     }
   ).AI;
+  // Neuron kill switch. Both branches below bill the same account: the
+  // binding path bills `env.AI` directly, and the multipart path bills the
+  // identical neurons through the REST `accounts/<id>/ai/run/<model>`
+  // endpoint. Gate before either one, and return null — the caller already
+  // treats a null image as "publish without a hero image".
+  if (!isWorkersAiEnabled(agent.envBindings, "image")) {
+    agent.log(
+      "info",
+      `Image generation skipped: ${workersAiDisabledReason("image")}`
+    );
+    return null;
+  }
+
   const models = [model, FALLBACK_MODEL];
 
   for (const m of models) {

@@ -11,6 +11,10 @@
  *     the vision model for design findings on an arbitrary URL.
  */
 import { errMsg, getEnvBinding, repairJson } from "../pipeline/http-utils";
+import {
+  isWorkersAiEnabled,
+  workersAiDisabledReason
+} from "../pipeline/workers-ai-budget";
 import { generateText, tool } from "ai";
 import {
   getClaudeCodeLanguageModel,
@@ -547,6 +551,19 @@ export async function analyzeScreenshotWithVision(
     viewportLabel
   );
   if (viaClaude) return viaClaude;
+
+  // Neuron kill switch: Llava is the fallback behind Claude, so when it is
+  // off the audit reports "no analysis" for this viewport rather than
+  // silently claiming a clean page — same shape this function already
+  // returns for an empty or failed Llava response.
+  if (!isWorkersAiEnabled(agent.envBindings, "vision")) {
+    return {
+      issues: [],
+      signals: { ...EMPTY_CONVERSION_SIGNALS },
+      model: "llava",
+      error: `${viewportLabel}: ${workersAiDisabledReason("vision")}`
+    };
+  }
 
   try {
     const runVision = agent.envBindings.AI.run as (

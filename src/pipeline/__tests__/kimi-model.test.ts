@@ -43,6 +43,33 @@ describe("runKimiWithPoll", () => {
     setRotatedOpenRouterKey(null);
   });
 
+  it("refuses the Workers AI fallback when the neuron kill switch is at its default", async () => {
+    // Claude absent + OpenRouter failing used to drop every call onto
+    // `env.AI`, which is how a month of writer traffic turned into a
+    // 65M-neuron invoice. With no WORKERS_AI_* flag set the call must
+    // refuse instead of billing, and must not touch the binding at all.
+    generateTextMock.mockRejectedValueOnce(new Error("OpenRouter 402"));
+    const aiRun = vi.fn();
+
+    const agent = { log: vi.fn(), rotateOpenRouterKeyFromDoppler: vi.fn() };
+    const env = {
+      OPENROUTER_API_KEY: "test-openrouter-key",
+      AI: { run: aiRun }
+    } as unknown as Env;
+
+    await expect(
+      runKimiWithPoll(
+        env,
+        { messages: [{ role: "user", content: "Write." }], max_tokens: 2048 },
+        {},
+        agent as never
+      )
+    ).rejects.toThrow(/disabled to stop neuron billing/);
+
+    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
+    expect(aiRun).not.toHaveBeenCalled();
+  });
+
   it("falls back to Workers AI when OpenRouter returns a non-JSON response", async () => {
     generateTextMock.mockRejectedValueOnce(
       new Error("Invalid JSON response — cause: JSON parsing failed: Text:")
@@ -59,6 +86,10 @@ describe("runKimiWithPoll", () => {
 
     const env = {
       OPENROUTER_API_KEY: "test-openrouter-key",
+      // This test is specifically about the Workers AI fallback leg, so it
+      // opts that surface back in past the neuron kill switch (which
+      // defaults every env.AI surface to off).
+      WORKERS_AI_TEXT_ENABLED: "true",
       AI: { run: vi.fn() }
     } as unknown as Env;
 
@@ -127,6 +158,10 @@ describe("runKimiWithPoll", () => {
 
     const env = {
       OPENROUTER_API_KEY: "test-openrouter-key",
+      // This test is specifically about the Workers AI fallback leg, so it
+      // opts that surface back in past the neuron kill switch (which
+      // defaults every env.AI surface to off).
+      WORKERS_AI_TEXT_ENABLED: "true",
       AI: { run: vi.fn() }
     } as unknown as Env;
 

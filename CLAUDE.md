@@ -208,6 +208,39 @@ when `OPENROUTER_API_KEY` is set, then Workers AI. Claude is skipped on no
 subscription token, an active 429 cooldown, or a call failure. Unlike prod, the
 Kimi fallback is live code — do not delete it.
 
+### Workers AI neuron kill switch
+
+`src/pipeline/workers-ai-budget.ts` gates **every** `env.AI` call. Neurons are
+the only meaningful Cloudflare cost in this account: the Aug 14 – Sep 13, 2026
+invoice charged 65,371,887 "Regular Twitch Neurons" at $0.011/1,000 = **$719.09**
+of a $788.68 bill (R2 $3.09, KV $1.50, Pro plan $25.00 were the rest; Fast Twitch
+Neurons were $0.00).
+
+Four surfaces reach `env.AI`, and **all four default to off**:
+
+| Surface  | Call site                       | Flag                        |
+| -------- | ------------------------------- | --------------------------- |
+| `text`   | `kimi-model.ts` → `ai-poll.ts`  | `WORKERS_AI_TEXT_ENABLED`   |
+| `image`  | `article-image.ts` (flux)       | `WORKERS_AI_IMAGE_ENABLED`  |
+| `vision` | `tools/vision-audit.ts` (Llava) | `WORKERS_AI_VISION_ENABLED` |
+| `scout`  | `kimi-model.ts` `getScoutModel` | `WORKERS_AI_SCOUT_ENABLED`  |
+
+`WORKERS_AI_ENABLED` is the master switch; a per-surface flag overrides it, so
+`WORKERS_AI_ENABLED=true` + `WORKERS_AI_IMAGE_ENABLED=false` runs everything but
+image generation. Values live in `wrangler.jsonc` `vars`.
+
+Two surfaces used to bill unconditionally — `scout` (Qwen3-30B on `env.AI` by
+design, 3 attempts × 2000 tokens per tick) and `image` (flux on every article).
+`text` is only reached after Claude _and_ OpenRouter both fail, which is exactly
+what happens when OpenRouter credits run dry — the documented "6/6→6/10 publish
+drought" wedge, and the most likely shape of a 65M-neuron month.
+
+Disabling a surface never throws into the pipeline on its own: image returns
+`null` (publish without a hero image), vision records an error for that viewport,
+and `text` raises `WorkersAiDisabledError` at the terminal fallback where every
+hot call site already try/catches. With `scout` off the scout runs on the
+OpenRouter free-model router instead, so category discovery keeps working at $0.
+
 Kimi thinking mode must stay disabled or the model burns `max_tokens` on
 reasoning and returns `content: null`: Workers AI uses
 `chat_template_kwargs: { enable_thinking: false, … }` (inside

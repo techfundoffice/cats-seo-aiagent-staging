@@ -101,6 +101,18 @@
     // images are referenced from here so URLs survive the staging →
     // production host rewrite.
     "IMAGES_PUBLIC_BASE_URL": "https://pub-d005467c78ef4809ab585678182662c8.r2.dev",
-    "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30"
+    "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30",
+    // ── Workers AI neuron kill switch ───────────────────────────────────
+    // Every env.AI call is billed in neurons. The Aug 14 – Sep 13, 2026
+    // invoice charged 65,371,887 "Regular Twitch Neurons" = $719.09 of a
+    // $788.68 bill, so all four env.AI surfaces default to OFF here.
+    // Flip a single surface back on with its own var (these override the
+    // master switch), or set WORKERS_AI_ENABLED to "true" for all four.
+    // See src/pipeline/workers-ai-budget.ts.
+    "WORKERS_AI_ENABLED": "false",
+    "WORKERS_AI_TEXT_ENABLED": "false",
+    "WORKERS_AI_IMAGE_ENABLED": "false",
+    "WORKERS_AI_VISION_ENABLED": "false",
+    "WORKERS_AI_SCOUT_ENABLED": "false"
   }
 }
