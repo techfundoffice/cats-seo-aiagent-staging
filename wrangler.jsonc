@@ -106,13 +106,16 @@
     // Every env.AI call is billed in neurons. The Aug 14 – Sep 13, 2026
     // invoice charged 65,371,887 "Regular Twitch Neurons" = $719.09 of a
     // $788.68 bill, so all four env.AI surfaces default to OFF here.
-    // Flip a single surface back on with its own var (these override the
-    // master switch), or set WORKERS_AI_ENABLED to "true" for all four.
+    // Set WORKERS_AI_ENABLED to "true" to turn all four back on. To flip a
+    // single surface, ADD its own var here — WORKERS_AI_TEXT_ENABLED,
+    // _IMAGE_, _VISION_, _SCOUT_ — which overrides the master switch.
+    //
+    // Those four are deliberately not listed with "false" values: a
+    // per-surface flag wins over the master one, so pinning all four to
+    // "false" would make WORKERS_AI_ENABLED=true a no-op. An absent flag
+    // falls through to the master switch and then to disabled, so the
+    // default stays off either way.
     // See src/pipeline/workers-ai-budget.ts.
-    "WORKERS_AI_ENABLED": "false",
-    "WORKERS_AI_TEXT_ENABLED": "false",
-    "WORKERS_AI_IMAGE_ENABLED": "false",
-    "WORKERS_AI_VISION_ENABLED": "false",
-    "WORKERS_AI_SCOUT_ENABLED": "false"
+    "WORKERS_AI_ENABLED": "false"
   }
 }

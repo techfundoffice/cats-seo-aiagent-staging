@@ -29,6 +29,7 @@ vi.mock("../ai-poll", () => ({
 }));
 
 import {
+  getScoutModel,
   isDegenerateOutput,
   runKimiWithPoll,
   setRotatedOpenRouterKey
@@ -218,5 +219,45 @@ describe("isDegenerateOutput", () => {
     const wellOver = "a".repeat(300); // 100% alpha
     expect(isDegenerateOutput(justUnder)).toBe(true);
     expect(isDegenerateOutput(wellOver)).toBe(false);
+  });
+});
+
+describe("getScoutModel", () => {
+  beforeEach(() => {
+    createOpenRouterMock.mockClear();
+    createWorkersAIMock.mockClear();
+    setRotatedOpenRouterKey(null);
+  });
+
+  it("runs on Workers AI when the scout surface is enabled", () => {
+    getScoutModel({
+      WORKERS_AI_SCOUT_ENABLED: "true",
+      AI: { run: vi.fn() }
+    } as unknown as Env);
+    expect(createWorkersAIMock).toHaveBeenCalled();
+  });
+
+  it("uses the OpenRouter free router when the scout surface is disabled", () => {
+    getScoutModel({
+      OPENROUTER_API_KEY: "test-openrouter-key",
+      AI: { run: vi.fn() }
+    } as unknown as Env);
+    expect(createOpenRouterMock).toHaveBeenCalled();
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses rather than billing when the scout is off, no OpenRouter key exists, and the text surface is on", () => {
+    // The surfaces must stay independent. Routing a disabled scout through
+    // `getFreeModel` used to land on the Workers AI Kimi model, which is
+    // gated on "text" — so this combination billed neurons for a scout that
+    // was explicitly switched off, on a costlier model than the one the
+    // switch exists to stop.
+    expect(() =>
+      getScoutModel({
+        WORKERS_AI_TEXT_ENABLED: "true",
+        AI: { run: vi.fn() }
+      } as unknown as Env)
+    ).toThrow(/disabled to stop neuron billing/);
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
   });
 });

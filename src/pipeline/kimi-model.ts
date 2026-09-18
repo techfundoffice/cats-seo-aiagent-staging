@@ -289,11 +289,22 @@ export function getScoutModel(env: Env): LanguageModel {
   // unconditionally and on a short cycle (3 attempts × 2000 output tokens
   // per tick), so it is the one surface that gets a real alternative rather
   // than a refusal — OpenRouter's free-model router costs nothing and keeps
-  // category discovery alive. `getFreeModel` itself lands back on the
-  // Workers AI Kimi path only when no OpenRouter key is configured, where
-  // the "text" switch then applies.
+  // category discovery alive.
+  //
+  // Deliberately NOT `getFreeModel(env)`: that falls back to the Workers AI
+  // Kimi model when no OpenRouter key is configured, and that fallback is
+  // gated on the *text* surface. Routing through it would let
+  // `scout=false, text=true, no OpenRouter key` bill the scout on
+  // `env.AI` — on Kimi K2.5, costlier than the Qwen3 path this switch
+  // exists to stop. The surfaces have to stay independent, so with no
+  // OpenRouter key the scout refuses and `pickNextCategory` falls through
+  // to its hardcoded Tier 2 category pool.
   if (!isWorkersAiEnabled(env, "scout")) {
-    return getFreeModel(env);
+    const key = resolveOpenRouterKey(env);
+    if (key) {
+      return createOpenRouter({ apiKey: key })(OPENROUTER_FREE_MODEL);
+    }
+    throw new WorkersAiDisabledError("scout");
   }
   return createWorkersAI({ binding: env.AI })(WORKERS_AI_QWEN_MODEL, {
     chat_template_kwargs: { enable_thinking: false }

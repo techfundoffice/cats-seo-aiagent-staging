@@ -5,6 +5,7 @@ import {
   getKimiProviderOptions,
   setRotatedOpenRouterKey
 } from "./pipeline/kimi-model";
+import { WorkersAiDisabledError } from "./pipeline/workers-ai-budget";
 import {
   CLAUDE_CODE_SECRET_KEY,
   claudeCodeSubscriptionStatus,
@@ -3351,7 +3352,19 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         stopWhen: stepCountIs(5)
       });
     } catch (err: unknown) {
-      return { error: errMsg(err) };
+      // Only the kill switch turns into data. Every other failure
+      // (provider outage, malformed model output, a tool-loop error)
+      // propagated as an RPC rejection before this change and must keep
+      // doing so, or it vanishes from the activity log entirely.
+      if (err instanceof WorkersAiDisabledError) {
+        return { error: err.message };
+      }
+      this.log(
+        "error",
+        `Agent tool task failed: ${errMsg(err)}`,
+        "promptEngineer"
+      );
+      throw err;
     }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
@@ -3394,7 +3407,19 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         stopWhen: stepCountIs(8)
       });
     } catch (err: unknown) {
-      return { error: errMsg(err) };
+      // Only the kill switch turns into data. Every other failure
+      // (provider outage, malformed model output, a tool-loop error)
+      // propagated as an RPC rejection before this change and must keep
+      // doing so, or it vanishes from the activity log entirely.
+      if (err instanceof WorkersAiDisabledError) {
+        return { error: err.message };
+      }
+      this.log(
+        "error",
+        `Cloudflare MCP task failed: ${errMsg(err)}`,
+        "promptEngineer"
+      );
+      throw err;
     }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(

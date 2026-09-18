@@ -7,6 +7,32 @@ import {
   workersAiDisabledReason,
   type WorkersAiSurface
 } from "../workers-ai-budget";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Read the `vars` block out of the real wrangler.jsonc. Strips `//` line
+ * comments (JSONC) before parsing, ignoring any that sit inside a string.
+ */
+function readWranglerVars(): Record<string, unknown> {
+  const raw = readFileSync(join(process.cwd(), "wrangler.jsonc"), "utf8");
+  const stripped = raw
+    .split("\n")
+    .map((line) => {
+      let inString = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"' && line[i - 1] !== "\\") inString = !inString;
+        if (!inString && ch === "/" && line[i + 1] === "/") {
+          return line.slice(0, i);
+        }
+      }
+      return line;
+    })
+    .join("\n");
+  const parsed = JSON.parse(stripped) as { vars?: Record<string, unknown> };
+  return parsed.vars ?? {};
+}
 
 describe("parseFlag", () => {
   it("passes real booleans through", () => {
@@ -80,6 +106,28 @@ describe("isWorkersAiEnabled", () => {
     expect(
       isWorkersAiEnabled({ WORKERS_AI_TEXT_ENABLED: "sure" }, "text")
     ).toBe(false);
+  });
+});
+
+describe("the shipped wrangler.jsonc configuration", () => {
+  // Regression: pinning all four per-surface flags to "false" in
+  // wrangler.jsonc made WORKERS_AI_ENABLED=true a no-op, because a
+  // per-surface flag wins over the master one. The bug lived in the config
+  // file rather than in the resolver, so this reads the real file instead of
+  // restating it — a future edit that re-pins the surfaces fails here.
+  const shipped = readWranglerVars();
+
+  it("disables every surface as shipped", () => {
+    for (const surface of WORKERS_AI_SURFACES) {
+      expect(isWorkersAiEnabled(shipped, surface)).toBe(false);
+    }
+  });
+
+  it("enables every surface when only the master flag is flipped to true", () => {
+    const flipped = { ...shipped, WORKERS_AI_ENABLED: "true" };
+    for (const surface of WORKERS_AI_SURFACES) {
+      expect(isWorkersAiEnabled(flipped, surface)).toBe(true);
+    }
   });
 });
 
