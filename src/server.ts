@@ -3,9 +3,9 @@ import { generateText, stepCountIs, type ToolSet } from "ai";
 import {
   getKimiModel,
   getKimiProviderOptions,
+  NoModelProviderError,
   setRotatedOpenRouterKey
 } from "./pipeline/kimi-model";
-import { WorkersAiDisabledError } from "./pipeline/workers-ai-budget";
 import {
   CLAUDE_CODE_SECRET_KEY,
   claudeCodeSubscriptionStatus,
@@ -3352,11 +3352,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         stopWhen: stepCountIs(5)
       });
     } catch (err: unknown) {
-      // Only the kill switch turns into data. Every other failure
+      // "No provider configured" is an operator-actionable state, so it
+      // comes back as data the dashboard can render. Every other failure
       // (provider outage, malformed model output, a tool-loop error)
-      // propagated as an RPC rejection before this change and must keep
-      // doing so, or it vanishes from the activity log entirely.
-      if (err instanceof WorkersAiDisabledError) {
+      // propagates as an RPC rejection, as it did before, so it stays
+      // visible in the activity log.
+      if (err instanceof NoModelProviderError) {
         return { error: err.message };
       }
       this.log(
@@ -3407,11 +3408,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         stopWhen: stepCountIs(8)
       });
     } catch (err: unknown) {
-      // Only the kill switch turns into data. Every other failure
+      // "No provider configured" is an operator-actionable state, so it
+      // comes back as data the dashboard can render. Every other failure
       // (provider outage, malformed model output, a tool-loop error)
-      // propagated as an RPC rejection before this change and must keep
-      // doing so, or it vanishes from the activity log entirely.
-      if (err instanceof WorkersAiDisabledError) {
+      // propagates as an RPC rejection, as it did before, so it stays
+      // visible in the activity log.
+      if (err instanceof NoModelProviderError) {
         return { error: err.message };
       }
       this.log(

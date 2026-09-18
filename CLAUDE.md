@@ -141,7 +141,8 @@ Queue (skill-fetch) ─────┘     • serves /feed.rss, /sitemap.xml fr
 ```
 
 Bindings: `ARTICLES_KV`, `SKILLS_DB` + `KEYWORDS_DB` (D1), `IMAGES_R2`,
-`SKILL_FETCH_QUEUE`, `AI` (Workers AI), `ASSETS`.
+`SKILL_FETCH_QUEUE`, `ASSETS`. There is deliberately **no** `AI` (Workers AI)
+binding — see § No Workers AI.
 
 ### Request routing (`src/server.ts`, default export ~line 9342)
 
@@ -171,7 +172,7 @@ generation; that's manual via `POST /api/generate-one`.
 
 1–6 research (KV existence check, DataForSEO volume, competitor capture, SERP
 intent gap, PAA/autocomplete, internal links) → 7 AI generation of structured
-JSON → 9–11 enhancement, text editor, hero image (Workers AI flux → R2),
+JSON → 9–11 enhancement, text editor, hero image (disabled — § No Workers AI),
 YouTube, HTML assembly (`html-builder.ts`) → 12 SEO score (`seo-score.ts`) →
 13 **KV deploy** → 14 live-URL verification → 14.5–14.8 post-write detectors
 (JSON-LD validity, unsourced YMYL claims, fabricated testing claims,
@@ -202,49 +203,53 @@ provider inline.
 - `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
   siss-optimizer) and is the only path with real try-then-fall-back behavior.
 
-Staging is **Claude-first**: each call tries the Claude Code subscription
-(`claude-code-subscription.ts`), then falls through to Kimi K2.5 via OpenRouter
-when `OPENROUTER_API_KEY` is set, then Workers AI. Claude is skipped on no
-subscription token, an active 429 cooldown, or a call failure. Unlike prod, the
-Kimi fallback is live code — do not delete it.
+Staging is **Claude-only, with one fallback**: each call tries the Claude Code
+subscription (`claude-code-subscription.ts`), then falls through to Kimi K2.5
+via OpenRouter when `OPENROUTER_API_KEY` is set. There is no third leg. Claude
+is skipped on no subscription token, an active 429 cooldown, or a call failure.
+Unlike prod, the OpenRouter Kimi fallback is live code — do not delete it.
 
-### Workers AI neuron kill switch
+### No Workers AI — Claude serves every model call
 
-`src/pipeline/workers-ai-budget.ts` gates **every** `env.AI` call. Neurons are
-the only meaningful Cloudflare cost in this account: the Aug 14 – Sep 13, 2026
-invoice charged 65,371,887 "Regular Twitch Neurons" at $0.011/1,000 = **$719.09**
-of a $788.68 bill (R2 $3.09, KV $1.50, Pro plan $25.00 were the rest; Fast Twitch
-Neurons were $0.00).
+**There is no `ai` binding in `wrangler.jsonc` and no `env.AI` path in `src/`.**
+Workers AI inference is billed in neurons, and the Aug 14 – Sep 13, 2026
+invoice charged 65,371,887 "Regular Twitch Neurons" at $0.011/1,000 =
+**$719.09** of a $788.68 bill (R2 $3.09, KV $1.50, Pro plan $25.00 were the
+rest; Fast Twitch Neurons were $0.00). The Claude Code subscription is already
+paid for and costs no neurons, so it serves those calls instead.
 
-Four surfaces reach `env.AI`, and **all four default to off**:
+The four surfaces that used to reach `env.AI`, and where they went:
 
-| Surface  | Call site                       | Flag                        |
-| -------- | ------------------------------- | --------------------------- |
-| `text`   | `kimi-model.ts` → `ai-poll.ts`  | `WORKERS_AI_TEXT_ENABLED`   |
-| `image`  | `article-image.ts` (flux)       | `WORKERS_AI_IMAGE_ENABLED`  |
-| `vision` | `tools/vision-audit.ts` (Llava) | `WORKERS_AI_VISION_ENABLED` |
-| `scout`  | `kimi-model.ts` `getScoutModel` | `WORKERS_AI_SCOUT_ENABLED`  |
+| Was                             | Now                                                 |
+| ------------------------------- | --------------------------------------------------- |
+| `kimi-model.ts` → `ai-poll.ts`  | Claude → OpenRouter → `NoModelProviderError`        |
+| `getScoutModel` (Qwen3-30B)     | Claude → OpenRouter free router → throw             |
+| `tools/vision-audit.ts` (Llava) | Claude only; a failure records a per-viewport error |
+| `article-image.ts` (flux)       | **Disabled** — see below                            |
 
-`WORKERS_AI_ENABLED` is the master switch; a per-surface flag overrides it, so
-`WORKERS_AI_ENABLED=true` + `WORKERS_AI_IMAGE_ENABLED=false` runs everything but
-image generation. Values live in `wrangler.jsonc` `vars`.
+`src/pipeline/ai-poll.ts` (the Workers AI sync→async-batch runner) is deleted;
+its `AiPollOptions` type now lives in `kimi-model.ts`, trimmed to the fields
+the surviving legs honour. `asyncMaxWaitMs` is gone — it was the batch-queue
+knob. A caller's `syncTimeoutMs` now reaches the OpenRouter leg, capped by
+that provider's own ceiling, so a budget is never silently replaced.
 
-Two surfaces used to bill unconditionally — `scout` (Qwen3-30B on `env.AI` by
-design, 3 attempts × 2000 tokens per tick) and `image` (flux on every article).
-`text` is only reached after Claude _and_ OpenRouter both fail, which is exactly
-what happens when OpenRouter credits run dry — the documented "6/6→6/10 publish
-drought" wedge, and the most likely shape of a 65M-neuron month.
+**Image generation is off and cannot be moved to Claude.** Anthropic has no
+image-generation API — Claude takes images as _input_ (that is what the Step
+15 vision audit does) but does not emit them. Both former paths billed the
+same Cloudflare account (the `env.AI` binding and the REST
+`accounts/<id>/ai/run/<model>` endpoint), so both were removed rather than
+flag-gated. `generateSingleImage` returns `null`, and the callers already
+treat a null hero as "publish without one". To restore illustrated articles,
+wire a non-Cloudflare image provider into `generateSingleImage` (key in
+Doppler) and return decoded bytes — the R2 upload, alt text, captions and HTML
+assembly all still work unchanged.
 
-Disabling a surface never throws into the pipeline on its own: image returns
-`null` (publish without a hero image), vision records an error for that viewport,
-and `text` raises `WorkersAiDisabledError` at the terminal fallback where every
-hot call site already try/catches. With `scout` off the scout runs on the
-OpenRouter free-model router instead, so category discovery keeps working at $0.
+Do not reintroduce an `env.AI` fallback. Restoring one means re-adding the
+binding to `wrangler.jsonc` first, which is the intended speed bump.
 
 Kimi thinking mode must stay disabled or the model burns `max_tokens` on
-reasoning and returns `content: null`: Workers AI uses
-`chat_template_kwargs: { enable_thinking: false, … }` (inside
-`aiGenerateWithPoll`); OpenRouter needs `reasoning: { enabled: false }` —
+reasoning and returns `content: null`: OpenRouter needs
+`reasoning: { enabled: false }` —
 `{ exclude: true }` only _hides_ reasoning and does not fix the bug.
 
 ### Data model

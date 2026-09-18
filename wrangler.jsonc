@@ -11,7 +11,11 @@
   "compatibility_date": "2026-04-13",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "ai": { "binding": "AI", "remote": true },
+  // No "ai" (Workers AI) binding: every model call runs on the Claude Code
+  // subscription, with OpenRouter behind it. Workers AI inference is billed
+  // in neurons, and the Aug 14 - Sep 13, 2026 invoice charged 65,371,887 of
+  // them ($719.09 of a $788.68 bill). Leaving the binding off means no code
+  // can reintroduce that charge without this line coming back first.
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -101,21 +105,6 @@
     // images are referenced from here so URLs survive the staging →
     // production host rewrite.
     "IMAGES_PUBLIC_BASE_URL": "https://pub-d005467c78ef4809ab585678182662c8.r2.dev",
-    "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30",
-    // ── Workers AI neuron kill switch ───────────────────────────────────
-    // Every env.AI call is billed in neurons. The Aug 14 – Sep 13, 2026
-    // invoice charged 65,371,887 "Regular Twitch Neurons" = $719.09 of a
-    // $788.68 bill, so all four env.AI surfaces default to OFF here.
-    // Set WORKERS_AI_ENABLED to "true" to turn all four back on. To flip a
-    // single surface, ADD its own var here — WORKERS_AI_TEXT_ENABLED,
-    // _IMAGE_, _VISION_, _SCOUT_ — which overrides the master switch.
-    //
-    // Those four are deliberately not listed with "false" values: a
-    // per-surface flag wins over the master one, so pinning all four to
-    // "false" would make WORKERS_AI_ENABLED=true a no-op. An absent flag
-    // falls through to the master switch and then to disabled, so the
-    // default stays off either way.
-    // See src/pipeline/workers-ai-budget.ts.
-    "WORKERS_AI_ENABLED": "false"
+    "PROD_ARTICLES_KV_NAMESPACE_ID": "bd3b856b2ae147ada9a8d236dd4baf30"
   }
 }

@@ -3,9 +3,9 @@
  *
  * **Claude-first (staging):** every call site here tries the Claude Code
  * subscription (`./claude-code-subscription`) before Kimi. Unlike prod
- * (Claude-only, OpenRouter/Workers AI commented out), staging must keep
+ * (Claude-only, OpenRouter commented out), staging must keep
  * working when there is no active Claude credential, so the existing
- * OpenRouter/Workers AI Kimi path below remains a real fallback — not dead
+ * OpenRouter Kimi path below remains a real fallback — not dead
  * code. Claude is skipped (falling straight through to Kimi) when:
  *   - there is no active Claude subscription token
  *     (`resolveClaudeCodeSubscription` returns null), or
@@ -15,27 +15,31 @@
  *     `isClaudeAuthError`).
  *
  * When `env.OPENROUTER_API_KEY` is set, the Kimi fallback routes through
- * OpenRouter (~33% cheaper on K2.5: $0.44/$2.00 per M tokens vs Workers AI's
- * $0.60/$3.00). When the key is unset, Kimi calls stay on Workers AI.
+ * OpenRouter (~33% cheaper on K2.5: $0.44/$2.00 per M tokens vs the Workers
+ * AI pricing this module no longer uses). When the key is unset, calls stay
+ * on the Claude Code subscription.
  *
  * - `getKimiModel(env)` → returns a LanguageModel for use with Vercel AI
  *   SDK `generateText()` / `generateObject()` sites. Returns the Claude
  *   LanguageModel when a subscription is active and not cooling down,
- *   otherwise the OpenRouter/Workers AI Kimi model. Because this returns a
+ *   otherwise the OpenRouter Kimi model. Because this returns a
  *   model reference (not an awaited call), it cannot retry mid-call — a
  *   Claude auth/runtime error surfacing from a `generateText()` call built
  *   on this model is the caller's to handle. `runKimiWithPoll` below is the
  *   integration point with real try-Claude-then-fall-back behavior.
- * - `runKimiWithPoll(env, params)` → drop-in replacement for
- *   `aiGenerateWithPoll()` at the raw-binding call sites (writer,
- *   siss-optimizer). Tries Claude first; on no-subscription/cooldown/
- *   failure falls through to OpenRouter via AI SDK; falls back further to
- *   the Workers AI sync→async-batch path on HTTP error or empty response.
+ * - `runKimiWithPoll(env, params)` → the awaited call helper used at the
+ *   writer / siss-optimizer call sites. Tries Claude first; on
+ *   no-subscription/cooldown/failure falls through to OpenRouter via AI
+ *   SDK. There is no third leg: Workers AI was removed (see below).
  *
- * Kimi thinking mode is disabled in both Kimi paths so max_tokens fund
+ * **No Workers AI.** Every `env.AI` path in this module is gone. Workers AI
+ * inference is billed in neurons, and the Aug 14 – Sep 13, 2026 Cloudflare
+ * invoice charged 65,371,887 of them ($719.09 of a $788.68 bill). The
+ * Claude Code subscription is already paid for and costs no neurons, so it
+ * serves these calls instead. Do not reintroduce an `env.AI` fallback here.
+ *
+ * Kimi thinking mode is disabled on the OpenRouter path so max_tokens fund
  * content, not reasoning:
- *   - Workers AI: `chat_template_kwargs: { enable_thinking: false, ... }` (inside
- *     aiGenerateWithPoll)
  *   - OpenRouter: `providerOptions.openrouter.reasoning = { enabled: false }`
  *     ⚠️  `{ exclude: true }` only HIDES reasoning output — Kimi still burns
  *     max_tokens on it and returns `content: null`. `{ enabled: false }`
@@ -46,13 +50,7 @@
 
 import { errMsg } from "./http-utils";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createWorkersAI } from "workers-ai-provider";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
-import { aiGenerateWithPoll, type AiPollOptions } from "./ai-poll";
-import {
-  isWorkersAiEnabled,
-  WorkersAiDisabledError
-} from "./workers-ai-budget";
 import type { SEOArticleAgent } from "../server";
 import {
   callClaudeCodeText,
@@ -66,7 +64,6 @@ import {
   resolveClaudeCodeSubscription
 } from "./claude-code-subscription";
 
-const WORKERS_AI_KIMI_MODEL = "@cf/moonshotai/kimi-k2.5";
 /**
  * Default OpenRouter model for the writer. `:nitro` routes to the
  * highest-throughput provider (benchmarked ~15% faster output than the
@@ -78,6 +75,23 @@ function openRouterKimiModelId(env: Env): string {
   return env.OPENROUTER_KIMI_MODEL?.trim() || OPENROUTER_KIMI_MODEL_DEFAULT;
 }
 const OPENROUTER_FREE_MODEL = "openrouter/free";
+
+/**
+ * Per-call knobs for `runKimiWithPoll`. This used to be `ai-poll.ts`'s
+ * options type, back when the terminal fallback was a Workers AI
+ * sync→async-batch runner; that module is gone along with the neuron
+ * spend, so the surviving fields are the ones both remaining legs honour.
+ */
+export interface AiPollOptions {
+  /**
+   * Total wall-clock budget for one call, in ms. Applied to the Claude leg
+   * and, capped by the provider's own ceiling, to the OpenRouter leg — a
+   * caller's budget must not be silently replaced by a leg's default.
+   */
+  syncTimeoutMs?: number;
+  /** Routes transient warnings to the activity feed instead of console. */
+  onWarn?: (msg: string) => void;
+}
 const OPENROUTER_REASONING_DISABLED = { reasoning: { enabled: false } };
 const OPENROUTER_REASONING_LOW = { reasoning: { effort: "low" as const } };
 
@@ -139,26 +153,6 @@ export function isDegenerateOutput(text: string): boolean {
 }
 
 /**
- * Fast Cloudflare Workers AI model: Qwen3-30B-A3B (fp8). A mixture-of-experts
- * model that activates only ~3B params per forward pass, so it completes well
- * inside the 150s sync window AND supports batch queuing — unlike
- * `@cf/moonshotai/kimi-k2.5`, which routinely times out on real generations
- * and rejects queuing with error 8007. Runs entirely on the `env.AI` binding:
- * no OpenRouter credits, no paid-Kimi tokens, no external key to rotate.
- *
- * Used as:
- *   1. the category-scout model (`getScoutModel`), and
- *   2. the `runKimiWithPoll` Workers AI fallback — so article generation keeps
- *      flowing when OpenRouter credits are exhausted instead of wedging on the
- *      timing-out Kimi fallback (the root cause of the 6/6→6/10 publish drought).
- *
- * Qwen3 ships with reasoning ON by default and can burn the output budget on
- * thinking; callers disable it (`chat_template_kwargs.enable_thinking=false`
- * in `aiGenerateWithPoll`; a `/no_think` token in the scout prompt).
- */
-const WORKERS_AI_QWEN_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
-
-/**
  * In-memory override for `OPENROUTER_API_KEY`. Set by the agent's
  * `rotateOpenRouterKeyFromDoppler()` self-heal path when a 401 is detected
  * and Doppler has a fresher value than the Worker's env binding. Lives for
@@ -218,12 +212,10 @@ function useClaudeForKimi(env: Env): boolean {
  * need that resilience (writer, siss-optimizer, text-editor-agent,
  * editorial-agent, keywords) should use `runKimiWithPoll` instead.
  *
- * Both Kimi paths disable Kimi's thinking mode so max_tokens fund visible
- * content, not internal reasoning that overflows and leaves content="":
- *   - Workers AI: `chat_template_kwargs` passthrough on model settings
- *     (matches the raw-binding behavior in `aiGenerateWithPoll`).
- *   - OpenRouter: `providerOptions.openrouter.reasoning.enabled=false` —
- *     applied separately via `getKimiProviderOptions(env)`.
+ * The OpenRouter path disables Kimi's thinking mode so max_tokens fund
+ * visible content, not internal reasoning that overflows and leaves
+ * content="": `providerOptions.openrouter.reasoning.enabled=false`, applied
+ * separately via `getKimiProviderOptions(env)`.
  */
 export function getKimiModel(env: Env): LanguageModel {
   if (useClaudeForKimi(env)) {
@@ -234,28 +226,25 @@ export function getKimiModel(env: Env): LanguageModel {
   if (key) {
     return createOpenRouter({ apiKey: key })(openRouterKimiModelId(env));
   }
-  return makeWorkersAiKimiModel(env);
-}
-
-function makeWorkersAiKimiModel(env: Env): LanguageModel {
-  // Terminal fallback: past this there is no other provider, so the neuron
-  // kill switch has to refuse rather than degrade. Every hot call site
+  // No third provider. Workers AI used to sit here and is what turned a
+  // month of writer traffic into a 65M-neuron invoice; every hot call site
   // (writer, qc, polish, traffic-sources, intent-gap, …) already wraps its
   // `generateText`/`generateObject` in try/catch and treats a provider
-  // failure as "this step produced nothing", which is exactly the intended
-  // behavior here.
-  if (!isWorkersAiEnabled(env, "text")) {
-    throw new WorkersAiDisabledError("text");
+  // failure as "this step produced nothing".
+  throw new NoModelProviderError(
+    "no Claude Code subscription and no OPENROUTER_API_KEY"
+  );
+}
+
+/**
+ * Thrown when neither Claude nor OpenRouter can serve a call. Typed so call
+ * sites can tell "provider not configured" apart from "the model failed".
+ */
+export class NoModelProviderError extends Error {
+  constructor(detail: string) {
+    super(`No model provider available: ${detail}`);
+    this.name = "NoModelProviderError";
   }
-  return createWorkersAI({ binding: env.AI })(WORKERS_AI_KIMI_MODEL, {
-    // Passthrough to binding.run — kills the thinking-overflow empty-
-    // response bug.
-    chat_template_kwargs: {
-      thinking: false,
-      enable_thinking: false,
-      clear_thinking: true
-    }
-  });
 }
 
 /**
@@ -264,7 +253,7 @@ function makeWorkersAiKimiModel(env: Env): LanguageModel {
  * `OPENROUTER_API_KEY`. Used where basic text generation doesn't need
  * Kimi-grade output and a paid-credit outage must not block the pipeline:
  * the category scout (all attempts) and keyword-generation retries.
- * Falls back to the Workers AI Kimi path when no OpenRouter key is
+ * Falls back to the Claude Code subscription when no OpenRouter key is
  * configured (local dev).
  */
 export function getFreeModel(env: Env): LanguageModel {
@@ -272,12 +261,20 @@ export function getFreeModel(env: Env): LanguageModel {
   if (key) {
     return createOpenRouter({ apiKey: key })(OPENROUTER_FREE_MODEL);
   }
-  return makeWorkersAiKimiModel(env);
+  // Was Workers AI Kimi; now the Claude Code subscription, which is already
+  // paid for and costs no neurons.
+  if (useClaudeForKimi(env)) {
+    const claude = getClaudeCodeLanguageModel(env);
+    if (claude) return claude;
+  }
+  throw new NoModelProviderError(
+    "no OPENROUTER_API_KEY and no Claude Code subscription"
+  );
 }
 
 /**
- * Cloudflare Workers AI model for the category scout. Unconditionally runs on
- * the `env.AI` binding (Qwen3-30B-A3B) — it never touches OpenRouter or Kimi,
+ * Model for the category scout. Runs on the Claude Code subscription, with
+ * the OpenRouter free-model router behind it —
  * regardless of whether `OPENROUTER_API_KEY` is set. The scout is a low-stakes,
  * high-frequency discovery task that does not need Kimi-grade output, so this
  * keeps it off paid credits and off the shared Kimi quota. `enable_thinking:
@@ -285,35 +282,29 @@ export function getFreeModel(env: Env): LanguageModel {
  * output budget and returning empty content.
  */
 export function getScoutModel(env: Env): LanguageModel {
-  // Neuron kill switch: the scout was the only surface that ran on `env.AI`
-  // unconditionally and on a short cycle (3 attempts × 2000 output tokens
-  // per tick), so it is the one surface that gets a real alternative rather
-  // than a refusal — OpenRouter's free-model router costs nothing and keeps
-  // category discovery alive.
-  //
-  // Deliberately NOT `getFreeModel(env)`: that falls back to the Workers AI
-  // Kimi model when no OpenRouter key is configured, and that fallback is
-  // gated on the *text* surface. Routing through it would let
-  // `scout=false, text=true, no OpenRouter key` bill the scout on
-  // `env.AI` — on Kimi K2.5, costlier than the Qwen3 path this switch
-  // exists to stop. The surfaces have to stay independent, so with no
-  // OpenRouter key the scout refuses and `pickNextCategory` falls through
-  // to its hardcoded Tier 2 category pool.
-  if (!isWorkersAiEnabled(env, "scout")) {
-    const key = resolveOpenRouterKey(env);
-    if (key) {
-      return createOpenRouter({ apiKey: key })(OPENROUTER_FREE_MODEL);
-    }
-    throw new WorkersAiDisabledError("scout");
+  // Was the one surface that ran on `env.AI` unconditionally (Qwen3-30B, up
+  // to 3 attempts x 2000 output tokens per tick), which made it a standing
+  // neuron charge no fallback ever relieved. It now runs on the Claude Code
+  // subscription like every other model call, with the OpenRouter free-model
+  // router behind it so a Claude outage does not stop category discovery.
+  if (useClaudeForKimi(env)) {
+    const claude = getClaudeCodeLanguageModel(env);
+    if (claude) return claude;
   }
-  return createWorkersAI({ binding: env.AI })(WORKERS_AI_QWEN_MODEL, {
-    chat_template_kwargs: { enable_thinking: false }
-  });
+  const key = resolveOpenRouterKey(env);
+  if (key) {
+    return createOpenRouter({ apiKey: key })(OPENROUTER_FREE_MODEL);
+  }
+  // `pickNextCategory` catches per attempt and falls through to its
+  // hardcoded Tier 2 category pool, so refusing here is safe.
+  throw new NoModelProviderError(
+    "no Claude Code subscription and no OPENROUTER_API_KEY"
+  );
 }
 
 /**
  * Provider options to pass to `generateText()` so Kimi thinking stays off.
- * Workers AI disables thinking via model-level `chat_template_kwargs`
+ * Only OpenRouter needs thinking disabled
  * (handled by the provider); OpenRouter uses `reasoning: { enabled: false }`.
  * Claude needs no special provider options, so this returns `undefined`
  * whenever `getKimiModel` would have picked Claude — keep the two in sync
@@ -345,20 +336,19 @@ export function getKimiProviderOptions(env: Env):
 const MAX_CONTINUATION_ROUNDS = 2;
 
 /**
- * Drop-in replacement for `aiGenerateWithPoll()`, Claude-first with a Kimi
- * fallback so staging never goes dark for lack of a Claude credential:
+ * Claude-first with a Kimi fallback, so staging never goes dark for lack of
+ * a Claude credential:
  *  1. If a Claude Code subscription is active and we are not in an
  *     Anthropic rate-limit cooldown, call `callClaudeCodeText()`. On
  *     success, return its text. On failure (including auth errors), no
  *     subscription, or an active cooldown, fall through to Kimi.
  *  2. If OPENROUTER_API_KEY is set, call OpenRouter via AI SDK
  *     `generateText()`. On HTTP error or empty response, fall through.
- *  3. Call the existing `aiGenerateWithPoll()` (sync → async batch) on
- *     Workers AI.
+ *  3. Nothing. Workers AI was the third leg and is gone — it is what the
+ *     65M-neuron invoice was made of. A call that gets here throws
+ *     `NoModelProviderError`.
  *
- * The signature intentionally mirrors `aiGenerateWithPoll` so each call
- * site needs only a function-name and first-arg change (env instead of
- * env.AI). All call sites must pass an `agent` for proper logging.
+ * All call sites must pass an `agent` for proper logging.
  *
  * Truncation handling (OpenRouter path only): when `finishReason ===
  * "length"` the response stops mid-sentence — this is the root cause of
@@ -388,6 +378,20 @@ export async function runKimiWithPoll(
     params.messages ??
     (params.prompt ? [{ role: "user", content: params.prompt }] : []);
 
+  // The caller's budget has to reach this leg. It used to terminate at the
+  // Workers AI runner (`ai-poll`'s syncTimeoutMs); with that gone, OpenRouter
+  // is the last leg and must honour it rather than silently substituting its
+  // own 120s default for a caller that asked for less.
+  const openRouterTimeoutMs = Math.min(
+    OPENROUTER_CALL_TIMEOUT_MS,
+    opts.syncTimeoutMs ?? OPENROUTER_CALL_TIMEOUT_MS
+  );
+  if (opts.syncTimeoutMs != null) {
+    const note = `[kimi-model] syncTimeoutMs=${opts.syncTimeoutMs} applied to the OpenRouter leg`;
+    agent.log("info", note, "contentCreator");
+    opts.onWarn?.(note);
+  }
+
   const callOpenRouter = async (
     apiKey: string,
     msgs: Array<{ role: "user" | "system" | "assistant"; content: string }>
@@ -399,7 +403,7 @@ export async function runKimiWithPoll(
       messages: msgs as ModelMessage[],
       maxOutputTokens: params.max_tokens ?? 4096,
       providerOptions: { openrouter: openRouterReasoningOptions(env) },
-      abortSignal: AbortSignal.timeout(OPENROUTER_CALL_TIMEOUT_MS)
+      abortSignal: AbortSignal.timeout(openRouterTimeoutMs)
     });
     if (text && text.trim().length > 0) {
       return { text, finishReason: String(finishReason ?? "") };
@@ -475,7 +479,7 @@ export async function runKimiWithPoll(
   if (!resolveClaudeCodeSubscription(env)) {
     agent.log(
       "info",
-      "[claude-code] no active Claude subscription token; using Kimi (OpenRouter/Workers AI)",
+      "[claude-code] no active Claude subscription token; using Kimi (OpenRouter)",
       "contentCreator"
     );
   } else {
@@ -483,7 +487,7 @@ export async function runKimiWithPoll(
     if (claudeCooldownMs > 0) {
       agent.log(
         "info",
-        `[claude-code] skipping Claude — ${Math.ceil(claudeCooldownMs / 1000)}s remaining in Anthropic rate-limit cooldown; using Kimi (OpenRouter/Workers AI)`,
+        `[claude-code] skipping Claude — ${Math.ceil(claudeCooldownMs / 1000)}s remaining in Anthropic rate-limit cooldown; using Kimi (OpenRouter)`,
         "contentCreator"
       );
     } else {
@@ -507,13 +511,13 @@ export async function runKimiWithPoll(
         if (claudeText) {
           agent.log(
             "warning",
-            `[claude-code] returned degenerate output (${claudeText.length} chars, alpha-ratio below threshold — likely token-repetition collapse); falling back to Kimi (OpenRouter/Workers AI)`,
+            `[claude-code] returned degenerate output (${claudeText.length} chars, alpha-ratio below threshold — likely token-repetition collapse); falling back to Kimi (OpenRouter)`,
             "contentCreator"
           );
         } else {
           agent.log(
             "warning",
-            "[claude-code] returned empty; falling back to Kimi (OpenRouter/Workers AI)",
+            "[claude-code] returned empty; falling back to Kimi (OpenRouter)",
             "contentCreator"
           );
         }
@@ -523,7 +527,7 @@ export async function runKimiWithPoll(
         const tag = auth ? " (auth)" : "";
         agent.log(
           "warning",
-          `${CLAUDE_CODE_CALL_FAILED_LOG_PREFIX}${tag} (${msg}); falling back to Kimi (OpenRouter/Workers AI)`,
+          `${CLAUDE_CODE_CALL_FAILED_LOG_PREFIX}${tag} (${msg}); falling back to Kimi (OpenRouter)`,
           "contentCreator"
         );
       }
@@ -539,13 +543,13 @@ export async function runKimiWithPoll(
       if (text) {
         agent.log(
           "warning",
-          `[kimi-model] OpenRouter returned degenerate output (${text.length} chars, alpha-ratio below threshold — likely token-repetition collapse); falling back to Workers AI`,
+          `[kimi-model] OpenRouter returned degenerate output (${text.length} chars, alpha-ratio below threshold — likely token-repetition collapse); no provider left after OpenRouter`,
           "contentCreator"
         );
       } else {
         agent.log(
           "warning",
-          "[kimi-model] OpenRouter returned empty; falling back to Workers AI",
+          "[kimi-model] OpenRouter returned empty; no provider left after OpenRouter",
           "contentCreator"
         );
       }
@@ -565,14 +569,14 @@ export async function runKimiWithPoll(
             agent.log(
               "warning",
               retried
-                ? `[kimi-model] OpenRouter returned degenerate output after key rotation (${retried.length} chars); falling back to Workers AI`
-                : "[kimi-model] OpenRouter returned empty after key rotation; falling back to Workers AI",
+                ? `[kimi-model] OpenRouter returned degenerate output after key rotation (${retried.length} chars); no provider left after OpenRouter`
+                : "[kimi-model] OpenRouter returned empty after key rotation; no provider left",
               "contentCreator"
             );
           } catch (retryErr: unknown) {
             agent.log(
               "warning",
-              `[kimi-model] OpenRouter retry after rotation failed (${errMsg(retryErr)}); falling back to Workers AI`,
+              `[kimi-model] OpenRouter retry after rotation failed (${errMsg(retryErr)}); no provider left after OpenRouter`,
               "contentCreator"
             );
           }
@@ -583,12 +587,12 @@ export async function runKimiWithPoll(
         } else {
           // rotateOpenRouterKeyFromDoppler already logged why rotation could
           // not produce a fresh key. Emit only the fallback notice so
-          // operators know execution continues on Workers AI — without
+          // operators know the call is about to fail outright — without
           // re-reporting the 401 as an unrelated generic failure.
           rotationAttempted = true;
           agent.log(
             "warning",
-            "[kimi-model] OpenRouter 401 — key rotation did not produce a fresh key (see prior warning); falling back to Workers AI",
+            "[kimi-model] OpenRouter 401 — key rotation did not produce a fresh key (see prior warning); no provider left",
             "contentCreator"
           );
         }
@@ -596,57 +600,32 @@ export async function runKimiWithPoll(
       if (!rotationAttempted) {
         agent.log(
           "warning",
-          `${OPENROUTER_CALL_FAILED_LOG_PREFIX} (${msg}); falling back to Workers AI`,
+          `${OPENROUTER_CALL_FAILED_LOG_PREFIX} (${msg}); no provider left after Claude and OpenRouter`,
           "contentCreator"
         );
       }
     }
   }
 
-  // ── Workers AI fallback (sync → async-batch path) ───────────────────────
-  // Runs on fast Qwen3, NOT @cf/moonshotai/kimi-k2.5. The Kimi binding
-  // routinely overruns the 150s sync timeout on real generations and rejects
-  // batch queuing (error 8007), so when OpenRouter credits are exhausted the
-  // writer had no working path — that wedge caused the 6/6→6/10 publish
-  // drought. Qwen3 (MoE, ~3B active params) completes inside the sync window
-  // and supports batch, so generation keeps flowing on the free `env.AI`
-  // binding. OpenRouter Kimi above remains primary, so Kimi-grade quality
-  // returns automatically the moment credits are topped up.
+  // ── No provider left ────────────────────────────────────────────────────
+  // Workers AI used to sit here, on Qwen3 via a sync→async-batch runner. It
+  // was the last-resort leg, which is exactly why it became expensive: when
+  // OpenRouter credits ran dry the entire writer landed on it for as long as
+  // that lasted, and a month of that is what the 65M-neuron invoice was. The
+  // Claude Code subscription now serves this call from the top of the
+  // function, so reaching this point means Claude and OpenRouter both failed
+  // or are unconfigured, and there is nothing cheaper to try.
   //
-  // No continuation handling here — `aiGenerateWithPoll` does not expose
-  // finishReason. The writer issues bounded per-section calls (≤4096 tokens),
-  // so truncation is unlikely; threading finishReason through is the follow-up
-  // if it recurs.
-  if (!isWorkersAiEnabled(env, "text")) {
-    agent.log(
-      "warning",
-      `[kimi-model] ${new WorkersAiDisabledError("text").message}; Claude and ` +
-        `OpenRouter both unavailable, so this call produces nothing`,
-      "contentCreator"
-    );
-    throw new WorkersAiDisabledError("text");
-  }
-
-  const workersAiResult = await aiGenerateWithPoll(
-    env.AI,
-    WORKERS_AI_QWEN_MODEL,
-    params,
-    {
-      ...opts,
-      onWarn: (msg) =>
-        agent.log("warning", `[kimi-model] ${msg}`, "contentCreator")
-    }
+  // Throwing rather than returning "" is deliberate: every caller treats a
+  // throw as "this step produced nothing" and has its own recovery, whereas
+  // an empty string reads as a successful generation and can publish.
+  agent.log(
+    "warning",
+    "[kimi-model] Claude and OpenRouter both unavailable; no Workers AI " +
+      "fallback exists any more, so this call produces nothing",
+    "contentCreator"
   );
-  // No further fallback exists past Workers AI, so this is diagnostic-only —
-  // still return the result and let the downstream thin-content/SEO-score
-  // gates make the final call, but flag it clearly so a degenerate Workers
-  // AI response isn't mistaken for an OpenRouter-side issue when triaging.
-  if (isDegenerateOutput(workersAiResult)) {
-    agent.log(
-      "warning",
-      `[kimi-model] Workers AI (last-resort fallback) returned degenerate output (${workersAiResult.length} chars, alpha-ratio below threshold — likely token-repetition collapse); no further fallback available, returning as-is for downstream gates to reject`,
-      "contentCreator"
-    );
-  }
-  return workersAiResult;
+  throw new NoModelProviderError(
+    "Claude Code subscription and OpenRouter both unavailable for this call"
+  );
 }

@@ -1317,11 +1317,12 @@ async function generateArticleUnsafe(
             ],
             max_tokens: 4096
           },
-          // Main article generation is the one call worth waiting on: when
-          // Workers AI Kimi is capacity-pressured (error 3040) the sync path
-          // fails instantly and the async batch queue needs well beyond the
-          // 90s default to drain — two articles died at 90s on 6/10.
-          { asyncMaxWaitMs: 600_000 },
+          // Main article generation is the one call worth waiting on, so it
+          // gets the widest budget any leg will honour. (This used to raise
+          // the Workers AI batch-queue wait to 600s; that leg is gone with
+          // the neuron spend, and Claude/OpenRouter carry their own
+          // timeouts.)
+          {},
           agent
         );
         text = result ?? "";
@@ -1651,8 +1652,7 @@ async function generateArticleUnsafe(
                   max_tokens: 2048
                 },
                 {
-                  syncTimeoutMs: 60_000,
-                  asyncMaxWaitMs: 30_000
+                  syncTimeoutMs: 60_000
                 },
                 agent
               );
@@ -1773,8 +1773,7 @@ async function generateArticleUnsafe(
                     max_tokens: 2048
                   },
                   {
-                    syncTimeoutMs: 60_000,
-                    asyncMaxWaitMs: 30_000
+                    syncTimeoutMs: 60_000
                   },
                   agent
                 );
@@ -1838,8 +1837,7 @@ async function generateArticleUnsafe(
                     max_tokens: 1024
                   },
                   {
-                    syncTimeoutMs: 60_000,
-                    asyncMaxWaitMs: 30_000
+                    syncTimeoutMs: 60_000
                   },
                   agent
                 );

@@ -1,15 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  generateTextMock,
-  aiGenerateWithPollMock,
-  createOpenRouterMock,
-  createWorkersAIMock
-} = vi.hoisted(() => ({
+const { generateTextMock, createOpenRouterMock } = vi.hoisted(() => ({
   generateTextMock: vi.fn(),
-  aiGenerateWithPollMock: vi.fn(),
-  createOpenRouterMock: vi.fn(() => vi.fn(() => "openrouter-model")),
-  createWorkersAIMock: vi.fn(() => vi.fn(() => "workers-model"))
+  createOpenRouterMock: vi.fn(() => vi.fn(() => "openrouter-model"))
 }));
 
 vi.mock("ai", () => ({
@@ -18,14 +11,6 @@ vi.mock("ai", () => ({
 
 vi.mock("@openrouter/ai-sdk-provider", () => ({
   createOpenRouter: createOpenRouterMock
-}));
-
-vi.mock("workers-ai-provider", () => ({
-  createWorkersAI: createWorkersAIMock
-}));
-
-vi.mock("../ai-poll", () => ({
-  aiGenerateWithPoll: aiGenerateWithPollMock
 }));
 
 import {
@@ -38,21 +23,23 @@ import {
 describe("runKimiWithPoll", () => {
   beforeEach(() => {
     generateTextMock.mockReset();
-    aiGenerateWithPollMock.mockReset();
     createOpenRouterMock.mockClear();
-    createWorkersAIMock.mockClear();
     setRotatedOpenRouterKey(null);
   });
 
-  it("refuses the Workers AI fallback when the neuron kill switch is at its default", async () => {
-    // Claude absent + OpenRouter failing used to drop every call onto
-    // `env.AI`, which is how a month of writer traffic turned into a
-    // 65M-neuron invoice. With no WORKERS_AI_* flag set the call must
-    // refuse instead of billing, and must not touch the binding at all.
+  it("throws when Claude and OpenRouter both fail, instead of billing a third provider", async () => {
+    // Workers AI used to sit behind OpenRouter here, and that is precisely
+    // how a month of writer traffic became a 65M-neuron invoice: whenever
+    // OpenRouter credits ran dry, every call in the pipeline landed on
+    // `env.AI` for as long as that lasted. There is no third leg now.
     generateTextMock.mockRejectedValueOnce(new Error("OpenRouter 402"));
     const aiRun = vi.fn();
 
-    const agent = { log: vi.fn(), rotateOpenRouterKeyFromDoppler: vi.fn() };
+    const logs: string[] = [];
+    const agent = {
+      log: (_lvl: string, msg: string) => logs.push(msg),
+      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
+    };
     const env = {
       OPENROUTER_API_KEY: "test-openrouter-key",
       AI: { run: aiRun }
@@ -65,32 +52,28 @@ describe("runKimiWithPoll", () => {
         {},
         agent as never
       )
-    ).rejects.toThrow(/disabled to stop neuron billing/);
+    ).rejects.toThrow(/No model provider available/);
 
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
+    // The binding must not be touched even though it is still bound.
     expect(aiRun).not.toHaveBeenCalled();
+    expect(
+      logs.some((m) => m.includes("no Workers AI fallback exists any more"))
+    ).toBe(true);
   });
 
-  it("falls back to Workers AI when OpenRouter returns a non-JSON response", async () => {
-    generateTextMock.mockRejectedValueOnce(
-      new Error("Invalid JSON response — cause: JSON parsing failed: Text:")
-    );
-    aiGenerateWithPollMock.mockResolvedValueOnce("<article>fallback</article>");
+  it("calls OpenRouter with Kimi thinking disabled, and honours the caller's timeout budget", async () => {
+    generateTextMock.mockResolvedValueOnce({
+      text: "<article>ok</article>",
+      finishReason: "stop"
+    });
 
-    const logs: Array<{ level: string; message: string; role: string }> = [];
+    const logs: string[] = [];
     const agent = {
-      log: (level: string, message: string, role: string) => {
-        logs.push({ level, message, role });
-      },
+      log: (_lvl: string, msg: string) => logs.push(msg),
       rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    } as const;
-
+    };
     const env = {
       OPENROUTER_API_KEY: "test-openrouter-key",
-      // This test is specifically about the Workers AI fallback leg, so it
-      // opts that surface back in past the neuron kill switch (which
-      // defaults every env.AI surface to off).
-      WORKERS_AI_TEXT_ENABLED: "true",
       AI: { run: vi.fn() }
     } as unknown as Env;
 
@@ -104,8 +87,7 @@ describe("runKimiWithPoll", () => {
       agent as never
     );
 
-    expect(text).toBe("<article>fallback</article>");
-    expect(generateTextMock).toHaveBeenCalledTimes(1);
+    expect(text).toBe("<article>ok</article>");
     expect(generateTextMock).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "openrouter-model",
@@ -114,27 +96,12 @@ describe("runKimiWithPoll", () => {
         providerOptions: { openrouter: { reasoning: { enabled: false } } }
       })
     );
-    expect(aiGenerateWithPollMock).toHaveBeenCalledWith(
-      env.AI,
-      "@cf/qwen/qwen3-30b-a3b-fp8",
-      {
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        max_tokens: 2048
-      },
-      expect.objectContaining({
-        syncTimeoutMs: 90_000,
-        onWarn: expect.any(Function)
-      })
-    );
-    expect(logs).toContainEqual({
-      level: "warning",
-      message:
-        "[kimi-model] OpenRouter call failed (Invalid JSON response — cause: JSON parsing failed: Text:); falling back to Workers AI",
-      role: "contentCreator"
-    });
+    // OpenRouter is the last leg now, so the caller's budget has to reach it
+    // rather than being replaced by that leg's own default.
+    expect(logs.some((m) => m.includes("syncTimeoutMs=90000"))).toBe(true);
   });
 
-  it("falls back to Workers AI when OpenRouter returns degenerate (token-repetition-collapse) output", async () => {
+  it("throws rather than returning degenerate OpenRouter output as a successful generation", async () => {
     // Abbreviated form of the real 2026-07-10 incident output — pure
     // digit/punctuation noise from the first character, long enough to
     // clear the empty-response check but not real prose.
@@ -143,49 +110,33 @@ describe("runKimiWithPoll", () => {
       "100000450005581856567400000010158000009000145000000045002800060011800000500000664001680068000".repeat(
         3
       );
-    generateTextMock.mockResolvedValueOnce({
+    generateTextMock.mockResolvedValue({
       text: degenerate,
       finishReason: "stop"
     });
-    aiGenerateWithPollMock.mockResolvedValueOnce("<article>fallback</article>");
 
-    const logs: Array<{ level: string; message: string; role: string }> = [];
+    const logs: string[] = [];
     const agent = {
-      log: (level: string, message: string, role: string) => {
-        logs.push({ level, message, role });
-      },
+      log: (_lvl: string, msg: string) => logs.push(msg),
       rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    } as const;
-
+    };
     const env = {
       OPENROUTER_API_KEY: "test-openrouter-key",
-      // This test is specifically about the Workers AI fallback leg, so it
-      // opts that surface back in past the neuron kill switch (which
-      // defaults every env.AI surface to off).
-      WORKERS_AI_TEXT_ENABLED: "true",
       AI: { run: vi.fn() }
     } as unknown as Env;
 
-    const text = await runKimiWithPoll(
-      env,
-      {
-        messages: [{ role: "user", content: "Write an article." }],
-        max_tokens: 2048
-      },
-      {},
-      agent as never
-    );
-
-    expect(text).toBe("<article>fallback</article>");
-    expect(aiGenerateWithPollMock).toHaveBeenCalledTimes(1);
-    expect(
-      logs.some(
-        (l) =>
-          l.level === "warning" &&
-          l.message.includes("degenerate output") &&
-          l.message.includes("falling back to Workers AI")
+    await expect(
+      runKimiWithPoll(
+        env,
+        {
+          messages: [{ role: "user", content: "Write an article." }],
+          max_tokens: 2048
+        },
+        {},
+        agent as never
       )
-    ).toBe(true);
+    ).rejects.toThrow(/No model provider available/);
+    expect(logs.some((m) => m.includes("degenerate output"))).toBe(true);
   });
 });
 
@@ -225,39 +176,29 @@ describe("isDegenerateOutput", () => {
 describe("getScoutModel", () => {
   beforeEach(() => {
     createOpenRouterMock.mockClear();
-    createWorkersAIMock.mockClear();
     setRotatedOpenRouterKey(null);
   });
 
-  it("runs on Workers AI when the scout surface is enabled", () => {
-    getScoutModel({
-      WORKERS_AI_SCOUT_ENABLED: "true",
-      AI: { run: vi.fn() }
-    } as unknown as Env);
-    expect(createWorkersAIMock).toHaveBeenCalled();
-  });
-
-  it("uses the OpenRouter free router when the scout surface is disabled", () => {
+  it("uses the OpenRouter free router when no Claude subscription is configured", () => {
+    // The scout was the only surface that ran on `env.AI` unconditionally —
+    // by design, up to 3 attempts x 2000 output tokens per tick — so it was
+    // a standing neuron charge that no fallback ever relieved. It now runs
+    // on Claude, with the free router behind it; these tests have no Claude
+    // credential, so the free router is what they see.
     getScoutModel({
       OPENROUTER_API_KEY: "test-openrouter-key",
       AI: { run: vi.fn() }
     } as unknown as Env);
     expect(createOpenRouterMock).toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
   });
 
-  it("refuses rather than billing when the scout is off, no OpenRouter key exists, and the text surface is on", () => {
-    // The surfaces must stay independent. Routing a disabled scout through
-    // `getFreeModel` used to land on the Workers AI Kimi model, which is
-    // gated on "text" — so this combination billed neurons for a scout that
-    // was explicitly switched off, on a costlier model than the one the
-    // switch exists to stop.
+  it("refuses rather than reaching for the AI binding when no provider is configured", () => {
+    const aiRun = vi.fn();
     expect(() =>
-      getScoutModel({
-        WORKERS_AI_TEXT_ENABLED: "true",
-        AI: { run: vi.fn() }
-      } as unknown as Env)
-    ).toThrow(/disabled to stop neuron billing/);
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
+      getScoutModel({ AI: { run: aiRun } } as unknown as Env)
+    ).toThrow(/No model provider available/);
+    // `pickNextCategory` catches this per attempt and falls through to its
+    // hardcoded Tier 2 category pool, so discovery continues without neurons.
+    expect(aiRun).not.toHaveBeenCalled();
   });
 });

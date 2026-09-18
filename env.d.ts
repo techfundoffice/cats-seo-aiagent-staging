@@ -16,7 +16,6 @@ declare namespace Cloudflare {
 		 */
 		KEYWORDS_DB: D1Database;
 		SKILL_FETCH_QUEUE: Queue;
-		AI: Ai;
 		ASSETS: Fetcher;
 		/**
 		 * Service binding to the petinsurance Worker. Post-publish URL probes use
@@ -27,24 +26,6 @@ declare namespace Cloudflare {
 		DOMAIN: "catsluvus.com";
 		CLOUDFLARE_ZONE_ID: "646da2c86dbbe1dff196c155381b0704";
 		CLOUDFLARE_ACCOUNT_ID: "bc8e15f958dc350e00c0e39d80ca6941";
-		/**
-		 * Workers AI neuron kill switch — see src/pipeline/workers-ai-budget.ts.
-		 * Every env.AI call is billed in neurons; the Aug 14 – Sep 13, 2026
-		 * invoice charged 65,371,887 "Regular Twitch Neurons" = $719.09 of a
-		 * $788.68 bill. All four env.AI surfaces default to OFF in
-		 * wrangler.jsonc. Typed as plain string (not the "false" literal
-		 * wrangler types would emit) so a dashboard/secret override to "true"
-		 * still typechecks.
-		 */
-		WORKERS_AI_ENABLED?: string;
-		/** Per-surface override: LLM fallback (kimi-model / ai-poll). */
-		WORKERS_AI_TEXT_ENABLED?: string;
-		/** Per-surface override: flux hero + product image generation. */
-		WORKERS_AI_IMAGE_ENABLED?: string;
-		/** Per-surface override: Llava design-audit vision fallback. */
-		WORKERS_AI_VISION_ENABLED?: string;
-		/** Per-surface override: Qwen3 category scout. */
-		WORKERS_AI_SCOUT_ENABLED?: string;
 		SEOArticleAgent: DurableObjectNamespace<import("./src/server").SEOArticleAgent>;
 		/**
 		 * AI Search instance — web-crawler indexed against catsluvus.com.

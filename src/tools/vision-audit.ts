@@ -11,10 +11,6 @@
  *     the vision model for design findings on an arbitrary URL.
  */
 import { errMsg, getEnvBinding, repairJson } from "../pipeline/http-utils";
-import {
-  isWorkersAiEnabled,
-  workersAiDisabledReason
-} from "../pipeline/workers-ai-budget";
 import { generateText, tool } from "ai";
 import {
   getClaudeCodeLanguageModel,
@@ -42,18 +38,6 @@ export const AUDIT_SCREENSHOT_TOOL_NAME = "auditScreenshot";
  */
 export const AUDIT_URL_TOOL_NAME = "auditPageDesign";
 const VISION_JSON_CANDIDATE_LIMIT = 8;
-
-// Llava 1.5 7B is vision-capable and takes `image` as a byte array.
-const VISION_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
-const AI_GATEWAY_ID = "cats-seo-aiagent";
-const MAX_VISION_RESPONSE_TEXT_DEPTH = 3;
-const VISION_RESPONSE_DIRECT_TEXT_FIELDS = [
-  "description",
-  "response",
-  "result",
-  "text"
-] as const;
-const VISION_RESPONSE_NESTED_FIELDS = ["data", "output", "payload"] as const;
 
 // ── Issue shape and classification ─────────────────────────────────────────────
 
@@ -384,57 +368,6 @@ export interface VisionAnalysisResult {
   rawText?: string;
 }
 
-interface VisionRunInput {
-  prompt: string;
-  image: number[];
-  max_tokens: number;
-}
-
-interface VisionRunOptions {
-  gateway: {
-    id: string;
-  };
-}
-
-function extractVisionResponseText(value: unknown, depth = 0): string {
-  if (
-    depth > MAX_VISION_RESPONSE_TEXT_DEPTH ||
-    value === null ||
-    value === undefined
-  ) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nestedText = extractVisionResponseText(item, depth + 1);
-      if (nestedText) {
-        return nestedText;
-      }
-    }
-    return "";
-  }
-  if (typeof value !== "object") {
-    return "";
-  }
-  const record = value as Record<string, unknown>;
-  for (const field of VISION_RESPONSE_DIRECT_TEXT_FIELDS) {
-    const fieldValue = record[field];
-    if (typeof fieldValue === "string" && fieldValue.length > 0) {
-      return fieldValue;
-    }
-  }
-  for (const field of VISION_RESPONSE_NESTED_FIELDS) {
-    const nestedText = extractVisionResponseText(record[field], depth + 1);
-    if (nestedText) {
-      return nestedText;
-    }
-  }
-  return "";
-}
-
 /**
  * Send an image to Llava via AI Gateway. Returns parsed issues, a raw-text
  * tail for debugging, and an error field when the model emitted text but
@@ -524,7 +457,7 @@ async function analyzeScreenshotWithClaude(
   } catch (err: unknown) {
     agent.log(
       "warning",
-      `Vision audit: Claude call failed (${errMsg(err)}); falling back to ${VISION_MODEL}`,
+      `Vision audit: Claude call failed (${errMsg(err)}); no fallback vision provider — this viewport goes unanalyzed`,
       "qaReviewer"
     );
     return null;
@@ -534,9 +467,9 @@ async function analyzeScreenshotWithClaude(
 /**
  * Analyze one screenshot for conversion signals and click-costing issues.
  *
- * Claude first, Workers AI Llava as the fallback — the same order and the
- * same "skip Claude on no subscription / active cooldown / call failure"
- * rule the rest of the pipeline uses.
+ * Claude only. Workers AI Llava was the fallback and is gone along with the
+ * neuron spend; a Claude failure yields an empty result carrying an error,
+ * which Step 15 already treats as "this viewport was not analyzed".
  */
 export async function analyzeScreenshotWithVision(
   agent: SEOArticleAgent,
@@ -552,52 +485,18 @@ export async function analyzeScreenshotWithVision(
   );
   if (viaClaude) return viaClaude;
 
-  // Neuron kill switch: Llava is the fallback behind Claude, so when it is
-  // off the audit reports "no analysis" for this viewport rather than
-  // silently claiming a clean page — same shape this function already
-  // returns for an empty or failed Llava response.
-  if (!isWorkersAiEnabled(agent.envBindings, "vision")) {
-    return {
-      issues: [],
-      signals: { ...EMPTY_CONVERSION_SIGNALS },
-      model: "llava",
-      error: `${viewportLabel}: ${workersAiDisabledReason("vision")}`
-    };
-  }
-
-  try {
-    const runVision = agent.envBindings.AI.run as (
-      model: string,
-      input: VisionRunInput,
-      options: VisionRunOptions
-    ) => Promise<unknown>;
-    const result = await runVision(
-      VISION_MODEL,
-      {
-        prompt: buildVisionPrompt(url, viewportLabel),
-        image: Array.from(imageBytes),
-        max_tokens: 1024
-      },
-      { gateway: { id: AI_GATEWAY_ID } }
-    );
-    const text = extractVisionResponseText(result).trim();
-    if (!text) {
-      return {
-        issues: [],
-        signals: { ...EMPTY_CONVERSION_SIGNALS },
-        model: "llava",
-        error: `${viewportLabel}: empty Llava response`
-      };
-    }
-    return buildVisionResult(text, viewportLabel, "llava");
-  } catch (err: unknown) {
-    return {
-      issues: [],
-      signals: { ...EMPTY_CONVERSION_SIGNALS },
-      model: "llava",
-      error: `${viewportLabel}: ${errMsg(err)}`
-    };
-  }
+  // Claude is the only vision provider now. Workers AI Llava used to sit
+  // here as the fallback and billed neurons per screenshot; with it gone a
+  // Claude failure reports "no analysis" for this viewport rather than
+  // silently claiming a clean page — the same shape this function already
+  // returned for an empty or failed Llava response, so Step 15's handling
+  // is unchanged.
+  return {
+    issues: [],
+    signals: { ...EMPTY_CONVERSION_SIGNALS },
+    model: "claude",
+    error: `${viewportLabel}: Claude vision unavailable (no subscription, an active rate-limit cooldown, or the call failed) and no fallback vision provider is configured`
+  };
 }
 
 /**
