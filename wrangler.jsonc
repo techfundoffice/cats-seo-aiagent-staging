@@ -11,7 +11,11 @@
   "compatibility_date": "2026-04-13",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "ai": { "binding": "AI", "remote": true },
+  // No "ai" (Workers AI) binding: every model call runs on the Claude Code
+  // subscription, with OpenRouter behind it. Workers AI inference is billed
+  // in neurons, and the Aug 14 - Sep 13, 2026 invoice charged 65,371,887 of
+  // them ($719.09 of a $788.68 bill). Leaving the binding off means no code
+  // can reintroduce that charge without this line coming back first.
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

@@ -93,8 +93,26 @@ export function getMissingCodebaseSearchVars(env: CodebaseSearchEnv): string[] {
   return missing;
 }
 
-export function isCodebaseSearchEnabled(env: CodebaseSearchEnv): boolean {
-  return getMissingCodebaseSearchVars(env).length === 0;
+/**
+ * Always false: semantic codebase search is switched off.
+ *
+ * It embedded queries with OpenAI (`text-embedding-3-small`) before querying
+ * Milvus, making OpenAI a second model provider on a separate bill. Claude is
+ * now the only model provider in this repo, and Anthropic has no embeddings
+ * API, so there is nothing to route this to — it is disabled rather than
+ * migrated.
+ *
+ * The module already degraded to a no-op when `OPENAI_API_KEY` was absent, and
+ * every caller (autonomous loop, observer, editorial agent) handles
+ * `{ available: false, hits: [] }` by falling back to its own heuristics. This
+ * makes that the unconditional behavior so a stray key cannot silently
+ * reintroduce the provider.
+ *
+ * To bring it back, restore the env check below and accept OpenAI as a
+ * provider — or swap in an embeddings API you do want to pay for.
+ */
+export function isCodebaseSearchEnabled(_env: CodebaseSearchEnv): boolean {
+  return false;
 }
 
 /**
@@ -279,6 +297,20 @@ export async function searchCodebase(
   topK: number = DEFAULT_TOP_K,
   fetchImpl: typeof fetch = fetch
 ): Promise<CodebaseSearchResult> {
+  // Hard off, BEFORE the env check: this path embeds the query with OpenAI
+  // (`text-embedding-3-small`) and OpenAI is no longer a provider here. The
+  // env-var check below is deliberately left in place but unreachable, so the
+  // presence of OPENAI_API_KEY cannot bring the call back. `isCodebaseSearchEnabled`
+  // alone was NOT enough — this function never consulted it.
+  if (!isCodebaseSearchEnabled(env)) {
+    return {
+      available: false,
+      hits: [],
+      reason:
+        "semantic codebase search is disabled — it required OpenAI embeddings " +
+        "and Claude is the only model provider (Anthropic has no embeddings API)"
+    };
+  }
   const missing = getMissingCodebaseSearchVars(env);
   if (missing.length > 0) {
     return {

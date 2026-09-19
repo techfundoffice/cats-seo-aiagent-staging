@@ -16,7 +16,6 @@ declare namespace Cloudflare {
 		 */
 		KEYWORDS_DB: D1Database;
 		SKILL_FETCH_QUEUE: Queue;
-		AI: Ai;
 		ASSETS: Fetcher;
 		/**
 		 * Service binding to the petinsurance Worker. Post-publish URL probes use

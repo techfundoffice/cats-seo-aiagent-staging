@@ -40,14 +40,18 @@ describe("getMissingCodebaseSearchVars", () => {
 });
 
 describe("isCodebaseSearchEnabled", () => {
-  it("true when all three present", () => {
+  it("is false even with all three vars present — the OpenAI embeddings provider is switched off", () => {
+    // Claude is the only model provider in this repo and Anthropic has no
+    // embeddings API, so semantic search is disabled rather than migrated.
+    // Asserted with the keys PRESENT so a stray OPENAI_API_KEY cannot quietly
+    // reintroduce a second provider.
     expect(
       isCodebaseSearchEnabled({
         OPENAI_API_KEY: "x",
         MILVUS_ADDRESS: "y",
         MILVUS_TOKEN: "z"
       })
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("false when any missing", () => {
@@ -145,115 +149,50 @@ describe("parseMilvusSearchResponse", () => {
   });
 });
 
-describe("searchCodebase — graceful degradation", () => {
-  it("returns { available: false } with reason when env is missing", async () => {
-    const r = await searchCodebase({}, "anything");
-    expect(r.available).toBe(false);
-    expect(r.hits).toEqual([]);
-    expect(r.reason).toContain("missing OPENAI_API_KEY");
+describe("searchCodebase — disabled (no OpenAI provider)", () => {
+  // These used to exercise the live embed-then-vector-search path. That path
+  // called OpenAI, which is no longer a provider in this repo, so the contract
+  // is now "always unavailable, and never makes a network call".
+  const FULL_ENV = {
+    OPENAI_API_KEY: "sk-test",
+    MILVUS_ADDRESS: "https://milvus.example",
+    MILVUS_TOKEN: "tok"
+  };
+
+  it("returns unavailable with an explanatory reason even when every var is set", async () => {
+    const res = await searchCodebase(FULL_ENV, "how does the writer work?");
+    expect(res.available).toBe(false);
+    expect(res.hits).toEqual([]);
+    expect(res.reason).toMatch(/disabled/i);
+    expect(res.reason).toMatch(/embeddings/i);
   });
 
-  it("returns { available: true, hits: [] } for an empty query (no API call)", async () => {
-    const mockFetch = vi.fn();
-    const r = await searchCodebase(
-      {
-        OPENAI_API_KEY: "x",
-        MILVUS_ADDRESS: "https://y",
-        MILVUS_TOKEN: "z"
-      },
-      "   ",
+  it("makes NO http request — this is what keeps OpenAI off the bill", async () => {
+    const fetchSpy = vi.fn();
+    await searchCodebase(
+      FULL_ENV,
+      "anything",
       8,
-      mockFetch as unknown as typeof fetch
+      fetchSpy as unknown as typeof fetch
     );
-    expect(r.available).toBe(true);
-    expect(r.hits).toEqual([]);
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("reports OpenAI HTTP errors without crashing", async () => {
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }));
-    const r = await searchCodebase(
-      {
-        OPENAI_API_KEY: "x",
-        MILVUS_ADDRESS: "https://y",
-        MILVUS_TOKEN: "z"
-      },
-      "find code",
-      4,
-      mockFetch as unknown as typeof fetch
-    );
-    expect(r.available).toBe(true);
-    expect(r.hits).toEqual([]);
-    expect(r.reason).toContain("OpenAI embed HTTP 429");
-  });
-
-  it("reports Milvus errors without crashing when embedding succeeds", async () => {
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), {
-          status: 200
-        })
-      )
-      .mockResolvedValueOnce(
-        new Response("collection not found", { status: 404 })
-      );
-    const r = await searchCodebase(
-      {
-        OPENAI_API_KEY: "x",
-        MILVUS_ADDRESS: "https://y",
-        MILVUS_TOKEN: "z"
-      },
-      "find code",
-      4,
-      mockFetch as unknown as typeof fetch
-    );
-    expect(r.available).toBe(true);
-    expect(r.hits).toEqual([]);
-    expect(r.reason).toContain("Milvus search HTTP 404");
-  });
-
-  it("returns hits when both calls succeed", async () => {
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), {
-          status: 200
-        })
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data: [
-              {
-                filePath: "src/pipeline/writer.ts",
-                startLine: 100,
-                endLine: 120,
-                language: "typescript",
-                snippet: "function buildArticle()",
-                score: 0.92
-              }
-            ]
-          }),
-          { status: 200 }
-        )
-      );
-    const r = await searchCodebase(
-      {
-        OPENAI_API_KEY: "x",
-        MILVUS_ADDRESS: "https://y",
-        MILVUS_TOKEN: "z"
-      },
-      "how does article generation work",
-      4,
-      mockFetch as unknown as typeof fetch
-    );
-    expect(r.available).toBe(true);
-    expect(r.hits).toHaveLength(1);
-    expect(r.hits[0].filePath).toBe("src/pipeline/writer.ts");
-    expect(r.hits[0].score).toBe(0.92);
+  it("stays unavailable for an empty query and with vars missing", async () => {
+    const fetchSpy = vi.fn();
+    for (const env of [FULL_ENV, {}]) {
+      for (const q of ["", "  ", "real query"]) {
+        const res = await searchCodebase(
+          env,
+          q,
+          8,
+          fetchSpy as unknown as typeof fetch
+        );
+        expect(res.available).toBe(false);
+        expect(res.hits).toEqual([]);
+      }
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

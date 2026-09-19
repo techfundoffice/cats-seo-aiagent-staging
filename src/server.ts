@@ -3,6 +3,7 @@ import { generateText, stepCountIs, type ToolSet } from "ai";
 import {
   getKimiModel,
   getKimiProviderOptions,
+  NoModelProviderError,
   setRotatedOpenRouterKey
 } from "./pipeline/kimi-model";
 import {
@@ -3336,14 +3337,36 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     const toolSystem = cloudflareAddon
       ? `You are a tool-using assistant.${cloudflareAddon}`
       : undefined;
-    const result = await generateText({
-      model: getKimiModel(this.env),
-      providerOptions: getKimiProviderOptions(this.env),
-      tools: merged,
-      ...(toolSystem ? { system: toolSystem } : {}),
-      prompt,
-      stopWhen: stepCountIs(5)
-    });
+    // Provider selection can refuse outright — notably when the Workers AI
+    // neuron kill switch is on and neither Claude nor OpenRouter is
+    // available. Return the reason as data so the dashboard renders it the
+    // same way as the missing-token guards above.
+    let result: Awaited<ReturnType<typeof generateText>>;
+    try {
+      result = await generateText({
+        model: getKimiModel(this.env),
+        providerOptions: getKimiProviderOptions(this.env),
+        tools: merged,
+        ...(toolSystem ? { system: toolSystem } : {}),
+        prompt,
+        stopWhen: stepCountIs(5)
+      });
+    } catch (err: unknown) {
+      // "No provider configured" is an operator-actionable state, so it
+      // comes back as data the dashboard can render. Every other failure
+      // (provider outage, malformed model output, a tool-loop error)
+      // propagates as an RPC rejection, as it did before, so it stays
+      // visible in the activity log.
+      if (err instanceof NoModelProviderError) {
+        return { error: err.message };
+      }
+      this.log(
+        "error",
+        `Agent tool task failed: ${errMsg(err)}`,
+        "promptEngineer"
+      );
+      throw err;
+    }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
       "info",
@@ -3374,14 +3397,32 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       };
     }
     const cfMcpSystem = `You can call Cloudflare API operations via MCP Code Mode tools only (search: explore OpenAPI; execute: call cloudflare.request). Use the smallest number of calls. Prefer read-only operations unless the user clearly requests changes.`;
-    const result = await generateText({
-      model: getKimiModel(this.env),
-      providerOptions: getKimiProviderOptions(this.env),
-      tools,
-      system: cfMcpSystem,
-      prompt,
-      stopWhen: stepCountIs(8)
-    });
+    let result: Awaited<ReturnType<typeof generateText>>;
+    try {
+      result = await generateText({
+        model: getKimiModel(this.env),
+        providerOptions: getKimiProviderOptions(this.env),
+        tools,
+        system: cfMcpSystem,
+        prompt,
+        stopWhen: stepCountIs(8)
+      });
+    } catch (err: unknown) {
+      // "No provider configured" is an operator-actionable state, so it
+      // comes back as data the dashboard can render. Every other failure
+      // (provider outage, malformed model output, a tool-loop error)
+      // propagates as an RPC rejection, as it did before, so it stays
+      // visible in the activity log.
+      if (err instanceof NoModelProviderError) {
+        return { error: err.message };
+      }
+      this.log(
+        "error",
+        `Cloudflare MCP task failed: ${errMsg(err)}`,
+        "promptEngineer"
+      );
+      throw err;
+    }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
       "info",

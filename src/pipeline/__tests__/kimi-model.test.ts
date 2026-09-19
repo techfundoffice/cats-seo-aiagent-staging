@@ -1,155 +1,140 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  generateTextMock,
-  aiGenerateWithPollMock,
-  createOpenRouterMock,
-  createWorkersAIMock
+  callClaudeCodeTextMock,
+  getClaudeCodeLanguageModelMock,
+  resolveClaudeCodeSubscriptionMock,
+  cooldownMock
 } = vi.hoisted(() => ({
-  generateTextMock: vi.fn(),
-  aiGenerateWithPollMock: vi.fn(),
-  createOpenRouterMock: vi.fn(() => vi.fn(() => "openrouter-model")),
-  createWorkersAIMock: vi.fn(() => vi.fn(() => "workers-model"))
+  callClaudeCodeTextMock: vi.fn(),
+  getClaudeCodeLanguageModelMock: vi.fn(() => "claude-model"),
+  resolveClaudeCodeSubscriptionMock: vi.fn((): { token: string } | null => ({
+    token: "t"
+  })),
+  cooldownMock: vi.fn(() => 0)
 }));
 
-vi.mock("ai", () => ({
-  generateText: generateTextMock
-}));
-
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: createOpenRouterMock
-}));
-
-vi.mock("workers-ai-provider", () => ({
-  createWorkersAI: createWorkersAIMock
-}));
-
-vi.mock("../ai-poll", () => ({
-  aiGenerateWithPoll: aiGenerateWithPollMock
+vi.mock("../claude-code-subscription", () => ({
+  callClaudeCodeText: callClaudeCodeTextMock,
+  getClaudeCodeLanguageModel: getClaudeCodeLanguageModelMock,
+  resolveClaudeCodeSubscription: resolveClaudeCodeSubscriptionMock,
+  getClaudeRateLimitCooldownRemainingMs: cooldownMock,
+  resolveClaudeCallTimeoutMs: (ms?: number) => ms ?? 120_000,
+  getClaudeCodeModelId: () => "claude-sonnet-4-5",
+  isClaudeAuthError: () => false,
+  lastClaudeSuccessMeta: { modelId: "claude-sonnet-4-5", tokenSource: "test" },
+  CLAUDE_CODE_CALL_FAILED_LOG_PREFIX: "[claude-code] Anthropic call failed"
 }));
 
 import {
+  getFreeModel,
+  getKimiModel,
+  getScoutModel,
   isDegenerateOutput,
-  runKimiWithPoll,
-  setRotatedOpenRouterKey
+  runKimiWithPoll
 } from "../kimi-model";
 
-describe("runKimiWithPoll", () => {
-  beforeEach(() => {
-    generateTextMock.mockReset();
-    aiGenerateWithPollMock.mockReset();
-    createOpenRouterMock.mockClear();
-    createWorkersAIMock.mockClear();
-    setRotatedOpenRouterKey(null);
-  });
+const ENV = {} as unknown as Env;
 
-  it("falls back to Workers AI when OpenRouter returns a non-JSON response", async () => {
-    generateTextMock.mockRejectedValueOnce(
-      new Error("Invalid JSON response — cause: JSON parsing failed: Text:")
-    );
-    aiGenerateWithPollMock.mockResolvedValueOnce("<article>fallback</article>");
+function makeAgent() {
+  const logs: string[] = [];
+  return {
+    agent: { log: (_l: string, m: string) => logs.push(m) } as never,
+    logs
+  };
+}
 
-    const logs: Array<{ level: string; message: string; role: string }> = [];
-    const agent = {
-      log: (level: string, message: string, role: string) => {
-        logs.push({ level, message, role });
-      },
-      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    } as const;
+beforeEach(() => {
+  callClaudeCodeTextMock.mockReset();
+  getClaudeCodeLanguageModelMock.mockClear();
+  getClaudeCodeLanguageModelMock.mockReturnValue("claude-model");
+  resolveClaudeCodeSubscriptionMock.mockReturnValue({ token: "t" });
+  cooldownMock.mockReturnValue(0);
+});
 
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+describe("Claude is the only provider", () => {
+  it("returns Claude's text and honours the caller's timeout budget", async () => {
+    callClaudeCodeTextMock.mockResolvedValueOnce("<article>ok</article>");
+    const { agent, logs } = makeAgent();
 
     const text = await runKimiWithPoll(
-      env,
-      {
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        max_tokens: 2048
-      },
+      ENV,
+      { prompt: "Write." },
       { syncTimeoutMs: 90_000 },
-      agent as never
+      agent
     );
 
-    expect(text).toBe("<article>fallback</article>");
-    expect(generateTextMock).toHaveBeenCalledTimes(1);
-    expect(generateTextMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "openrouter-model",
-        maxOutputTokens: 2048,
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        providerOptions: { openrouter: { reasoning: { enabled: false } } }
-      })
+    expect(text).toBe("<article>ok</article>");
+    expect(callClaudeCodeTextMock).toHaveBeenCalledWith(
+      ENV,
+      expect.objectContaining({ prompt: "Write.", timeoutMs: 90_000 })
     );
-    expect(aiGenerateWithPollMock).toHaveBeenCalledWith(
-      env.AI,
-      "@cf/qwen/qwen3-30b-a3b-fp8",
-      {
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        max_tokens: 2048
-      },
-      expect.objectContaining({
-        syncTimeoutMs: 90_000,
-        onWarn: expect.any(Function)
-      })
-    );
-    expect(logs).toContainEqual({
-      level: "warning",
-      message:
-        "[kimi-model] OpenRouter call failed (Invalid JSON response — cause: JSON parsing failed: Text:); falling back to Workers AI",
-      role: "contentCreator"
-    });
+    expect(logs.some((m) => m.includes("syncTimeoutMs=90000"))).toBe(true);
   });
 
-  it("falls back to Workers AI when OpenRouter returns degenerate (token-repetition-collapse) output", async () => {
-    // Abbreviated form of the real 2026-07-10 incident output — pure
-    // digit/punctuation noise from the first character, long enough to
-    // clear the empty-response check but not real prose.
+  it("throws instead of falling back when Claude fails — there is no second provider", async () => {
+    // OpenRouter/Kimi used to sit here and Workers AI behind that. Both are
+    // gone, so a Claude failure has to surface, not silently degrade.
+    callClaudeCodeTextMock.mockRejectedValueOnce(
+      new Error("401 invalid token")
+    );
+    const { agent, logs } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/401 invalid token/);
+    expect(logs.some((m) => m.includes("no fallback provider exists"))).toBe(
+      true
+    );
+  });
+
+  it("throws when no Claude subscription is configured, without calling out", async () => {
+    resolveClaudeCodeSubscriptionMock.mockReturnValue(null);
+    const { agent } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/No model provider available/);
+    expect(callClaudeCodeTextMock).not.toHaveBeenCalled();
+  });
+
+  it("throws while an Anthropic rate-limit cooldown is active", async () => {
+    cooldownMock.mockReturnValue(30_000);
+    const { agent } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/rate-limit cooldown/);
+    expect(callClaudeCodeTextMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses degenerate Claude output rather than passing it off as a generation", async () => {
     const degenerate =
       "Sam: 107000. 8.gs 165000 8. 2000... " +
       "100000450005581856567400000010158000009000145000000045002800060011800000500000664001680068000".repeat(
         3
       );
-    generateTextMock.mockResolvedValueOnce({
-      text: degenerate,
-      finishReason: "stop"
-    });
-    aiGenerateWithPollMock.mockResolvedValueOnce("<article>fallback</article>");
+    callClaudeCodeTextMock.mockResolvedValueOnce(degenerate);
+    const { agent } = makeAgent();
 
-    const logs: Array<{ level: string; message: string; role: string }> = [];
-    const agent = {
-      log: (level: string, message: string, role: string) => {
-        logs.push({ level, message, role });
-      },
-      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    } as const;
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/degenerate output/);
+  });
 
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+  it("routes every model selector to Claude", () => {
+    for (const pick of [getKimiModel, getFreeModel, getScoutModel]) {
+      getClaudeCodeLanguageModelMock.mockClear();
+      expect(pick(ENV)).toBe("claude-model");
+      expect(getClaudeCodeLanguageModelMock).toHaveBeenCalled();
+    }
+  });
 
-    const text = await runKimiWithPoll(
-      env,
-      {
-        messages: [{ role: "user", content: "Write an article." }],
-        max_tokens: 2048
-      },
-      {},
-      agent as never
-    );
-
-    expect(text).toBe("<article>fallback</article>");
-    expect(aiGenerateWithPollMock).toHaveBeenCalledTimes(1);
-    expect(
-      logs.some(
-        (l) =>
-          l.level === "warning" &&
-          l.message.includes("degenerate output") &&
-          l.message.includes("falling back to Workers AI")
-      )
-    ).toBe(true);
+  it("makes every selector throw when Claude is unavailable", () => {
+    resolveClaudeCodeSubscriptionMock.mockReturnValue(null);
+    for (const pick of [getKimiModel, getFreeModel, getScoutModel]) {
+      expect(() => pick(ENV)).toThrow(/No model provider available/);
+    }
   });
 });
 

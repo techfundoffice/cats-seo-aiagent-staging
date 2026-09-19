@@ -2,7 +2,7 @@ import type { SEOArticleAgent } from "../server";
 import { errMsg, getEnvBinding } from "./http-utils";
 
 /**
- * article-image.ts — Cloudflare-native article image generation.
+ * article-image.ts — article image generation (currently disabled).
  *
  * Ported from the production repo's `src/pipeline/images.ts` (deleted
  * 2026-05-14 as "dead code" after its `pub.catsluvus.com` R2 custom
@@ -23,12 +23,12 @@ import { errMsg, getEnvBinding } from "./http-utils";
  * product shots next to real ones is an editorial call).
  */
 
-// FLUX.2 Klein 4B — fast, cheap; hero/blog imagery.
-const BLOG_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
-// FLUX.2 Dev — premium quality; product imagery.
-const PRODUCT_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
-// Fallback when Klein/Dev are unavailable.
-const FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+// Inert: kept only so the hero/product call sites keep their distinct
+// "which kind of image is this" argument, which a replacement provider will
+// want. Nothing dispatches on these any more — `generateSingleImage`
+// ignores the model and returns null. They are NOT live Cloudflare models.
+const BLOG_IMAGE_MODEL = "cf-flux-2-klein-4b (retired)";
+const PRODUCT_IMAGE_MODEL = "cf-flux-2-dev (retired)";
 
 /** seo-images-staging bucket's managed public domain (enabled 2026-07-23). */
 export const DEFAULT_IMAGES_PUBLIC_BASE_URL =
@@ -238,78 +238,25 @@ export function productImageR2Key(
   return `articles/${categorySlug}/${slug}-product-${productIndex}.jpg`;
 }
 
-/**
- * FLUX.2 models reject the AI binding's JSON input ("required properties
- * at '/' are 'multipart'", schema change observed 2026-07-24) — they only
- * accept multipart/form-data, which the binding cannot send. Call the
- * Workers AI REST endpoint directly for those models.
- */
-const MULTIPART_ONLY_MODELS = new Set([BLOG_IMAGE_MODEL, PRODUCT_IMAGE_MODEL]);
-
-async function runImageModelMultipart(
-  env: unknown,
-  model: string,
-  prompt: string
-): Promise<string | null> {
-  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
-  if (!accountId || !apiToken) {
-    throw new Error("CF API creds missing for multipart image model call");
-  }
-  const form = new FormData();
-  form.append("prompt", prompt);
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}` },
-      body: form
-    }
-  );
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${detail.slice(0, 160)}`);
-  }
-  const json = (await res.json()) as { result?: { image?: unknown } };
-  return typeof json.result?.image === "string" ? json.result.image : null;
-}
-
 async function generateSingleImage(
-  agent: SEOArticleAgent,
-  prompt: string,
-  model: string
+  _agent: SEOArticleAgent,
+  _prompt: string,
+  _model: string
 ): Promise<Uint8Array | null> {
-  const ai = (
-    agent.envBindings as {
-      AI?: { run: (model: string, inputs: unknown) => Promise<unknown> };
-    }
-  ).AI;
-  const models = [model, FALLBACK_MODEL];
-
-  for (const m of models) {
-    try {
-      let base64: string | null = null;
-      if (MULTIPART_ONLY_MODELS.has(m)) {
-        base64 = await runImageModelMultipart(agent.envBindings, m, prompt);
-      } else {
-        if (!ai) continue;
-        const result = await ai.run(m, { prompt });
-        if (
-          result &&
-          typeof result === "object" &&
-          "image" in (result as Record<string, unknown>) &&
-          typeof (result as Record<string, unknown>).image === "string"
-        ) {
-          base64 = (result as Record<string, string>).image;
-        }
-      }
-      if (base64) {
-        return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      }
-    } catch (err: unknown) {
-      agent.log("warning", `Image model ${m} failed: ${errMsg(err)}`);
-    }
-  }
+  // Image generation is switched off, and unlike every other model call in
+  // this pipeline it could not be moved to the Claude Code subscription:
+  // Anthropic has no image-generation API. Claude accepts images as input
+  // (that is what the Step 15 vision audit uses) but does not emit them.
+  //
+  // Both former paths billed Cloudflare neurons for the same account — the
+  // `env.AI` binding and the REST `accounts/<id>/ai/run/<model>` endpoint —
+  // so they are gone rather than flag-gated, leaving no route back to a
+  // neuron charge. Callers already handle a null image by publishing
+  // without one.
+  //
+  // To restore illustrated articles, wire a non-Cloudflare image provider
+  // here (its key belongs in Doppler) and return the decoded bytes; the R2
+  // upload, alt text, captions and HTML assembly all still work unchanged.
   return null;
 }
 

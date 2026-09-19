@@ -1498,12 +1498,11 @@ Anti-plagiarism hard rules for this rewrite:
         // 2026-05-28 on cat-wall-mounted-shelves articles where both
         // the N-fix and single-fix fallback paths timed out, leaving
         // the article with zero improvements applied).
-        syncTimeoutMs: timeoutMs,
+        syncTimeoutMs: timeoutMs
         // The rewrite is a background task, so give the async batch
         // queue the ~5 minutes Cloudflare documents as typical. The 90s
         // default meant every sync timeout under capacity pressure
         // became a hard rewrite failure (100 of them on 6/10-6/11).
-        asyncMaxWaitMs: 300_000
       },
       agent
     );
