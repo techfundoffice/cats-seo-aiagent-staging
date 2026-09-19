@@ -203,13 +203,45 @@ provider inline.
 - `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
   siss-optimizer) and is the only path with real try-then-fall-back behavior.
 
-Staging is **Claude-only, with one fallback**: each call tries the Claude Code
-subscription (`claude-code-subscription.ts`), then falls through to Kimi K2.5
-via OpenRouter when `OPENROUTER_API_KEY` is set. There is no third leg. Claude
-is skipped on no subscription token, an active 429 cooldown, or a call failure.
-Unlike prod, the OpenRouter Kimi fallback is live code — do not delete it.
+### One provider: Claude. Nothing else.
 
-### No Workers AI — Claude serves every model call
+**The Claude Code subscription is the only model provider in this repo.** There
+is no fallback. `requireClaude(env)` in `kimi-model.ts` is the single gate every
+selector funnels through, so exactly one place decides what runs.
+
+| Removed                           | Was                                       | Why                                                                                   |
+| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| Workers AI (`env.AI`)             | Qwen3 / Kimi / Llava / flux               | billed in neurons — 65,371,887 of them ($719.09) on the Aug 14 – Sep 13, 2026 invoice |
+| OpenRouter (Kimi K2.5)            | last-resort text fallback                 | second provider, separate bill                                                        |
+| OpenAI (`text-embedding-3-small`) | `lib/codebase-search.ts` query embeddings | second provider, separate bill                                                        |
+
+On any Claude failure — no token, expired/invalid token, active 429 cooldown,
+empty or degenerate output — the call **throws** `NoModelProviderError`. It does
+not return `""`: every caller treats a throw as "this step produced nothing" and
+has its own recovery, whereas an empty string reads as a successful generation
+and can publish.
+
+**Two things Claude cannot do, so they are off rather than migrated:**
+
+- **Image generation.** Anthropic has no image API. `generateSingleImage`
+  returns `null`; articles publish without a hero. Wire a non-Cloudflare
+  provider there to restore it — R2 upload, alt text, captions and HTML
+  assembly all still work.
+- **Embeddings.** Same reason. `searchCodebase` returns
+  `{ available: false, hits: [] }` unconditionally and makes **no** HTTP call.
+  The gate is inside `searchCodebase` itself, not just
+  `isCodebaseSearchEnabled` — that function was never consulted by the call
+  path, so gating it alone left the OpenAI request live.
+
+Leftovers that are inert but not yet deleted: `setRotatedOpenRouterKey` is an
+exported no-op (`server.ts`'s `rotateOpenRouterKeyFromDoppler` still calls it),
+and the OpenRouter health probes in `externalProviderHealth.ts` /
+`kimiProviderHealth.ts` plus OpenRouter wording in dashboard and log strings.
+None of them can invoke a model.
+
+Do not reintroduce a second provider without changing this section first.
+
+### No Workers AI binding
 
 **There is no `ai` binding in `wrangler.jsonc` and no `env.AI` path in `src/`.**
 Workers AI inference is billed in neurons, and the Aug 14 – Sep 13, 2026

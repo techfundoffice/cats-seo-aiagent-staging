@@ -1,142 +1,140 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { generateTextMock, createOpenRouterMock } = vi.hoisted(() => ({
-  generateTextMock: vi.fn(),
-  createOpenRouterMock: vi.fn(() => vi.fn(() => "openrouter-model"))
+const {
+  callClaudeCodeTextMock,
+  getClaudeCodeLanguageModelMock,
+  resolveClaudeCodeSubscriptionMock,
+  cooldownMock
+} = vi.hoisted(() => ({
+  callClaudeCodeTextMock: vi.fn(),
+  getClaudeCodeLanguageModelMock: vi.fn(() => "claude-model"),
+  resolveClaudeCodeSubscriptionMock: vi.fn((): { token: string } | null => ({
+    token: "t"
+  })),
+  cooldownMock: vi.fn(() => 0)
 }));
 
-vi.mock("ai", () => ({
-  generateText: generateTextMock
-}));
-
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: createOpenRouterMock
+vi.mock("../claude-code-subscription", () => ({
+  callClaudeCodeText: callClaudeCodeTextMock,
+  getClaudeCodeLanguageModel: getClaudeCodeLanguageModelMock,
+  resolveClaudeCodeSubscription: resolveClaudeCodeSubscriptionMock,
+  getClaudeRateLimitCooldownRemainingMs: cooldownMock,
+  resolveClaudeCallTimeoutMs: (ms?: number) => ms ?? 120_000,
+  getClaudeCodeModelId: () => "claude-sonnet-4-5",
+  isClaudeAuthError: () => false,
+  lastClaudeSuccessMeta: { modelId: "claude-sonnet-4-5", tokenSource: "test" },
+  CLAUDE_CODE_CALL_FAILED_LOG_PREFIX: "[claude-code] Anthropic call failed"
 }));
 
 import {
+  getFreeModel,
+  getKimiModel,
   getScoutModel,
   isDegenerateOutput,
-  runKimiWithPoll,
-  setRotatedOpenRouterKey
+  runKimiWithPoll
 } from "../kimi-model";
 
-describe("runKimiWithPoll", () => {
-  beforeEach(() => {
-    generateTextMock.mockReset();
-    createOpenRouterMock.mockClear();
-    setRotatedOpenRouterKey(null);
-  });
+const ENV = {} as unknown as Env;
 
-  it("throws when Claude and OpenRouter both fail, instead of billing a third provider", async () => {
-    // Workers AI used to sit behind OpenRouter here, and that is precisely
-    // how a month of writer traffic became a 65M-neuron invoice: whenever
-    // OpenRouter credits ran dry, every call in the pipeline landed on
-    // `env.AI` for as long as that lasted. There is no third leg now.
-    generateTextMock.mockRejectedValueOnce(new Error("OpenRouter 402"));
-    const aiRun = vi.fn();
+function makeAgent() {
+  const logs: string[] = [];
+  return {
+    agent: { log: (_l: string, m: string) => logs.push(m) } as never,
+    logs
+  };
+}
 
-    const logs: string[] = [];
-    const agent = {
-      log: (_lvl: string, msg: string) => logs.push(msg),
-      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    };
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: aiRun }
-    } as unknown as Env;
+beforeEach(() => {
+  callClaudeCodeTextMock.mockReset();
+  getClaudeCodeLanguageModelMock.mockClear();
+  getClaudeCodeLanguageModelMock.mockReturnValue("claude-model");
+  resolveClaudeCodeSubscriptionMock.mockReturnValue({ token: "t" });
+  cooldownMock.mockReturnValue(0);
+});
 
-    await expect(
-      runKimiWithPoll(
-        env,
-        { messages: [{ role: "user", content: "Write." }], max_tokens: 2048 },
-        {},
-        agent as never
-      )
-    ).rejects.toThrow(/No model provider available/);
-
-    // The binding must not be touched even though it is still bound.
-    expect(aiRun).not.toHaveBeenCalled();
-    expect(
-      logs.some((m) => m.includes("no Workers AI fallback exists any more"))
-    ).toBe(true);
-  });
-
-  it("calls OpenRouter with Kimi thinking disabled, and honours the caller's timeout budget", async () => {
-    generateTextMock.mockResolvedValueOnce({
-      text: "<article>ok</article>",
-      finishReason: "stop"
-    });
-
-    const logs: string[] = [];
-    const agent = {
-      log: (_lvl: string, msg: string) => logs.push(msg),
-      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    };
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+describe("Claude is the only provider", () => {
+  it("returns Claude's text and honours the caller's timeout budget", async () => {
+    callClaudeCodeTextMock.mockResolvedValueOnce("<article>ok</article>");
+    const { agent, logs } = makeAgent();
 
     const text = await runKimiWithPoll(
-      env,
-      {
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        max_tokens: 2048
-      },
+      ENV,
+      { prompt: "Write." },
       { syncTimeoutMs: 90_000 },
-      agent as never
+      agent
     );
 
     expect(text).toBe("<article>ok</article>");
-    expect(generateTextMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "openrouter-model",
-        maxOutputTokens: 2048,
-        messages: [{ role: "user", content: "Rewrite this article as HTML." }],
-        providerOptions: { openrouter: { reasoning: { enabled: false } } }
-      })
+    expect(callClaudeCodeTextMock).toHaveBeenCalledWith(
+      ENV,
+      expect.objectContaining({ prompt: "Write.", timeoutMs: 90_000 })
     );
-    // OpenRouter is the last leg now, so the caller's budget has to reach it
-    // rather than being replaced by that leg's own default.
     expect(logs.some((m) => m.includes("syncTimeoutMs=90000"))).toBe(true);
   });
 
-  it("throws rather than returning degenerate OpenRouter output as a successful generation", async () => {
-    // Abbreviated form of the real 2026-07-10 incident output — pure
-    // digit/punctuation noise from the first character, long enough to
-    // clear the empty-response check but not real prose.
+  it("throws instead of falling back when Claude fails — there is no second provider", async () => {
+    // OpenRouter/Kimi used to sit here and Workers AI behind that. Both are
+    // gone, so a Claude failure has to surface, not silently degrade.
+    callClaudeCodeTextMock.mockRejectedValueOnce(
+      new Error("401 invalid token")
+    );
+    const { agent, logs } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/401 invalid token/);
+    expect(logs.some((m) => m.includes("no fallback provider exists"))).toBe(
+      true
+    );
+  });
+
+  it("throws when no Claude subscription is configured, without calling out", async () => {
+    resolveClaudeCodeSubscriptionMock.mockReturnValue(null);
+    const { agent } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/No model provider available/);
+    expect(callClaudeCodeTextMock).not.toHaveBeenCalled();
+  });
+
+  it("throws while an Anthropic rate-limit cooldown is active", async () => {
+    cooldownMock.mockReturnValue(30_000);
+    const { agent } = makeAgent();
+
+    await expect(
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/rate-limit cooldown/);
+    expect(callClaudeCodeTextMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses degenerate Claude output rather than passing it off as a generation", async () => {
     const degenerate =
       "Sam: 107000. 8.gs 165000 8. 2000... " +
       "100000450005581856567400000010158000009000145000000045002800060011800000500000664001680068000".repeat(
         3
       );
-    generateTextMock.mockResolvedValue({
-      text: degenerate,
-      finishReason: "stop"
-    });
-
-    const logs: string[] = [];
-    const agent = {
-      log: (_lvl: string, msg: string) => logs.push(msg),
-      rotateOpenRouterKeyFromDoppler: vi.fn().mockResolvedValue(null)
-    };
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+    callClaudeCodeTextMock.mockResolvedValueOnce(degenerate);
+    const { agent } = makeAgent();
 
     await expect(
-      runKimiWithPoll(
-        env,
-        {
-          messages: [{ role: "user", content: "Write an article." }],
-          max_tokens: 2048
-        },
-        {},
-        agent as never
-      )
-    ).rejects.toThrow(/No model provider available/);
-    expect(logs.some((m) => m.includes("degenerate output"))).toBe(true);
+      runKimiWithPoll(ENV, { prompt: "Write." }, {}, agent)
+    ).rejects.toThrow(/degenerate output/);
+  });
+
+  it("routes every model selector to Claude", () => {
+    for (const pick of [getKimiModel, getFreeModel, getScoutModel]) {
+      getClaudeCodeLanguageModelMock.mockClear();
+      expect(pick(ENV)).toBe("claude-model");
+      expect(getClaudeCodeLanguageModelMock).toHaveBeenCalled();
+    }
+  });
+
+  it("makes every selector throw when Claude is unavailable", () => {
+    resolveClaudeCodeSubscriptionMock.mockReturnValue(null);
+    for (const pick of [getKimiModel, getFreeModel, getScoutModel]) {
+      expect(() => pick(ENV)).toThrow(/No model provider available/);
+    }
   });
 });
 
@@ -170,35 +168,5 @@ describe("isDegenerateOutput", () => {
     const wellOver = "a".repeat(300); // 100% alpha
     expect(isDegenerateOutput(justUnder)).toBe(true);
     expect(isDegenerateOutput(wellOver)).toBe(false);
-  });
-});
-
-describe("getScoutModel", () => {
-  beforeEach(() => {
-    createOpenRouterMock.mockClear();
-    setRotatedOpenRouterKey(null);
-  });
-
-  it("uses the OpenRouter free router when no Claude subscription is configured", () => {
-    // The scout was the only surface that ran on `env.AI` unconditionally —
-    // by design, up to 3 attempts x 2000 output tokens per tick — so it was
-    // a standing neuron charge that no fallback ever relieved. It now runs
-    // on Claude, with the free router behind it; these tests have no Claude
-    // credential, so the free router is what they see.
-    getScoutModel({
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env);
-    expect(createOpenRouterMock).toHaveBeenCalled();
-  });
-
-  it("refuses rather than reaching for the AI binding when no provider is configured", () => {
-    const aiRun = vi.fn();
-    expect(() =>
-      getScoutModel({ AI: { run: aiRun } } as unknown as Env)
-    ).toThrow(/No model provider available/);
-    // `pickNextCategory` catches this per attempt and falls through to its
-    // hardcoded Tier 2 category pool, so discovery continues without neurons.
-    expect(aiRun).not.toHaveBeenCalled();
   });
 });
