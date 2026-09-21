@@ -1,36 +1,28 @@
 /**
  * kimi-model.ts — Provider selector for article / pipeline calls.
  *
- * **Claude-first (staging):** every call site here tries the Claude Code
- * subscription (`./claude-code-subscription`) before Kimi. Unlike prod
- * (Claude-only, OpenRouter/Workers AI commented out), staging must keep
- * working when there is no active Claude credential, so the existing
- * OpenRouter/Workers AI Kimi path below remains a real fallback — not dead
- * code. Claude is skipped (falling straight through to Kimi) when:
- *   - there is no active Claude subscription token
- *     (`resolveClaudeCodeSubscription` returns null), or
- *   - a prior Anthropic 429 put us in a rate-limit cooldown
- *     (`getClaudeRateLimitCooldownRemainingMs() > 0`), or
- *   - the Claude call itself fails (including auth errors —
- *     `isClaudeAuthError`).
+ * **`runKimiWithPoll` is Claude-only by default.** It calls the Claude Code
+ * subscription (`callClaudeCodeTextResult`) and throws on failure — including
+ * a missing token, an Anthropic 429 after the existing retry/cooldown, an
+ * empty or degenerate response. It does not call OpenRouter, Workers AI, or
+ * Doppler OpenRouter key rotation unless the escape hatch is set:
  *
- * When `env.OPENROUTER_API_KEY` is set, the Kimi fallback routes through
- * OpenRouter (~33% cheaper on K2.5: $0.44/$2.00 per M tokens vs Workers AI's
- * $0.60/$3.00). When the key is unset, Kimi calls stay on Workers AI.
+ *   `AI_CHAT_FALLBACK=kimi`
  *
- * - `getKimiModel(env)` → returns a LanguageModel for use with Vercel AI
- *   SDK `generateText()` / `generateObject()` sites. Returns the Claude
- *   LanguageModel when a subscription is active and not cooling down,
- *   otherwise the OpenRouter/Workers AI Kimi model. Because this returns a
- *   model reference (not an awaited call), it cannot retry mid-call — a
- *   Claude auth/runtime error surfacing from a `generateText()` call built
- *   on this model is the caller's to handle. `runKimiWithPoll` below is the
- *   integration point with real try-Claude-then-fall-back behavior.
- * - `runKimiWithPoll(env, params)` → drop-in replacement for
- *   `aiGenerateWithPoll()` at the raw-binding call sites (writer,
- *   siss-optimizer). Tries Claude first; on no-subscription/cooldown/
- *   failure falls through to OpenRouter via AI SDK; falls back further to
- *   the Workers AI sync→async-batch path on HTTP error or empty response.
+ * That var (Worker var or secret; case-insensitive) restores the previous
+ * chain: Claude, then OpenRouter when `OPENROUTER_API_KEY` is set, then
+ * Workers AI Qwen via `aiGenerateWithPoll`. Any other value, including
+ * unset, keeps the Claude-only path. OpenRouter code stays in this file
+ * for that hatch and for `getKimiModel` / `getFreeModel` (later PRs).
+ *
+ * - `getKimiModel(env)` → unchanged this release. Returns a LanguageModel
+ *   for Vercel AI SDK `generateText()` / `generateObject()` sites: Claude
+ *   when a subscription is active and not cooling down, otherwise
+ *   OpenRouter/Workers AI Kimi. It cannot retry mid-call. Scout and
+ *   `getKimiModel`-only sites are out of scope here.
+ * - `runKimiWithPoll(env, params)` → raw-binding call sites (writer,
+ *   siss-optimizer, editorial, keywords, text editor). Claude only, unless
+ *   `AI_CHAT_FALLBACK=kimi`.
  *
  * Kimi thinking mode is disabled in both Kimi paths so max_tokens fund
  * content, not reasoning:
@@ -51,7 +43,7 @@ import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { aiGenerateWithPoll, type AiPollOptions } from "./ai-poll";
 import type { SEOArticleAgent } from "../server";
 import {
-  callClaudeCodeText,
+  callClaudeCodeTextResult,
   CLAUDE_CODE_CALL_FAILED_LOG_PREFIX,
   getClaudeCodeLanguageModel,
   getClaudeCodeModelId,
@@ -144,9 +136,10 @@ export function isDegenerateOutput(text: string): boolean {
  *
  * Used as:
  *   1. the category-scout model (`getScoutModel`), and
- *   2. the `runKimiWithPoll` Workers AI fallback — so article generation keeps
- *      flowing when OpenRouter credits are exhausted instead of wedging on the
- *      timing-out Kimi fallback (the root cause of the 6/6→6/10 publish drought).
+ *   2. the `runKimiWithPoll` Workers AI fallback when `AI_CHAT_FALLBACK=kimi`
+ *      — so that escape hatch still generates when OpenRouter credits are
+ *      exhausted instead of wedging on the timing-out Kimi binding (the root
+ *      cause of the 6/6→6/10 publish drought).
  *
  * Qwen3 ships with reasoning ON by default and can burn the output budget on
  * thinking; callers disable it (`chat_template_kwargs.enable_thinking=false`
@@ -209,10 +202,11 @@ function useClaudeForKimi(env: Env): boolean {
  * Prefers the Claude Code subscription (`getClaudeCodeLanguageModel`) when
  * one is active and not rate-limit-cooling-down; otherwise falls back to
  * Kimi K2.5 — OpenRouter when OPENROUTER_API_KEY is set, otherwise Workers
- * AI. Unlike `runKimiWithPoll`, this returns a model reference rather than
- * an awaited call, so it cannot retry Claude→Kimi mid-request; callers that
- * need that resilience (writer, siss-optimizer, text-editor-agent,
- * editorial-agent, keywords) should use `runKimiWithPoll` instead.
+ * AI. Unchanged this release (PR 3 covers scout / getKimiModel-only sites).
+ * Unlike `runKimiWithPoll`, this returns a model reference rather than an
+ * awaited call, so it cannot switch providers mid-request. Raw-binding
+ * callers (writer, siss-optimizer, text-editor-agent, editorial-agent,
+ * keywords) should use `runKimiWithPoll` instead.
  *
  * Both Kimi paths disable Kimi's thinking mode so max_tokens fund visible
  * content, not internal reasoning that overflows and leaves content="":
@@ -302,40 +296,120 @@ export function getKimiProviderOptions(env: Env):
 }
 
 /**
- * Hard cap on continuation rounds when Kimi returns `finishReason: "length"`.
- * Each round costs ~one max_tokens budget, so 2 rounds = up to 3× the
- * normal call cost. In practice the writer's article-body generation
- * very rarely needs more than 1 round; this exists so a runaway prompt
- * can't burn unbounded cost.
+ * Hard cap on continuation rounds when a chat call returns
+ * `finishReason: "length"`. Each round costs ~one max_tokens budget, so
+ * 2 rounds = up to 3× the normal call cost. Stops a runaway prompt from
+ * burning unbounded cost. Applies to Claude (default) and to OpenRouter
+ * when `AI_CHAT_FALLBACK=kimi`.
  */
 const MAX_CONTINUATION_ROUNDS = 2;
 
+const CONTINUATION_USER_PROMPT =
+  "Continue from exactly where you left off. Do not repeat any text. Do not add a preamble. Finish the response cleanly so the final character is part of a complete sentence (or, if you were emitting JSON, a complete and valid JSON object).";
+
+const NO_KIMI_FALLBACK_SUFFIX =
+  "OpenRouter and Workers AI were not called. Set AI_CHAT_FALLBACK=kimi to restore that chain.";
+
+type ChatTurn = {
+  role: "user" | "system" | "assistant";
+  content: string;
+};
+
+type TextFinish = { text: string; finishReason: string };
+
 /**
- * Drop-in replacement for `aiGenerateWithPoll()`, Claude-first with a Kimi
- * fallback so staging never goes dark for lack of a Claude credential:
- *  1. If a Claude Code subscription is active and we are not in an
- *     Anthropic rate-limit cooldown, call `callClaudeCodeText()`. On
- *     success, return its text. On failure (including auth errors), no
- *     subscription, or an active cooldown, fall through to Kimi.
- *  2. If OPENROUTER_API_KEY is set, call OpenRouter via AI SDK
- *     `generateText()`. On HTTP error or empty response, fall through.
- *  3. Call the existing `aiGenerateWithPoll()` (sync → async batch) on
- *     Workers AI.
+ * True only for the explicit escape hatch. Any other value, including
+ * unset, keeps `runKimiWithPoll` on the Claude Code subscription alone.
+ */
+export function isAiChatFallbackKimi(env: {
+  AI_CHAT_FALLBACK?: string;
+}): boolean {
+  return env.AI_CHAT_FALLBACK?.trim().toLowerCase() === "kimi";
+}
+
+function continuationTurns(base: ChatTurn[], combined: string): ChatTurn[] {
+  return [
+    ...base,
+    { role: "assistant", content: combined },
+    { role: "user", content: CONTINUATION_USER_PROMPT }
+  ];
+}
+
+/**
+ * Concatenate follow-up rounds while the model stops on `finishReason`
+ * `"length"`. Raw text is appended so a trailing space at the cut survives.
+ * OpenRouter rethrows continuation errors (the hatch then tries Workers AI).
+ * Claude keeps the partial (`keepPartialOnError`) so a long article is not
+ * discarded when a later round fails.
+ */
+async function appendContinuations(
+  agent: SEOArticleAgent,
+  baseMessages: ChatTurn[],
+  initial: TextFinish,
+  call: (msgs: ChatTurn[]) => Promise<TextFinish | null>,
+  opts: { providerLabel?: string; keepPartialOnError: boolean }
+): Promise<string> {
+  let combined = initial.text;
+  let finish = initial.finishReason;
+  let rounds = 0;
+  while (finish === "length" && rounds < MAX_CONTINUATION_ROUNDS) {
+    rounds++;
+    const where = opts.providerLabel ? `${opts.providerLabel}, ` : "";
+    agent.log(
+      "info",
+      `[kimi-model] finishReason=length, requesting continuation ${rounds}/${MAX_CONTINUATION_ROUNDS} (${where}current length: ${combined.length} chars)`,
+      "contentCreator"
+    );
+    let next: TextFinish | null;
+    try {
+      next = await call(continuationTurns(baseMessages, combined));
+    } catch (err: unknown) {
+      if (!opts.keepPartialOnError) throw err;
+      agent.log(
+        "warning",
+        `[kimi-model] continuation ${rounds} failed (${errMsg(err)}); using truncated result (${combined.length} chars)`,
+        "contentCreator"
+      );
+      break;
+    }
+    if (!next) {
+      agent.log(
+        "warning",
+        `[kimi-model] continuation ${rounds} returned empty; using truncated result (${combined.length} chars)`,
+        "contentCreator"
+      );
+      break;
+    }
+    combined += next.text;
+    finish = next.finishReason;
+  }
+  if (finish === "length") {
+    agent.log(
+      "warning",
+      `[kimi-model] still truncated after ${MAX_CONTINUATION_ROUNDS} continuations — final length ${combined.length} chars. Downstream parser will get a possibly-incomplete response.`,
+      "contentCreator"
+    );
+  }
+  return combined;
+}
+
+/**
+ * Raw-binding chat helper. Claude Code subscription only, unless
+ * `AI_CHAT_FALLBACK=kimi`.
  *
- * The signature intentionally mirrors `aiGenerateWithPoll` so each call
- * site needs only a function-name and first-arg change (env instead of
- * env.AI). All call sites must pass an `agent` for proper logging.
+ * Default:
+ *  1. Require an active Claude subscription that is not in a 429 cooldown.
+ *  2. Call `callClaudeCodeTextResult`. On `finishReason === "length"`,
+ *     continue up to `MAX_CONTINUATION_ROUNDS` (same resume prompt the
+ *     OpenRouter path uses) so a ~4096 token cap does not truncate the body.
+ *  3. On failure — missing token, cooldown, thrown error (including 429
+ *     after Claude's own retry), empty, or degenerate — throw. Do not call
+ *     OpenRouter, `aiGenerateWithPoll`, or Doppler key rotation.
  *
- * Truncation handling (OpenRouter path only): when `finishReason ===
- * "length"` the response stops mid-sentence — this is the root cause of
- * "ends with ..." paragraphs on the live site. We detect this and issue
- * up to `MAX_CONTINUATION_ROUNDS` continuation calls, each prompting
- * Kimi to resume from the cut point and finish cleanly. The concatenated
- * text is returned as if it were a single response. Claude's response is
- * not continuation-chased here — `callClaudeCodeText` uses its own
- * `max_tokens` budget and this call site's callers size it generously;
- * the Kimi continuation dance exists specifically to compensate for
- * Kimi's smaller effective output budget on OpenRouter.
+ * `AI_CHAT_FALLBACK=kimi` restores the previous chain: Claude, then
+ * OpenRouter (`OPENROUTER_API_KEY`), then Workers AI Qwen.
+ *
+ * All call sites must pass an `agent` for proper logging.
  */
 export async function runKimiWithPoll(
   env: Env,
@@ -373,130 +447,116 @@ export async function runKimiWithPoll(
     return null;
   };
 
-  /**
-   * Run the initial call + continuation loop. Returns concatenated text
-   * once a non-length finish (`stop`, `content_filter`, etc.) is seen or
-   * the round cap is hit.
-   */
   const callOpenRouterWithContinuation = async (
     apiKey: string
   ): Promise<string | null> => {
     const initial = await callOpenRouter(apiKey, messages);
     if (!initial) return null;
-    let combined = initial.text;
-    let finish = initial.finishReason;
-    let rounds = 0;
-    while (finish === "length" && rounds < MAX_CONTINUATION_ROUNDS) {
-      rounds++;
-      agent.log(
-        "info",
-        `[kimi-model] finishReason=length, requesting continuation ${rounds}/${MAX_CONTINUATION_ROUNDS} (current length: ${combined.length} chars)`,
-        "contentCreator"
-      );
-      // Standard continuation prompt: feed the partial back as an
-      // assistant turn and ask the user-turn to resume. Kimi handles this
-      // pattern natively and produces seamless concatenated output.
-      const continuationMessages: Array<{
-        role: "user" | "system" | "assistant";
-        content: string;
-      }> = [
-        ...messages,
-        { role: "assistant", content: combined },
-        {
-          role: "user",
-          content:
-            "Continue from exactly where you left off. Do not repeat any text. Do not add a preamble. Finish the response cleanly so the final character is part of a complete sentence (or, if you were emitting JSON, a complete and valid JSON object)."
-        }
-      ];
-      const next = await callOpenRouter(apiKey, continuationMessages);
-      if (!next) {
-        agent.log(
-          "warning",
-          `[kimi-model] continuation ${rounds} returned empty; using truncated result (${combined.length} chars)`,
-          "contentCreator"
-        );
-        break;
-      }
-      combined += next.text;
-      finish = next.finishReason;
-    }
-    if (finish === "length") {
-      agent.log(
-        "warning",
-        `[kimi-model] still truncated after ${MAX_CONTINUATION_ROUNDS} continuations — final length ${combined.length} chars. Downstream parser will get a possibly-incomplete response.`,
-        "contentCreator"
-      );
-    }
-    return combined;
+    return appendContinuations(
+      agent,
+      messages,
+      initial,
+      (msgs) => callOpenRouter(apiKey, msgs),
+      { keepPartialOnError: false }
+    );
   };
 
-  // ── Claude path (primary) ───────────────────────────────────────────────
-  // Try the Claude Code subscription first. We only attempt this when a
-  // token is on file and we are not sitting out a prior 429's cooldown —
-  // both checks are synchronous and cheap, so we can skip straight to Kimi
-  // without ever touching the network on a known-bad Claude state. Any
-  // other failure (auth error, timeout, degenerate output, empty response)
-  // is caught below and also falls through to Kimi — staging must not go
-  // dark just because the Claude credential is missing or expired.
+  const kimiFallback = isAiChatFallbackKimi(env);
+  const miss = (
+    fallbackLevel: "info" | "warning",
+    fallbackMessage: string,
+    stopMessage: string
+  ): void => {
+    if (kimiFallback) {
+      agent.log(fallbackLevel, fallbackMessage, "contentCreator");
+      return;
+    }
+    agent.log("warning", stopMessage, "contentCreator");
+    throw new Error(stopMessage);
+  };
+
+  // ── Claude path (only path unless AI_CHAT_FALLBACK=kimi) ───────────────
   if (!resolveClaudeCodeSubscription(env)) {
-    agent.log(
+    miss(
       "info",
       "[claude-code] no active Claude subscription token; using Kimi (OpenRouter/Workers AI)",
-      "contentCreator"
+      `[claude-code] no active Claude subscription token; ${NO_KIMI_FALLBACK_SUFFIX}`
     );
   } else {
     const claudeCooldownMs = getClaudeRateLimitCooldownRemainingMs();
     if (claudeCooldownMs > 0) {
-      agent.log(
+      const seconds = Math.ceil(claudeCooldownMs / 1000);
+      miss(
         "info",
-        `[claude-code] skipping Claude — ${Math.ceil(claudeCooldownMs / 1000)}s remaining in Anthropic rate-limit cooldown; using Kimi (OpenRouter/Workers AI)`,
-        "contentCreator"
+        `[claude-code] skipping Claude — ${seconds}s remaining in Anthropic rate-limit cooldown; using Kimi (OpenRouter/Workers AI)`,
+        `[claude-code] Claude rate-limit cooldown ${seconds}s remaining after the existing retry/cooldown; ${NO_KIMI_FALLBACK_SUFFIX}`
       );
     } else {
       const claudeCallTimeoutMs = resolveClaudeCallTimeoutMs(
         opts.syncTimeoutMs
       );
-      try {
-        const claudeText = await callClaudeCodeText(env, {
-          ...params,
+      const callClaude = (msgs: ChatTurn[]): Promise<TextFinish | null> =>
+        callClaudeCodeTextResult(env, {
+          messages: msgs,
+          max_tokens: params.max_tokens,
           timeoutMs: claudeCallTimeoutMs
         });
-        if (claudeText && !isDegenerateOutput(claudeText)) {
-          const meta = lastClaudeSuccessMeta;
-          agent.log(
-            "info",
-            `[claude-code] primary OK (${claudeText.length} chars, model=${meta?.modelId ?? getClaudeCodeModelId(env)}, source=${meta?.tokenSource ?? "unknown"})`,
-            "contentCreator"
+      let claudeMiss: {
+        fallbackMessage: string;
+        stopMessage: string;
+      } | null = null;
+      try {
+        const initial = await callClaude(messages);
+        if (initial) {
+          const combined = await appendContinuations(
+            agent,
+            messages,
+            initial,
+            callClaude,
+            { providerLabel: "claude", keepPartialOnError: true }
           );
-          return claudeText;
-        }
-        if (claudeText) {
-          agent.log(
-            "warning",
-            `[claude-code] returned degenerate output (${claudeText.length} chars, alpha-ratio below threshold — likely token-repetition collapse); falling back to Kimi (OpenRouter/Workers AI)`,
-            "contentCreator"
-          );
+          if (!isDegenerateOutput(combined)) {
+            const meta = lastClaudeSuccessMeta;
+            agent.log(
+              "info",
+              `[claude-code] primary OK (${combined.length} chars, model=${meta?.modelId ?? getClaudeCodeModelId(env)}, source=${meta?.tokenSource ?? "unknown"})`,
+              "contentCreator"
+            );
+            return combined;
+          }
+          claudeMiss = {
+            fallbackMessage: `[claude-code] returned degenerate output (${combined.length} chars, alpha-ratio below threshold — likely token-repetition collapse); falling back to Kimi (OpenRouter/Workers AI)`,
+            stopMessage: `[claude-code] returned degenerate output (${combined.length} chars, alpha-ratio below threshold — likely token-repetition collapse); ${NO_KIMI_FALLBACK_SUFFIX}`
+          };
         } else {
-          agent.log(
-            "warning",
-            "[claude-code] returned empty; falling back to Kimi (OpenRouter/Workers AI)",
-            "contentCreator"
-          );
+          claudeMiss = {
+            fallbackMessage:
+              "[claude-code] returned empty; falling back to Kimi (OpenRouter/Workers AI)",
+            stopMessage: `[claude-code] returned empty; ${NO_KIMI_FALLBACK_SUFFIX}`
+          };
         }
       } catch (err: unknown) {
         const msg = errMsg(err);
         const auth = isClaudeAuthError(err);
         const tag = auth ? " (auth)" : "";
-        agent.log(
-          "warning",
-          `${CLAUDE_CODE_CALL_FAILED_LOG_PREFIX}${tag} (${msg}); falling back to Kimi (OpenRouter/Workers AI)`,
-          "contentCreator"
-        );
+        claudeMiss = {
+          fallbackMessage: `${CLAUDE_CODE_CALL_FAILED_LOG_PREFIX}${tag} (${msg}); falling back to Kimi (OpenRouter/Workers AI)`,
+          stopMessage: `${CLAUDE_CODE_CALL_FAILED_LOG_PREFIX}${tag} (${msg}); ${NO_KIMI_FALLBACK_SUFFIX}`
+        };
+      }
+      if (claudeMiss) {
+        miss("warning", claudeMiss.fallbackMessage, claudeMiss.stopMessage);
       }
     }
   }
 
-  // ── OpenRouter path ─────────────────────────────────────────────────────
+  if (!kimiFallback) {
+    throw new Error(
+      `[claude-code] Claude call did not return text; ${NO_KIMI_FALLBACK_SUFFIX}`
+    );
+  }
+
+  // ── OpenRouter path (AI_CHAT_FALLBACK=kimi only) ────────────────────────
   const key = resolveOpenRouterKey(env);
   if (key) {
     try {
@@ -569,15 +629,14 @@ export async function runKimiWithPoll(
     }
   }
 
-  // ── Workers AI fallback (sync → async-batch path) ───────────────────────
+  // ── Workers AI fallback (AI_CHAT_FALLBACK=kimi only) ────────────────────
   // Runs on fast Qwen3, NOT @cf/moonshotai/kimi-k2.5. The Kimi binding
   // routinely overruns the 150s sync timeout on real generations and rejects
   // batch queuing (error 8007), so when OpenRouter credits are exhausted the
-  // writer had no working path — that wedge caused the 6/6→6/10 publish
+  // hatch had no working path — that wedge caused the 6/6→6/10 publish
   // drought. Qwen3 (MoE, ~3B active params) completes inside the sync window
-  // and supports batch, so generation keeps flowing on the free `env.AI`
-  // binding. OpenRouter Kimi above remains primary, so Kimi-grade quality
-  // returns automatically the moment credits are topped up.
+  // and supports batch. This block is not reached unless
+  // `AI_CHAT_FALLBACK=kimi`.
   //
   // No continuation handling here — `aiGenerateWithPoll` does not expose
   // finishReason. The writer issues bounded per-section calls (≤4096 tokens),

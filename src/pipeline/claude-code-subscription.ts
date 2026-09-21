@@ -1,6 +1,6 @@
 /**
- * Claude Code subscription OAuth token — primary AI path before OpenRouter /
- * Workers AI.
+ * Claude Code subscription OAuth token — the chat path for `runKimiWithPoll`.
+ * OpenRouter / Workers AI run only when `AI_CHAT_FALLBACK=kimi`.
  *
  * Official auth flow (Claude Code docs — Authentication → Generate a long-lived
  * token): https://code.claude.com/docs/en/authentication
@@ -981,6 +981,46 @@ function enrichClaudeError(modelId: string, err: unknown): Error {
   );
 }
 
+export type ClaudeCodeTextParams = {
+  messages?: Array<{
+    role: "user" | "system" | "assistant";
+    content: string;
+  }>;
+  prompt?: string;
+  max_tokens?: number;
+  /**
+   * Per-call abort budget. Callers sizing a long job (the editorial
+   * full-article rewrite asks for 180s) must be able to exceed the default,
+   * and the retry paths depend on getting a *different* budget than the
+   * attempt that just timed out. Clamped to CLAUDE_MAX_CALL_TIMEOUT_MS.
+   */
+  timeoutMs?: number;
+};
+
+/** Raw Claude text plus the AI SDK finish reason (`"length"` = hit max tokens). */
+export type ClaudeCodeTextResult = {
+  /**
+   * Model text with surrounding whitespace kept, so a continuation round can
+   * concatenate without gluing the cut point ("cat " + "food" must stay
+   * "cat food").
+   */
+  text: string;
+  finishReason: string;
+};
+
+/**
+ * Trimmed Claude text. Same call as `callClaudeCodeTextResult`; the string
+ * return stays for callers that do not need `finishReason`.
+ */
+export async function callClaudeCodeText(
+  env: ClaudeCodeEnv,
+  params: ClaudeCodeTextParams
+): Promise<string | null> {
+  const result = await callClaudeCodeTextResult(env, params);
+  const trimmed = result?.text.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 /**
  * Call Claude via Messages API using **Claude Code subscription OAuth**.
  *
@@ -991,25 +1031,14 @@ function enrichClaudeError(modelId: string, err: unknown): Error {
  *
  * Rate limits: honor retry-after / cooldown. No Console API key path here —
  * subscription OAuth only.
+ *
+ * Returns raw text and `finishReason` so `runKimiWithPoll` can continue when
+ * the model stops on `"length"` (the ~4096 max-token cap).
  */
-export async function callClaudeCodeText(
+export async function callClaudeCodeTextResult(
   env: ClaudeCodeEnv,
-  params: {
-    messages?: Array<{
-      role: "user" | "system" | "assistant";
-      content: string;
-    }>;
-    prompt?: string;
-    max_tokens?: number;
-    /**
-     * Per-call abort budget. Callers sizing a long job (the editorial
-     * full-article rewrite asks for 180s) must be able to exceed the default,
-     * and the retry paths depend on getting a *different* budget than the
-     * attempt that just timed out. Clamped to CLAUDE_MAX_CALL_TIMEOUT_MS.
-     */
-    timeoutMs?: number;
-  }
-): Promise<string | null> {
+  params: ClaudeCodeTextParams
+): Promise<ClaudeCodeTextResult | null> {
   // An expired-but-refreshable access_token must be renewed *before* resolving,
   // otherwise `resolveClaudeCodeSubscription` reports "no active Claude token"
   // and the article fails even though we hold a valid refresh_token.
@@ -1087,7 +1116,7 @@ export async function callClaudeCodeText(
     cred: Cred,
     modelId: string,
     maxRetries: number
-  ): Promise<string | null> => {
+  ): Promise<ClaudeCodeTextResult | null> => {
     const provider = createAnthropicFromClaudeCodeToken(cred.token);
     // OAuth Bearer: identity system required, and it MUST be its own system
     // block — one `role: "system"` message per Anthropic system block.
@@ -1095,7 +1124,7 @@ export async function callClaudeCodeText(
     const blocks = cred.useIdentitySystem
       ? systemBlocks
       : systemBlocks.filter((b) => b !== CLAUDE_CODE_IDENTITY_SYSTEM);
-    const { text } = await generateText({
+    const { text, finishReason } = await generateText({
       model: provider(modelId),
       messages: [
         ...blocks.map((content) => ({ role: "system" as const, content })),
@@ -1105,10 +1134,12 @@ export async function callClaudeCodeText(
       maxRetries,
       abortSignal: AbortSignal.timeout(callTimeoutMs)
     });
-    return text?.trim() ? text.trim() : null;
+    const raw = text ?? "";
+    if (!raw.trim()) return null;
+    return { text: raw, finishReason: String(finishReason ?? "") };
   };
 
-  const tryCred = async (cred: Cred): Promise<string | null> => {
+  const tryCred = async (cred: Cred): Promise<ClaudeCodeTextResult | null> => {
     for (const modelId of candidates) {
       try {
         const out = await runOnce(cred, modelId, CLAUDE_RATE_LIMIT_MAX_RETRIES);
@@ -1117,7 +1148,8 @@ export async function callClaudeCodeText(
           lastClaudeSuccessMeta = {
             modelId,
             tokenSource: cred.label,
-            chars: out.length
+            chars: out.text.length,
+            finishReason: out.finishReason
           };
           return out;
         }
@@ -1136,7 +1168,8 @@ export async function callClaudeCodeText(
                 lastClaudeSuccessMeta = {
                   modelId,
                   tokenSource: cred.label,
-                  chars: out.length
+                  chars: out.text.length,
+                  finishReason: out.finishReason
                 };
                 return out;
               }
@@ -1234,6 +1267,7 @@ export let lastClaudeSuccessMeta: {
   modelId: string;
   tokenSource: string;
   chars: number;
+  finishReason: string;
 } | null = null;
 
 /** Walk `statusCode` across AI SDK wrappers (RetryError.errors, Error.cause). */

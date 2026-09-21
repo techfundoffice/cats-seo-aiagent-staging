@@ -166,16 +166,14 @@ export function isDegenerate(keyword: string): boolean {
 }
 
 /**
- * Generate and persist SEO keywords for a category using Kimi K2.5.
+ * Generate and persist SEO keywords for a category.
  *
  * Tries up to 3 attempts; the second and third attempts use a simplified
  * prompt to recover from over-verbose model responses. Every attempt calls
- * the model via `runKimiWithPoll()` (`kimi-model.ts`), which tries paid
- * Kimi on OpenRouter first and automatically falls back to Workers AI
- * (Qwen3) on failure — the same fallback already relied on by the writer,
- * editorial agent, and SISS optimizer — so an OpenRouter credit outage
- * degrades to Workers AI instead of leaving the category with no keywords
- * at all. Each attempt:
+ * the model via `runKimiWithPoll()` (`kimi-model.ts`), which uses the Claude
+ * Code subscription only. Set `AI_CHAT_FALLBACK=kimi` to restore the previous
+ * Claude → OpenRouter → Workers AI chain (the same hatch the writer,
+ * editorial agent, and SISS optimizer share). Each attempt:
  *   1. Calls the model to produce a JSON array of buyer-intent keyword
  *      strings.
  *   2. Runs the raw array through a four-stage filter chain:

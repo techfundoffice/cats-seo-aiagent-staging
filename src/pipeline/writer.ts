@@ -1291,8 +1291,8 @@ async function generateArticleUnsafe(
 
     // Truncate prompt to stay within safe token budgets.
     // 14K chars ≈ 3.5K tokens input; with 4096 max output tokens the total
-    // budget stays under ~7.5K tokens so kimi-k2.5 can complete well within
-    // the 150 s sync timeout on Workers AI.
+    // stays in a range Claude can finish. `runKimiWithPoll` continues when
+    // Claude's finishReason is "length", so a cap does not end the body.
     const truncatedPrompt =
       articlePrompt.length > 14000
         ? articlePrompt.slice(0, 14000) + "\n\n..."
@@ -1300,8 +1300,8 @@ async function generateArticleUnsafe(
 
     let article: ArticleData;
     try {
-      // Single model: Kimi K2.5 via runKimiWithPoll — OpenRouter first (when
-      // OPENROUTER_API_KEY is set), Workers AI fallback otherwise.
+      // Article JSON via runKimiWithPoll: Claude Code subscription only.
+      // Set AI_CHAT_FALLBACK=kimi to restore OpenRouter, then Workers AI.
       const systemPrompt = `You are an expert SEO content writer for catsluvus.com. You ALWAYS respond with a single JSON object. Never include markdown code fences, explanations, or commentary. Your response starts with { and ends with }.`;
 
       const modelPromptCell = formatActivityLogModelPromptCell(
@@ -1320,10 +1320,11 @@ async function generateArticleUnsafe(
             ],
             max_tokens: 4096
           },
-          // Main article generation is the one call worth waiting on: when
-          // Workers AI Kimi is capacity-pressured (error 3040) the sync path
-          // fails instantly and the async batch queue needs well beyond the
-          // 90s default to drain — two articles died at 90s on 6/10.
+          // asyncMaxWaitMs applies only when AI_CHAT_FALLBACK=kimi reaches
+          // Workers AI. On that hatch, a capacity-pressured binding (error
+          // 3040) fails the sync path instantly and the async batch queue
+          // needs well beyond the 90s default — two articles died at 90s
+          // on 6/10.
           { asyncMaxWaitMs: 600_000 },
           agent
         );

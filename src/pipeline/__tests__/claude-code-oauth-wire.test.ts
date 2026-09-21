@@ -407,16 +407,13 @@ describe("per-call abort budget", () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
-  it("runKimiWithPoll forwards syncTimeoutMs instead of swallowing it", async () => {
+  it("runKimiWithPoll forwards syncTimeoutMs to Claude and does not fall back", async () => {
     globalThis.fetch = slowFetch();
     useOAuthToken();
 
-    // Staging's equivalent of prod's dedicated `runClaudeWithPoll` is
-    // `runKimiWithPoll` in `kimi-model.ts` — Claude-first with a fallback to
-    // Kimi (OpenRouter/Workers AI) so staging never goes dark on a Claude
-    // failure. That means a Claude-leg timeout is caught internally rather
-    // than propagating as-is; what must survive is the *budget itself*, on
-    // both legs it touches.
+    // Default chat path is Claude only. A Claude-leg timeout must abort at
+    // the caller's budget and throw — not continue into OpenRouter or
+    // Workers AI.
     const { runKimiWithPoll } = await import("../kimi-model");
     const logged: string[] = [];
     const agent = {
@@ -433,20 +430,43 @@ describe("per-call abort budget", () => {
         { syncTimeoutMs: 250 },
         agent as never
       )
-    ).rejects.toThrow();
+    ).rejects.toThrow(/OpenRouter and Workers AI were not called/);
     // Aborted at the caller's 250ms budget on the Claude leg, not the 120s
-    // default — and the Kimi fallback (which also has no working binding in
-    // this test env) fails fast too, instead of hanging on its own timeout.
+    // default.
     expect(Date.now() - started).toBeLessThan(2000);
 
-    // The Claude leg must actually have been aborted by the 250ms budget
-    // (not have silently waited out the 120s default) before falling back.
     expect(
       logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
     ).toBe(true);
-    // The 250ms budget must also reach the Kimi/Workers-AI fallback leg
-    // (`ai-poll`'s syncTimeoutMs) rather than being swallowed and replaced
-    // with that leg's own default.
+    // Workers AI logs this when the hatch is on. Default must not reach it.
+    expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(false);
+  });
+
+  it("AI_CHAT_FALLBACK=kimi still forwards syncTimeoutMs to Workers AI", async () => {
+    globalThis.fetch = slowFetch();
+    useOAuthToken();
+
+    const { runKimiWithPoll } = await import("../kimi-model");
+    const logged: string[] = [];
+    const agent = {
+      log: (_lvl: string, msg: string) => {
+        logged.push(msg);
+      }
+    };
+
+    const started = Date.now();
+    await expect(
+      runKimiWithPoll(
+        { AI_CHAT_FALLBACK: "kimi" } as unknown as Env,
+        { prompt: "Rewrite this article." },
+        { syncTimeoutMs: 250 },
+        agent as never
+      )
+    ).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(
+      logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
+    ).toBe(true);
     expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(true);
   });
 });
