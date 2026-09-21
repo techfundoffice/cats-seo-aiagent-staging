@@ -318,7 +318,7 @@ export async function runTextEditorAgent(
     role
   );
 
-  // ── 2. Kimi rewrite ────────────────────────────────────────────────────────
+  // ── 2. Claude rewrite ──────────────────────────────────────────────────────
   let rawResponse: string;
   try {
     rawResponse = await runKimiWithPoll(
@@ -340,7 +340,7 @@ export async function runTextEditorAgent(
     const msg = errMsg(err);
     agent.log(
       "warning",
-      `[done] keyword="${keyword}" Kimi call failed — returning original (${msg})`,
+      `[done] keyword="${keyword}" Claude call failed — returning original (${msg}). No other chat model is called.`,
       role
     );
     return article;
