@@ -24,7 +24,6 @@ import type {
   LanguageModelV3CallOptions
 } from "@ai-sdk/provider";
 import type { LanguageModel } from "ai";
-import type { AiPollOptions } from "./ai-poll";
 import type { SEOArticleAgent } from "../server";
 import {
   clearClaudeChatFailureBanner,
@@ -312,6 +311,16 @@ async function appendContinuations(
 }
 
 /**
+ * Options still accepted by `runKimiWithPoll`. Only `syncTimeoutMs` is
+ * forwarded to the Claude call. The Workers AI batch-poll knobs that used
+ * to live on this object were removed with `ai-poll.ts`.
+ */
+interface ClaudePollOptions {
+  /** Timeout ms forwarded to `resolveClaudeCallTimeoutMs`. */
+  syncTimeoutMs?: number;
+}
+
+/**
  * Raw-binding chat helper. Claude Code subscription only.
  *
  *  1. Require an active Claude subscription that is not in a 429 cooldown.
@@ -333,7 +342,7 @@ export async function runKimiWithPoll(
     prompt?: string;
     max_tokens?: number;
   },
-  opts: AiPollOptions = {},
+  opts: ClaudePollOptions = {},
   agent: SEOArticleAgent
 ): Promise<string> {
   const messages =

@@ -109,7 +109,7 @@ latest persisted `EditorialReport` JSON.
 ## Related skills
 
 - `design-audit` — visual QC run BEFORE publish (Step 11.5), uses
-  Cloudflare Browser Rendering + Workers AI Llava. The Editorial
+  Cloudflare Browser Rendering + Claude vision. The Editorial
   Agent is its post-publish counterpart: broader scope (text +
   visuals + rewrite + republish) with longer wall-clock budget.
 - `cloudflare-browser-rendering` — alternative screenshot path we

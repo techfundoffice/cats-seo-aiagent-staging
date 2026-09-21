@@ -6,11 +6,11 @@
  * 2×2×2 truth table for `{ applyFix, textKimiFailed, visualKimiFailed }`
  * × `{ fixesCount === 0, fixesCount > 0 }` can be tested in isolation.
  *
- * The historical bug class this protects against: a Kimi infrastructure
- * failure (OpenRouter token-budget exhaustion, Workers AI quota) being
- * silently converted into a "no findings, article is fine" business
- * outcome — masking the actual editorial QC outage that left 75 articles
- * unreviewed in a single day before this was caught.
+ * The historical bug class this protects against: a model infrastructure
+ * failure being silently converted into a "no findings, article is fine"
+ * business outcome — masking the actual editorial QC outage that left 75
+ * articles unreviewed in a single day before this was caught. Chat failures
+ * are Claude failures; the dashboard red banner is the operator signal.
  */
 
 export type EditorialDecisionKind = "rewrite" | "fail" | "skipped";
@@ -74,7 +74,7 @@ export function classifyEditorialOutcome(
       reason: "kimi-audit-unavailable",
       logLevel: "error",
       logMessage:
-        "both text + visual audits failed at Kimi layer — recording as fail, not skip. Check OpenRouter credits / Workers AI quota."
+        "both text + visual audits failed at the model layer — recording as fail, not skip. Check the red Claude banner."
     };
   }
   if (input.textKimiFailed || input.visualKimiFailed) {

@@ -4,9 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   generateTextMock,
-  aiGenerateWithPollMock,
-  createOpenRouterMock,
-  createWorkersAIMock,
   createAnthropicMock,
   anthropicDoGenerate,
   anthropicModelIds,
@@ -16,13 +13,6 @@ const {
   const anthropicModelIds: string[] = [];
   return {
     generateTextMock: vi.fn(),
-    aiGenerateWithPollMock: vi.fn(),
-    createOpenRouterMock: vi.fn(
-      (): ((...args: unknown[]) => unknown) => () => "openrouter-model"
-    ),
-    createWorkersAIMock: vi.fn(
-      (): ((...args: unknown[]) => unknown) => () => "workers-model"
-    ),
     anthropicDoGenerate,
     anthropicModelIds,
     createAnthropicMock: vi.fn(() => (modelId: string) => {
@@ -44,24 +34,12 @@ vi.mock("ai", () => ({
   generateText: generateTextMock
 }));
 
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: createOpenRouterMock
-}));
-
-vi.mock("workers-ai-provider", () => ({
-  createWorkersAI: createWorkersAIMock
-}));
-
 vi.mock("@ai-sdk/anthropic", () => ({
   createAnthropic: createAnthropicMock
 }));
 
 vi.mock("../claude-oauth-flow", () => ({
   refreshClaudeOAuthToken: refreshOAuthMock
-}));
-
-vi.mock("../ai-poll", () => ({
-  aiGenerateWithPoll: aiGenerateWithPollMock
 }));
 
 import {
@@ -87,14 +65,9 @@ const EMPTY_CALL = { prompt: [] } as LanguageModelV3CallOptions;
 
 function resetProviderMocks(): void {
   generateTextMock.mockReset();
-  aiGenerateWithPollMock.mockReset();
   anthropicDoGenerate.mockReset();
   refreshOAuthMock.mockReset();
   anthropicModelIds.length = 0;
-  createOpenRouterMock.mockReset();
-  createOpenRouterMock.mockImplementation(() => () => "openrouter-model");
-  createWorkersAIMock.mockReset();
-  createWorkersAIMock.mockImplementation(() => () => "workers-model");
   createAnthropicMock.mockReset();
   createAnthropicMock.mockImplementation(() => (modelId: string) => {
     anthropicModelIds.push(modelId);
@@ -133,22 +106,17 @@ function useClaudeToken(): void {
 
 function testAgent(): {
   logs: Array<{ level: string; message: string; role: string }>;
-  rotate: ReturnType<typeof vi.fn>;
   agent: {
     log: (level: string, message: string, role: string) => void;
-    rotateOpenRouterKeyFromDoppler: ReturnType<typeof vi.fn>;
   };
 } {
   const logs: Array<{ level: string; message: string; role: string }> = [];
-  const rotate = vi.fn().mockResolvedValue(null);
   return {
     logs,
-    rotate,
     agent: {
       log: (level: string, message: string, role: string) => {
         logs.push({ level, message, role });
-      },
-      rotateOpenRouterKeyFromDoppler: rotate
+      }
     }
   };
 }
@@ -166,16 +134,13 @@ describe("runKimiWithPoll", () => {
     clearClaudeRateLimitCooldown();
   });
 
-  it("throws without calling OpenRouter or Workers AI when Claude has no token", async () => {
-    const { agent, rotate } = testAgent();
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+  it("throws when Claude has no token and does not call the model", async () => {
+    const { agent } = testAgent();
+    const aiRun = vi.fn();
 
     await expect(
       runKimiWithPoll(
-        env,
+        { AI: { run: aiRun } } as unknown as Env,
         { messages: [{ role: "user", content: "Write an article." }] },
         {},
         agent as never
@@ -183,23 +148,25 @@ describe("runKimiWithPoll", () => {
     ).rejects.toThrow(/No other model was called/);
 
     expect(generateTextMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(rotate).not.toHaveBeenCalled();
+    expect(aiRun).not.toHaveBeenCalled();
   });
 
-  it("throws when Claude fails and does not rotate or fall back", async () => {
+  it("throws when Claude fails and reports the red banner", async () => {
     useClaudeToken();
     generateTextMock.mockRejectedValueOnce(new Error("claude overloaded"));
-    const { agent, rotate } = testAgent();
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+    const notices: ClaudeChatFailureNotice[] = [];
+    setClaudeChatFailureSink({
+      report: (notice) => {
+        notices.push(notice);
+      },
+      clear: () => undefined
+    });
+    const { agent } = testAgent();
+    const aiRun = vi.fn();
 
     await expect(
       runKimiWithPoll(
-        env,
+        { AI: { run: aiRun } } as unknown as Env,
         { messages: [{ role: "user", content: "Write an article." }] },
         {},
         agent as never
@@ -207,43 +174,39 @@ describe("runKimiWithPoll", () => {
     ).rejects.toThrow(/No other model was called/);
 
     expect(generateTextMock).toHaveBeenCalledTimes(1);
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(rotate).not.toHaveBeenCalled();
+    expect(aiRun).not.toHaveBeenCalled();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toMatch(/claude overloaded/);
+    expect(notices[0]?.howToFix.length).toBeGreaterThan(20);
   });
 
-  it("throws on an active Claude 429 cooldown without calling any provider", async () => {
+  it("throws on an active Claude 429 cooldown without calling Claude", async () => {
     useClaudeToken();
     setClaudeRateLimitCooldown(Date.now() + 30_000);
-    const { agent, rotate } = testAgent();
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
+    const { agent } = testAgent();
 
     await expect(
-      runKimiWithPoll(env, { prompt: "Write an article." }, {}, agent as never)
+      runKimiWithPoll(
+        {} as unknown as Env,
+        { prompt: "Write an article." },
+        {},
+        agent as never
+      )
     ).rejects.toThrow(/rate-limit cooldown/);
 
     expect(generateTextMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(rotate).not.toHaveBeenCalled();
   });
 
-  it("returns Claude text and ignores an OpenRouter key", async () => {
+  it("returns Claude text", async () => {
     useClaudeToken();
     generateTextMock.mockResolvedValueOnce({
       text: "A finished article about cats.",
       finishReason: "stop"
     });
     const { agent } = testAgent();
-    const env = {
-      OPENROUTER_API_KEY: "test-openrouter-key",
-      AI: { run: vi.fn() }
-    } as unknown as Env;
 
     const text = await runKimiWithPoll(
-      env,
+      {} as unknown as Env,
       {
         messages: [{ role: "user", content: "Write an article." }],
         max_tokens: 4096
@@ -254,8 +217,6 @@ describe("runKimiWithPoll", () => {
 
     expect(text).toBe("A finished article about cats.");
     expect(generateTextMock).toHaveBeenCalledTimes(1);
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
   });
 
   it("continues Claude when finishReason is length and keeps the cut-point space", async () => {
@@ -283,8 +244,6 @@ describe("runKimiWithPoll", () => {
 
     expect(text).toBe("The quick brown fox jumps over the lazy cat.");
     expect(generateTextMock).toHaveBeenCalledTimes(2);
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
 
     const second = generateTextMock.mock.calls[1]?.[0] as {
       messages: Array<{ content: string }>;
@@ -335,58 +294,19 @@ describe("runKimiWithPoll", () => {
     generateTextMock
       .mockResolvedValueOnce({ text: "partial body ", finishReason: "length" })
       .mockRejectedValueOnce(new Error("continuation aborted"));
-    const { agent, rotate } = testAgent();
+    const { agent } = testAgent();
 
     const text = await runKimiWithPoll(
-      { OPENROUTER_API_KEY: "test-openrouter-key" } as unknown as Env,
+      {} as unknown as Env,
       { prompt: "Write." },
       {},
       agent as never
     );
 
     expect(text).toBe("partial body ");
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(rotate).not.toHaveBeenCalled();
   });
 
-  it("does not call OpenRouter or Workers AI when Claude fails, even if AI_CHAT_FALLBACK=kimi", async () => {
-    useClaudeToken();
-    generateTextMock.mockRejectedValueOnce(new Error("claude down"));
-    const notices: ClaudeChatFailureNotice[] = [];
-    setClaudeChatFailureSink({
-      report: (notice) => {
-        notices.push(notice);
-      },
-      clear: () => undefined
-    });
-    const { agent, rotate } = testAgent();
-    const aiRun = vi.fn();
-
-    await expect(
-      runKimiWithPoll(
-        {
-          AI_CHAT_FALLBACK: "kimi",
-          OPENROUTER_API_KEY: "test-openrouter-key",
-          AI: { run: aiRun }
-        } as unknown as Env,
-        { messages: [{ role: "user", content: "Write an article." }] },
-        {},
-        agent as never
-      )
-    ).rejects.toThrow(/No other model was called/);
-
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(aiRun).not.toHaveBeenCalled();
-    expect(rotate).not.toHaveBeenCalled();
-    expect(notices).toHaveLength(1);
-    expect(notices[0]?.message).toMatch(/claude down/);
-    expect(notices[0]?.howToFix.length).toBeGreaterThan(20);
-  });
-
-  it("stops on degenerate Claude output without calling Workers AI", async () => {
+  it("stops on degenerate Claude output and reports the banner", async () => {
     useClaudeToken();
     const degenerate =
       "Sam: 107000. 8.gs 165000 8. 2000... " +
@@ -408,37 +328,14 @@ describe("runKimiWithPoll", () => {
 
     await expect(
       runKimiWithPoll(
-        {
-          AI_CHAT_FALLBACK: "Kimi",
-          OPENROUTER_API_KEY: "test-openrouter-key",
-          AI: { run: vi.fn() }
-        } as unknown as Env,
+        {} as unknown as Env,
         { messages: [{ role: "user", content: "Write an article." }] },
         {},
         agent as never
       )
     ).rejects.toThrow(/degenerate output/);
 
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
     expect(notices[0]?.howToFix).toMatch(/re-authorize/i);
-  });
-
-  it("does not treat other AI_CHAT_FALLBACK values as the Kimi hatch", async () => {
-    const { agent } = testAgent();
-    await expect(
-      runKimiWithPoll(
-        {
-          AI_CHAT_FALLBACK: "true",
-          OPENROUTER_API_KEY: "test-openrouter-key"
-        } as unknown as Env,
-        { prompt: "Write." },
-        {},
-        agent as never
-      )
-    ).rejects.toThrow(/No other model was called/);
-    expect(generateTextMock).not.toHaveBeenCalled();
-    expect(aiGenerateWithPollMock).not.toHaveBeenCalled();
   });
 });
 
@@ -476,10 +373,7 @@ describe("isDegenerateOutput", () => {
 });
 
 describe("getKimiModel", () => {
-  const envWithKey = {
-    OPENROUTER_API_KEY: "test-openrouter-key",
-    AI: { run: vi.fn() }
-  } as unknown as Env;
+  const env = { AI: { run: vi.fn() } } as unknown as Env;
 
   beforeEach(() => {
     resetProviderMocks();
@@ -493,23 +387,21 @@ describe("getKimiModel", () => {
     clearClaudeRateLimitCooldown();
   });
 
-  it("does not hand OpenRouter when the subscription path succeeds", async () => {
+  it("returns a Claude model when the subscription path succeeds", async () => {
     useClaudeToken();
     anthropicDoGenerate.mockResolvedValue({
       finishReason: "stop",
       content: []
     });
 
-    const model = getKimiModel(envWithKey);
+    const model = getKimiModel(env);
     await generateWith(model);
 
     expect(anthropicDoGenerate).toHaveBeenCalledTimes(1);
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(getKimiProviderOptions(envWithKey)).toBeUndefined();
+    expect(getKimiProviderOptions(env)).toBeUndefined();
   });
 
-  it("walks Claude model fallbacks on 404 and still skips OpenRouter", async () => {
+  it("walks Claude model fallbacks on 404", async () => {
     useClaudeToken();
     const notFound = Object.assign(new Error("not_found_error"), {
       statusCode: 404
@@ -518,36 +410,38 @@ describe("getKimiModel", () => {
       .mockRejectedValueOnce(notFound)
       .mockResolvedValueOnce({ finishReason: "stop", content: [] });
 
-    await generateWith(getKimiModel(envWithKey));
+    await generateWith(getKimiModel(env));
 
     expect(anthropicModelIds.slice(0, 2)).toEqual([
       "claude-sonnet-4-5",
       "claude-sonnet-4-5-20250929"
     ]);
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
   });
 
-  it("throws on Claude failure without calling OpenRouter or Workers AI", async () => {
+  it("throws on Claude failure and reports the red banner", async () => {
     useClaudeToken();
     anthropicDoGenerate.mockRejectedValue(new Error("overloaded"));
+    const notices: ClaudeChatFailureNotice[] = [];
+    setClaudeChatFailureSink({
+      report: (notice) => {
+        notices.push(notice);
+      },
+      clear: () => undefined
+    });
 
-    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
-      /overloaded/
-    );
+    await expect(generateWith(getKimiModel(env))).rejects.toThrow(/overloaded/);
 
     expect(anthropicDoGenerate).toHaveBeenCalledTimes(1);
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
+    expect(notices[0]?.message).toMatch(/overloaded/);
+    expect(notices[0]?.howToFix).toMatch(/dashboard/i);
   });
 
   it("throws when no subscription token is configured", async () => {
-    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
+    await expect(generateWith(getKimiModel(env))).rejects.toThrow(
       /No other model was called/
     );
     expect(createAnthropicMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(getKimiProviderOptions(envWithKey)).toBeUndefined();
+    expect(getKimiProviderOptions(env)).toBeUndefined();
   });
 
   it("refreshes an expiring access token before the Claude call", async () => {
@@ -578,46 +472,16 @@ describe("getKimiModel", () => {
     expect(createAnthropicMock).toHaveBeenCalledWith(
       expect.objectContaining({ authToken: "sk-ant-oat01-new-token" })
     );
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
   it("does not call Claude during a rate-limit cooldown", async () => {
     useClaudeToken();
     setClaudeRateLimitCooldown(Date.now() + 30_000);
 
-    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
+    await expect(generateWith(getKimiModel(env))).rejects.toThrow(
       /rate-limit cooldown/
     );
     expect(anthropicDoGenerate).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-  });
-
-  it("ignores AI_CHAT_FALLBACK and still throws without OpenRouter or Workers AI", async () => {
-    useClaudeToken();
-    anthropicDoGenerate.mockRejectedValue(new Error("overloaded"));
-    const notices: ClaudeChatFailureNotice[] = [];
-    setClaudeChatFailureSink({
-      report: (notice) => {
-        notices.push(notice);
-      },
-      clear: () => undefined
-    });
-
-    await expect(
-      generateWith(
-        getKimiModel({
-          AI_CHAT_FALLBACK: "kimi",
-          OPENROUTER_API_KEY: "test-openrouter-key",
-          AI: { run: vi.fn() }
-        } as unknown as Env)
-      )
-    ).rejects.toThrow(/overloaded/);
-
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(getKimiProviderOptions(envWithKey)).toBeUndefined();
-    expect(notices[0]?.message).toMatch(/overloaded/);
-    expect(notices[0]?.howToFix).toMatch(/dashboard/i);
   });
 });
 
@@ -634,7 +498,7 @@ describe("runScoutChat", () => {
     clearClaudeRateLimitCooldown();
   });
 
-  it("uses the Claude helper and does not call Workers AI Qwen", async () => {
+  it("uses the Claude helper", async () => {
     useClaudeToken();
     generateTextMock.mockResolvedValue({
       text: "senior cat ramps",
@@ -659,11 +523,9 @@ describe("runScoutChat", () => {
         ])
       })
     );
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
-  it("throws when Claude fails and does not call Qwen", async () => {
+  it("throws when Claude fails", async () => {
     useClaudeToken();
     generateTextMock.mockRejectedValue(new Error("claude down"));
 
@@ -674,25 +536,19 @@ describe("runScoutChat", () => {
         maxOutputTokens: 200
       })
     ).rejects.toThrow(/claude down/);
-
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
-  it("does not call Qwen when AI_CHAT_FALLBACK=kimi and Claude is absent", async () => {
+  it("throws when Claude is absent and does not call Workers AI", async () => {
     const aiRun = vi.fn();
     await expect(
-      runScoutChat(
-        {
-          AI_CHAT_FALLBACK: "kimi",
-          AI: { run: aiRun }
-        } as unknown as Env,
-        { system: "system", prompt: "prompt", maxOutputTokens: 200 }
-      )
+      runScoutChat({ AI: { run: aiRun } } as unknown as Env, {
+        system: "system",
+        prompt: "prompt",
+        maxOutputTokens: 200
+      })
     ).rejects.toThrow(/No other model was called/);
 
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
     expect(aiRun).not.toHaveBeenCalled();
+    expect(generateTextMock).not.toHaveBeenCalled();
   });
 });

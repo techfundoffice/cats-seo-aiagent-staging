@@ -1,26 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { generateTextMock, createWorkersAIMock, createOpenRouterMock } =
-  vi.hoisted(() => ({
-    generateTextMock: vi.fn(),
-    createWorkersAIMock: vi.fn(
-      (): ((...args: unknown[]) => unknown) => () => "workers-model"
-    ),
-    createOpenRouterMock: vi.fn(
-      (): ((...args: unknown[]) => unknown) => () => "openrouter-model"
-    )
-  }));
+const { generateTextMock } = vi.hoisted(() => ({
+  generateTextMock: vi.fn()
+}));
 
 vi.mock("ai", () => ({
   generateText: generateTextMock
-}));
-
-vi.mock("workers-ai-provider", () => ({
-  createWorkersAI: createWorkersAIMock
-}));
-
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: createOpenRouterMock
 }));
 
 vi.mock("../keywords", () => ({
@@ -61,9 +46,6 @@ function scoutAgent(env: Record<string, unknown>) {
 describe("scoutHighTicketCategory AI tier", () => {
   beforeEach(() => {
     generateTextMock.mockReset();
-    createWorkersAIMock.mockReset();
-    createWorkersAIMock.mockImplementation(() => () => "workers-model");
-    createOpenRouterMock.mockReset();
     clearClaudeCodeSubscriptionCache();
     clearClaudeRateLimitCooldown();
   });
@@ -73,7 +55,7 @@ describe("scoutHighTicketCategory AI tier", () => {
     clearClaudeRateLimitCooldown();
   });
 
-  it("uses Claude by default and does not call Workers AI Qwen", async () => {
+  it("uses Claude by default", async () => {
     configureClaudeCodeSubscription(
       {
         token: "sk-ant-oat01-test-token",
@@ -102,11 +84,9 @@ describe("scoutHighTicketCategory AI tier", () => {
         ])
       })
     );
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
-  it("does not call Qwen when Claude fails", async () => {
+  it("falls through to the category pool when Claude fails", async () => {
     configureClaudeCodeSubscription(
       {
         token: "sk-ant-oat01-test-token",
@@ -123,22 +103,18 @@ describe("scoutHighTicketCategory AI tier", () => {
 
     expect(saved?.slug).toBe("cat-water-fountains");
     expect(generateTextMock).toHaveBeenCalledTimes(3);
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
-  it("does not call Qwen when AI_CHAT_FALLBACK=kimi and Claude is absent", async () => {
+  it("uses the non-LLM category list when Claude is absent", async () => {
     const aiRun = vi.fn();
     const saved = await scoutHighTicketCategory(
       scoutAgent({
-        AI_CHAT_FALLBACK: "kimi",
         AI: { run: aiRun }
       }) as never
     );
 
     expect(saved?.slug).toBe("cat-water-fountains");
-    expect(createWorkersAIMock).not.toHaveBeenCalled();
-    expect(createOpenRouterMock).not.toHaveBeenCalled();
     expect(aiRun).not.toHaveBeenCalled();
+    expect(generateTextMock).not.toHaveBeenCalled();
   });
 });

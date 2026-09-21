@@ -46,8 +46,8 @@ URL      │                url, slug)   │
       ├─── R2: design-audits/{slug}/desktop.jpg
       │                             ├─ R2: design-audits/{slug}/mobile.jpg
       ▼                             ▼
- analyzeScreenshotWithLlava   analyzeScreenshotWithLlava
-   (via AI Gateway)             (via AI Gateway)
+ analyzeScreenshotWithVision  analyzeScreenshotWithVision
+   (Claude vision)              (Claude vision)
       │                             │
       └──────────────┬──────────────┘
                      ▼
@@ -69,13 +69,13 @@ URL      │                url, slug)   │
 
 ## Code Layout
 
-| File                             | Role                                                                                                                                |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `src/tools/browser-rendering.ts` | Pure `capturePageScreenshot()` + AI-SDK `screenshotPage` tool                                                                       |
-| `src/tools/vision-audit.ts`      | Pure `analyzeScreenshotWithLlava()` + AI-SDK `auditScreenshot` + `auditPageDesign` tools + issue coercion + category classification |
-| `src/tools/index.ts`             | `createDesignAuditTools(agent): ToolSet` — the bundle                                                                               |
-| `src/pipeline/design-audit.ts`   | Deterministic `runDesignAudit()` orchestrator used by `writer.ts`                                                                   |
-| `src/server.ts`                  | Registers the bundle via `agent.designAuditTools` and exposes `/api/verify-design-audit`                                            |
+| File                             | Role                                                                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/tools/browser-rendering.ts` | Pure `capturePageScreenshot()` + AI-SDK `screenshotPage` tool                                                                        |
+| `src/tools/vision-audit.ts`      | Pure `analyzeScreenshotWithVision()` + AI-SDK `auditScreenshot` + `auditPageDesign` tools + issue coercion + category classification |
+| `src/tools/index.ts`             | `createDesignAuditTools(agent): ToolSet` — the bundle                                                                                |
+| `src/pipeline/design-audit.ts`   | Deterministic `runDesignAudit()` orchestrator used by `writer.ts`                                                                    |
+| `src/server.ts`                  | Registers the bundle via `agent.designAuditTools` and exposes `/api/verify-design-audit`                                             |
 
 ## Three Ways to Invoke
 
@@ -95,7 +95,7 @@ persists screenshots, always returns a structured report.
 import { generateText, stepCountIs } from "ai";
 
 const result = await generateText({
-  model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+  model: getKimiModel(agent.envBindings),
   tools: { ...agent.designAuditTools /* ...other tools */ },
   prompt: "Inspect https://catsluvus.com/cats/foo and tell me what's wrong.",
   stopWhen: stepCountIs(5)
@@ -122,8 +122,7 @@ Model decides which tool to call — `screenshotPage` first, or
   (public identifier). Step 11.5 skips if missing.
 - `CLOUDFLARE_API_TOKEN_SECRET` — Worker secret. Must have:
   - **Browser Rendering: Edit** (else 401 code 10000 on `/screenshot`)
-  - **Workers AI: Run** (else 401 when invoking Llava)
-  - **AI Gateway: Run** (else 403 on the gateway route)
+- Vision analysis uses the Claude Code subscription, not Workers AI.
 - `IMAGES_R2` — R2 bucket for screenshot archive (`design-audits/{slug}/`).
 
 ### AI Gateway
@@ -152,7 +151,7 @@ curl -X POST \
 
 ## Category → Content-Addressable Classification
 
-Llava tends to claim every issue is `contentAddressable: true`. We
+Vision models tend to claim every issue is `contentAddressable: true`. We
 override in `CATEGORY_CONTENT_ADDRESSABLE` so only fixable-by-rewrite
 categories flow into Polish:
 

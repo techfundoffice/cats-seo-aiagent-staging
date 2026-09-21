@@ -1652,10 +1652,7 @@ async function generateArticleUnsafe(
                   ],
                   max_tokens: 2048
                 },
-                {
-                  syncTimeoutMs: 60_000,
-                  asyncMaxWaitMs: 30_000
-                },
+                { syncTimeoutMs: 60_000 },
                 agent
               );
               let newSection: {
@@ -1780,10 +1777,7 @@ async function generateArticleUnsafe(
                     ],
                     max_tokens: 2048
                   },
-                  {
-                    syncTimeoutMs: 60_000,
-                    asyncMaxWaitMs: 30_000
-                  },
+                  { syncTimeoutMs: 60_000 },
                   agent
                 );
                 const newSecWc = (sectionText || "")
@@ -1851,10 +1845,7 @@ async function generateArticleUnsafe(
                     ],
                     max_tokens: 1024
                   },
-                  {
-                    syncTimeoutMs: 60_000,
-                    asyncMaxWaitMs: 30_000
-                  },
+                  { syncTimeoutMs: 60_000 },
                   agent
                 );
                 const newFaqWc = (faqText || "")

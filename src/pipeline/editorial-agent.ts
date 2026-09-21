@@ -255,7 +255,7 @@ export async function runEditorialAgent(
   if (isKimiCurrentlyDegraded(agent.state.activityLog ?? [])) {
     agent.log(
       "warning",
-      `Editorial Agent: Kimi is currently degraded (≥3 credit-exhausted hits in live log) — skipping audit + rewrite. Top up OpenRouter credits to re-enable. Original article stays live at kvKey=${kvKey}.`,
+      `Editorial Agent: historical OpenRouter credit-exhaustion lines are still in the activity log (≥3 hits) — skipping audit + rewrite. Original article stays live at kvKey=${kvKey}.`,
       "editorialAgent"
     );
     await incrementEditorialStat(
@@ -1496,18 +1496,13 @@ Anti-plagiarism hard rules for this rewrite:
         max_tokens: outputTokens
       },
       {
-        // 180s budget for the rewrite. Kimi K2.5 routinely takes
-        // 60-120s for a full-article rewrite at 8000 max_tokens; the
-        // prior 90s cap was timing out on long articles (observed
-        // 2026-05-28 on cat-wall-mounted-shelves articles where both
-        // the N-fix and single-fix fallback paths timed out, leaving
-        // the article with zero improvements applied).
-        syncTimeoutMs: timeoutMs,
-        // The rewrite is a background task, so give the async batch
-        // queue the ~5 minutes Cloudflare documents as typical. The 90s
-        // default meant every sync timeout under capacity pressure
-        // became a hard rewrite failure (100 of them on 6/10-6/11).
-        asyncMaxWaitMs: 300_000
+        // 180s budget for the rewrite. Long articles routinely take
+        // 60-120s at 8000 max_tokens; the prior 90s cap was timing out
+        // (observed 2026-05-28 on cat-wall-mounted-shelves articles
+        // where both the N-fix and single-fix paths timed out, leaving
+        // the article with zero improvements applied). Forwarded to
+        // the Claude call only.
+        syncTimeoutMs: timeoutMs
       },
       agent
     );

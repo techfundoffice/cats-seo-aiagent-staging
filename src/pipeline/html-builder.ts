@@ -26,9 +26,9 @@ export interface PickReasoning {
  * editorial reasoning is supposed to end with — see the writer's
  * product-blurb prompt in `src/pipeline/writer.ts` (sentence-3 spec).
  *
- * When Kimi is healthy this marker arrives in every blurb. When Kimi
- * is degraded (OpenRouter credit wall, see `kimiProviderHealth.ts`)
- * sentence-3 frequently goes missing, which the Step 14.5 detector
+ * When the writer is healthy this marker arrives in every blurb. When
+ * generation is degraded, sentence-3 frequently goes missing, which the
+ * Step 14.5 detector
  * in `writer.ts:2169` picks up as a `missing-why-we-like-blurb`
  * defect-finding. The detector logs + records but does NOT block
  * publish, so the live article ends up missing its closing editorial
@@ -1306,7 +1306,7 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
       // Like") because the catsluvus.com front-end injects its own
       // dynamic "You Might Also Like" loader lower on the page.
       // Using the same H2 twice produces duplicate headings that
-      // Llava design-audit correctly flags as structural noise.
+      // The design audit correctly flags duplicate headings as structural noise.
       relatedArticlesHtml = `
         <section class="related-guides" style="margin:32px 0;padding:20px 24px;background:#f8f9fa;border-radius:8px;border-top:3px solid var(--wc-color-primary,#0277BD)">
           <h2 style="font-size:16px;margin:0 0 12px;color:#333">More Guides in This Category</h2>
