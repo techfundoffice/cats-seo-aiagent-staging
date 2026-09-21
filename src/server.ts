@@ -34,6 +34,22 @@ import {
   isDurableObjectResetError,
   maybeEscalateParserError
 } from "./pipeline/escalate-to-claude";
+import {
+  applyPipelineAbort,
+  classifyPipelineAbortReason,
+  generateOneAbortHttpBody,
+  healInterruptedPipeline,
+  parsePipelineRunRecord,
+  pipelineRunLooksInterrupted,
+  PIPELINE_ABORT_HOW_TO_FIX,
+  PIPELINE_RUN_SECRET_KEY,
+  racePipelineWork,
+  setPipelineAbortSignal,
+  settleSuccessfulPipeline,
+  type PipelineAbortReason,
+  type PipelineRunRecord
+} from "./pipeline/pipeline-run-guard";
+import type { ArticleResult } from "./pipeline/writer";
 import { runDefectEval } from "./pipeline/defect-eval-runner";
 import { GoogleSheetsDirectClient } from "./pipeline/google-sheets-direct";
 import { runObserverTick } from "./pipeline/observer-agent";
@@ -2438,6 +2454,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       });
     }
 
+    // A killed isolate does not run generateOne's finally. Heal before the
+    // schedule restore so a stuck "7/24: AI Writing" step does not look idle
+    // and does not immediately start another article.
+    this.healInterruptedPipelineOnStart();
+
     // Re-establish autonomous schedule if agent was running before deploy/hibernation
     if (
       this.state.status === "generating" ||
@@ -2552,6 +2573,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   private _sheetLogQueue: Promise<void> = Promise.resolve();
   private _isPushingSheetWarning = false;
   private _lastQuadraticConfigWarningAt = 0;
+  /** True while generate-one or the autonomous article await is in flight. */
+  private _pipelineRunActive = false;
+  /**
+   * After a timeout/cancel, late `updateStep` calls from the abandoned
+   * Claude write must not put "7/24: AI Writing" back on an idle worker.
+   */
+  private _pipelineWritesSealed = false;
+  /** Set once the abort banner has been written, so a second path cannot double-count. */
+  private _pipelineAbortSettled = false;
+  private _pipelineAbort: AbortController | null = null;
   /**
    * Last parsed step for sheet column **Step #**, set synchronously in
    * `updateStep` before `setState` so `log()` never reads a stale
@@ -2880,6 +2911,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
 
   @callable()
   async scoutNow() {
+    if (this._pipelineRunActive || this.state.status === "generating") {
+      return { error: "Pipeline is already running. Stop it first." };
+    }
     this.setState({
       ...this.state,
       status: "scouting",
@@ -2898,14 +2932,14 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           kanbanStage: "queue"
         }
       );
-      this.setState({ ...this.state, status: "idle" });
+      this.setState(settleSuccessfulPipeline(this.state));
       return claimed;
     }
     this.log(
       "warning",
       "Scout database empty — import keywords via POST /api/admin/keywords/import"
     );
-    this.setState({ ...this.state, status: "idle" });
+    this.setState(settleSuccessfulPipeline(this.state));
     return null;
   }
 
@@ -3093,193 +3127,524 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     return { success: true };
   }
 
-  @callable()
-  async generateOne(keyword: string, category: string) {
-    const slug = keywordToSlug(keyword);
-    this.clearSheetStepColumnECache();
-    this.setState({
-      ...this.state,
-      status: "generating",
-      currentKeyword: keyword,
-      currentCategory: category,
-      currentArticleSlug: slug,
-      currentStep: "Starting..."
-    });
-    const { generateArticle } = await import("./pipeline/writer");
-    const result = await generateArticle(this, keyword, slug, category);
-    if (result.success) {
-      if (result.seoScorecard) {
-        const nextLastSeoScorecard = {
-          keyword,
-          url: result.url ?? "",
-          score: result.seoScore ?? 0,
-          pillars: result.seoScorecard.pillars,
-          checks: result.seoScorecard.checks
-        };
-        const nextLastSeoScorecardQcPromptCells =
-          Array.isArray(result.seoScorecardQcPromptCells) &&
-          result.seoScorecardQcPromptCells.length ===
-            ACTIVITY_LOG_SEO_CHECK_COUNT
-            ? [...result.seoScorecardQcPromptCells]
-            : null;
-        this._pendingQcPromptCells = nextLastSeoScorecardQcPromptCells;
-        this.setState({
-          ...this.state,
-          lastSeoScorecard: nextLastSeoScorecard,
-          lastSeoScorecardQcPromptCells: null
-        });
-      }
-      // Full success bookkeeping — identical to the autonomous loop's
-      // path. Without this, generateOne-published articles never reached
-      // the dashboard: articlesGenerated stayed frozen, the DO articles
-      // table (dashboard data + analytics tick source) never got a row,
-      // the keyword stayed pending, and the Scout DB outcome was never
-      // written.
-      const skipped =
-        (result.seoScore ?? 0) === 0 && (result.wordCount ?? 0) === 0;
-      const kwId = `${category}:${slug}`;
-      this
-        .sql`UPDATE keywords SET status='completed', seo_score=${result.seoScore ?? 0} WHERE id=${kwId}`;
-      if (!skipped) {
-        this
-          .sql`INSERT OR IGNORE INTO articles (slug, category_slug, keyword, kv_key, url, seo_score, word_count)
-          VALUES (${slug}, ${category}, ${keyword}, ${result.kvKey ?? ""}, ${result.url ?? ""}, ${result.seoScore ?? 0}, ${result.wordCount ?? 0})`;
-        this
-          .sql`UPDATE categories SET article_count = article_count + 1 WHERE slug=${category}`;
-        // Feed the dashboard's Published Article Log — same row shape the
-        // autonomous loop appends. Without this, generateOne articles
-        // incremented the counter but never appeared in the panel.
-        const publishedRow = {
-          slug,
-          keyword,
-          categorySlug: category,
-          url: result.url ?? "",
-          kvKey: result.kvKey ?? "",
-          seoScore: result.seoScore ?? 0,
-          wordCount: result.wordCount ?? 0,
-          publishedAt: Date.now(),
-          ...(result.prodUrl ? { prodUrl: result.prodUrl } : {}),
-          promotionStatus: result.promotionStatus ?? "staging-only"
-        };
-        const nextRecentPublished = [
-          publishedRow,
-          ...(this.state.recentPublishedArticles ?? [])
-        ].slice(0, 50);
-        this.setState({
-          ...this.state,
-          articlesGenerated: this.state.articlesGenerated + 1,
-          recentPublishedArticles: nextRecentPublished
-        });
-      }
-      await this.updateScoutKeywordOutcome(
-        slug,
-        "published",
-        result.kvKey ?? "",
-        ""
-      );
-
-      // Fire the Published Article Editorial Agent, exactly as the
-      // autonomous loop does. Without this, a manually generated article
-      // was the ONLY publish path that never got a look at its finished
-      // rendered page: the Step 15 design audit screenshots the article
-      // as it stood at the Step 13 KV write, and Steps 17/18/20 rewrite
-      // it afterwards. The Editorial Agent is the one pass that captures
-      // the page as it actually ships, so both publish paths need it.
-      //
-      // Skipped runs (existing kvKey, nothing regenerated) are excluded —
-      // there is no new page to audit.
-      if (!skipped && result.kvKey) {
-        const referenceUrl = pickEditorialReferenceUrl(category);
-        this.ctx.waitUntil(
-          runEditorialAgent(this, {
-            kvKey: result.kvKey,
-            referenceUrl,
-            applyFix: true
-          }).then(
-            () => undefined,
-            (err: unknown) => {
-              this.log(
-                "error",
-                `Editorial Agent: post-publish orchestrator threw for ${result.kvKey}: ${errMsg(err)}`,
-                "editorialAgent"
-              );
-            }
-          )
+  private healInterruptedPipelineOnStart(): void {
+    const record = this.readPipelineRunRecord();
+    const healed = healInterruptedPipeline(
+      this.state,
+      new Date().toISOString(),
+      record != null
+    );
+    if (healed.healed) {
+      try {
+        this.setState(healed.state);
+        this.clearSheetStepColumnECache();
+        this.stopAutonomousLoopForClaudeFailure();
+        const notice = healed.state.claudeChatFailure;
+        const where = healed.stuckStep ?? "in-flight article";
+        this.log(
+          "error",
+          notice
+            ? `Pipeline interrupted (${where}): ${notice.message} — ${notice.howToFix}`
+            : `Pipeline interrupted (${where}) — cleared stuck step`,
+          "orchestrator"
+        );
+      } catch (err: unknown) {
+        this.log(
+          "error",
+          `Pipeline interrupt heal failed: ${errMsg(err)}`,
+          "orchestrator"
         );
       }
+    }
+    if (record) this.clearPipelineRunRecord();
+  }
 
-      const mirrorCompetitorUrl = this.state.currentCompetitorUrl?.trim() ?? "";
+  private readPipelineRunRecord(): PipelineRunRecord | null {
+    try {
+      const rows = this.sql<{ value: string }>`
+        SELECT value FROM pipeline_secrets WHERE key=${PIPELINE_RUN_SECRET_KEY} LIMIT 1`;
+      return parsePipelineRunRecord(rows[0]?.value);
+    } catch {
+      return null;
+    }
+  }
+
+  private writePipelineRunRecord(record: PipelineRunRecord): void {
+    try {
+      const value = JSON.stringify(record);
+      this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
+        VALUES (${PIPELINE_RUN_SECRET_KEY}, ${value}, unixepoch())
+        ON CONFLICT(key) DO UPDATE SET
+          value=excluded.value,
+          updated_at=excluded.updated_at`;
+    } catch (err: unknown) {
       this.log(
-        "info",
-        `generateOne complete: ${result.url ?? keyword} (SEO ${result.seoScore ?? 0})`,
-        "orchestrator",
-        {
-          keyword,
-          categorySlug: category,
-          kanbanStage: "done",
-          ...(mirrorCompetitorUrl !== ""
-            ? { competitorUrl: mirrorCompetitorUrl }
-            : {}),
-          ...(typeof result.plagiarismPercentage === "number"
-            ? {
-                plagiarismPercentage: result.plagiarismPercentage
-              }
-            : {}),
-          ...(typeof result.liveSeoContentOptimizerNotes === "string" &&
-          result.liveSeoContentOptimizerNotes.trim() !== ""
-            ? {
-                liveSeoContentOptimizerNotes:
-                  result.liveSeoContentOptimizerNotes
-              }
-            : {}),
-          ...(typeof result.sissScore === "number"
-            ? { sissScore: result.sissScore }
-            : {}),
-          ...(typeof result.sissDelta === "number"
-            ? { sissDelta: result.sissDelta }
-            : {}),
-          ...(typeof result.quoraSeederSummary === "string" &&
-          result.quoraSeederSummary.trim() !== ""
-            ? { quoraSeederSummary: result.quoraSeederSummary }
-            : {}),
-          ...(typeof result.reverseLinksInjected === "number"
-            ? { reverseLinksInjected: result.reverseLinksInjected }
-            : {}),
-          ...(result.rssFeedUrl != null
-            ? { rssFeedUrl: result.rssFeedUrl }
-            : {})
-        }
-      );
-    } else {
-      this.setState({
-        ...this.state,
-        articlesFailed: this.state.articlesFailed + 1
-      });
-      void this.updateScoutKeywordOutcome(
-        slug,
-        "failed",
-        "",
-        result.error ?? "unknown"
-      );
-      this.log(
-        "error",
-        `generateOne failed: ${result.error ?? "unknown"}`,
-        "orchestrator",
-        { keyword, categorySlug: category, kanbanStage: "debug" }
+        "warning",
+        `Pipeline run record not saved: ${errMsg(err)}`,
+        "orchestrator"
       );
     }
-    const claudeStopped = this.state.claudeChatFailure != null;
-    this.setState({
-      ...this.state,
-      status: claudeStopped ? "paused" : "idle",
-      currentCategory: null,
-      currentKeyword: null,
-      currentArticleSlug: null,
-      currentStep: null,
-      currentCompetitorUrl: null
-    });
+  }
+
+  private clearPipelineRunRecord(): void {
+    try {
+      this
+        .sql`DELETE FROM pipeline_secrets WHERE key=${PIPELINE_RUN_SECRET_KEY}`;
+    } catch {
+      /* table may be unavailable during a Durable Object reset */
+    }
+  }
+
+  private armPipelineRunWatchdog(): void {
+    try {
+      const existing = this.getSchedules();
+      if (existing.some((s) => s.callback === "pipelineRunWatchdog")) return;
+      this.schedule(
+        Math.max(1, Math.ceil(ARTICLE_PIPELINE_TIMEOUT_MS / 1000)),
+        "pipelineRunWatchdog",
+        undefined,
+        { idempotent: true }
+      );
+    } catch (err: unknown) {
+      this.log(
+        "warning",
+        `Pipeline watchdog not armed: ${errMsg(err)}`,
+        "orchestrator"
+      );
+    }
+  }
+
+  private disarmPipelineRunWatchdog(): void {
+    try {
+      for (const schedule of this.getSchedules()) {
+        if (schedule.callback === "pipelineRunWatchdog") {
+          this.cancelSchedule(schedule.id);
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Alarm callback. Fires if the isolate survived but the article await
+   * never reached its own cleanup (the HTTP race is the fast path; this
+   * covers a dropped request). A run still inside its budget is left alone
+   * so a long Claude write can finish.
+   */
+  async pipelineRunWatchdog(): Promise<void> {
+    const record = this.readPipelineRunRecord();
+    const stuck =
+      this._pipelineRunActive ||
+      pipelineRunLooksInterrupted(this.state) ||
+      record != null;
+    if (!stuck) return;
+    if (
+      record &&
+      Date.now() - record.startedAtMs < ARTICLE_PIPELINE_TIMEOUT_MS - 1000
+    ) {
+      const remainingSec = Math.max(
+        1,
+        Math.ceil(
+          (ARTICLE_PIPELINE_TIMEOUT_MS - (Date.now() - record.startedAtMs)) /
+            1000
+        )
+      );
+      try {
+        this.schedule(remainingSec, "pipelineRunWatchdog", undefined, {
+          idempotent: true
+        });
+      } catch {
+        /* the HTTP race is still the client-facing deadline */
+      }
+      return;
+    }
+    this._pipelineWritesSealed = true;
+    this._pipelineAbort?.abort();
+    this.surfacePipelineAbort(
+      "timeout",
+      "Worker timed out during Claude writing.",
+      record?.keyword ?? this.state.currentKeyword ?? "",
+      record?.category ?? this.state.currentCategory ?? "",
+      record?.slug ?? this.state.currentArticleSlug ?? ""
+    );
+    this._pipelineRunActive = false;
+    this.clearPipelineRunRecord();
+    this.disarmPipelineRunWatchdog();
+  }
+
+  /**
+   * Pause the loop, clear the stuck step, count the failure, and set the
+   * red banner. Idempotent for the lifetime of this attempt.
+   */
+  private surfacePipelineAbort(
+    reason: PipelineAbortReason,
+    detail: string | undefined,
+    keyword: string,
+    category: string,
+    slug: string
+  ): string {
+    if (this._pipelineAbortSettled) {
+      const existing = this.state.claudeChatFailure;
+      return existing
+        ? `${existing.message} — ${existing.howToFix}`
+        : `${detail ?? "Pipeline aborted"} — ${PIPELINE_ABORT_HOW_TO_FIX}`;
+    }
+    const message = detail?.trim() || "Pipeline aborted";
+    let counted = false;
+    const kwId = `${category}:${slug}`;
+    if (kwId !== ":") {
+      try {
+        const rows = this.sql<{
+          id: string;
+          keyword: string;
+          retry_count: number;
+          category_slug: string;
+        }>`SELECT id, keyword, retry_count, category_slug FROM keywords WHERE id=${kwId} LIMIT 1`;
+        const row = rows[0];
+        if (row) {
+          this.recordKeywordFailure(row, message);
+          counted = true;
+        }
+      } catch {
+        /* keyword bookkeeping is best-effort; the banner still has to land */
+      }
+    }
+    const next = applyPipelineAbort(
+      this.state,
+      reason,
+      detail,
+      new Date().toISOString(),
+      { incrementFailed: !counted }
+    );
+    this.setState(next);
+    this._pipelineAbortSettled = true;
     this.clearSheetStepColumnECache();
-    return result;
+    this.stopAutonomousLoopForClaudeFailure();
+    const notice = next.claudeChatFailure;
+    const text = notice
+      ? `${notice.message} — ${notice.howToFix}`
+      : `${message} — ${PIPELINE_ABORT_HOW_TO_FIX}`;
+    this.log("error", `Claude stopped the pipeline: ${text}`, "orchestrator", {
+      keyword,
+      categorySlug: category,
+      kanbanStage: "debug"
+    });
+    if (!counted && slug) {
+      void this.updateScoutKeywordOutcome(slug, "failed", "", text);
+    }
+    return text;
+  }
+
+  private abandonPipelineWork(
+    work: Promise<ArticleResult>,
+    raced:
+      | { status: "timeout" }
+      | { status: "cancelled" }
+      | { status: "threw"; error: unknown },
+    keyword: string,
+    category: string,
+    slug: string
+  ): ArticleResult {
+    this._pipelineWritesSealed = true;
+    const reason: PipelineAbortReason =
+      raced.status === "timeout"
+        ? "timeout"
+        : raced.status === "cancelled"
+          ? "cancel"
+          : classifyPipelineAbortReason(errMsg(raced.error));
+    const detail =
+      raced.status === "threw"
+        ? errMsg(raced.error)
+        : raced.status === "timeout"
+          ? "Worker timed out during Claude writing."
+          : "Article generation was cancelled before it finished.";
+    const errorText = this.surfacePipelineAbort(
+      reason,
+      detail,
+      keyword,
+      category,
+      slug
+    );
+    this._pipelineAbort?.abort();
+    this.waitUntil(this.releaseAbandonedPipelineWork(work));
+    return { success: false, error: errorText } as ArticleResult;
+  }
+
+  /** Drop the seal only after the abandoned Claude call has settled. */
+  private async releaseAbandonedPipelineWork(
+    work: Promise<unknown>
+  ): Promise<void> {
+    try {
+      await work;
+    } catch {
+      /* the abort already recorded the failure */
+    }
+    this._pipelineWritesSealed = false;
+    this._pipelineAbort = null;
+    setPipelineAbortSignal(null);
+  }
+
+  private failGenerateOne(
+    keyword: string,
+    category: string,
+    slug: string,
+    err: unknown
+  ): ArticleResult {
+    const errorText = this.surfacePipelineAbort(
+      classifyPipelineAbortReason(errMsg(err)),
+      errMsg(err),
+      keyword,
+      category,
+      slug
+    );
+    this._pipelineAbort?.abort();
+    return { success: false, error: errorText } as ArticleResult;
+  }
+
+  @callable()
+  async generateOne(
+    keyword: string,
+    category: string,
+    clientSignal?: AbortSignal
+  ) {
+    if (this._pipelineWritesSealed || this._pipelineRunActive) {
+      return {
+        success: false,
+        error: `Worker timed out during Claude writing. — ${PIPELINE_ABORT_HOW_TO_FIX}`
+      } as ArticleResult;
+    }
+    const slug = keywordToSlug(keyword);
+    this._pipelineAbortSettled = false;
+    this._pipelineRunActive = true;
+    this._pipelineWritesSealed = false;
+    const abortController = new AbortController();
+    this._pipelineAbort = abortController;
+    setPipelineAbortSignal(abortController.signal);
+    this.writePipelineRunRecord({
+      keyword,
+      category,
+      slug,
+      startedAtMs: Date.now()
+    });
+    this.armPipelineRunWatchdog();
+    try {
+      this.clearSheetStepColumnECache();
+      this.setState({
+        ...this.state,
+        status: "generating",
+        currentKeyword: keyword,
+        currentCategory: category,
+        currentArticleSlug: slug,
+        currentStep: "Starting..."
+      });
+      const kwId = `${category}:${slug}`;
+      try {
+        this.sql`UPDATE keywords SET status='generating' WHERE id=${kwId}`;
+      } catch {
+        /* a manual keyword may not have a runtime row yet */
+      }
+      const { generateArticle } = await import("./pipeline/writer");
+      const work = generateArticle(this, keyword, slug, category);
+      let raced: Awaited<ReturnType<typeof racePipelineWork<ArticleResult>>>;
+      try {
+        raced = await this.keepAliveWhile(() =>
+          racePipelineWork(work, ARTICLE_PIPELINE_TIMEOUT_MS, clientSignal)
+        );
+      } catch (err: unknown) {
+        raced = { status: "threw", error: err };
+      }
+      if (raced.status !== "ok") {
+        return this.abandonPipelineWork(work, raced, keyword, category, slug);
+      }
+      const result = raced.value;
+      if (result.success) {
+        if (result.seoScorecard) {
+          const nextLastSeoScorecard = {
+            keyword,
+            url: result.url ?? "",
+            score: result.seoScore ?? 0,
+            pillars: result.seoScorecard.pillars,
+            checks: result.seoScorecard.checks
+          };
+          const nextLastSeoScorecardQcPromptCells =
+            Array.isArray(result.seoScorecardQcPromptCells) &&
+            result.seoScorecardQcPromptCells.length ===
+              ACTIVITY_LOG_SEO_CHECK_COUNT
+              ? [...result.seoScorecardQcPromptCells]
+              : null;
+          this._pendingQcPromptCells = nextLastSeoScorecardQcPromptCells;
+          this.setState({
+            ...this.state,
+            lastSeoScorecard: nextLastSeoScorecard,
+            lastSeoScorecardQcPromptCells: null
+          });
+        }
+        // Full success bookkeeping — identical to the autonomous loop's
+        // path. Without this, generateOne-published articles never reached
+        // the dashboard: articlesGenerated stayed frozen, the DO articles
+        // table (dashboard data + analytics tick source) never got a row,
+        // the keyword stayed pending, and the Scout DB outcome was never
+        // written.
+        const skipped =
+          (result.seoScore ?? 0) === 0 && (result.wordCount ?? 0) === 0;
+        const kwId = `${category}:${slug}`;
+        this
+          .sql`UPDATE keywords SET status='completed', seo_score=${result.seoScore ?? 0} WHERE id=${kwId}`;
+        if (!skipped) {
+          this
+            .sql`INSERT OR IGNORE INTO articles (slug, category_slug, keyword, kv_key, url, seo_score, word_count)
+          VALUES (${slug}, ${category}, ${keyword}, ${result.kvKey ?? ""}, ${result.url ?? ""}, ${result.seoScore ?? 0}, ${result.wordCount ?? 0})`;
+          this
+            .sql`UPDATE categories SET article_count = article_count + 1 WHERE slug=${category}`;
+          // Feed the dashboard's Published Article Log — same row shape the
+          // autonomous loop appends. Without this, generateOne articles
+          // incremented the counter but never appeared in the panel.
+          const publishedRow = {
+            slug,
+            keyword,
+            categorySlug: category,
+            url: result.url ?? "",
+            kvKey: result.kvKey ?? "",
+            seoScore: result.seoScore ?? 0,
+            wordCount: result.wordCount ?? 0,
+            publishedAt: Date.now(),
+            ...(result.prodUrl ? { prodUrl: result.prodUrl } : {}),
+            promotionStatus: result.promotionStatus ?? "staging-only"
+          };
+          const nextRecentPublished = [
+            publishedRow,
+            ...(this.state.recentPublishedArticles ?? [])
+          ].slice(0, 50);
+          this.setState({
+            ...this.state,
+            articlesGenerated: this.state.articlesGenerated + 1,
+            recentPublishedArticles: nextRecentPublished
+          });
+        }
+        await this.updateScoutKeywordOutcome(
+          slug,
+          "published",
+          result.kvKey ?? "",
+          ""
+        );
+
+        // Fire the Published Article Editorial Agent, exactly as the
+        // autonomous loop does. Without this, a manually generated article
+        // was the ONLY publish path that never got a look at its finished
+        // rendered page: the Step 15 design audit screenshots the article
+        // as it stood at the Step 13 KV write, and Steps 17/18/20 rewrite
+        // it afterwards. The Editorial Agent is the one pass that captures
+        // the page as it actually ships, so both publish paths need it.
+        //
+        // Skipped runs (existing kvKey, nothing regenerated) are excluded —
+        // there is no new page to audit.
+        if (!skipped && result.kvKey) {
+          const referenceUrl = pickEditorialReferenceUrl(category);
+          this.ctx.waitUntil(
+            runEditorialAgent(this, {
+              kvKey: result.kvKey,
+              referenceUrl,
+              applyFix: true
+            }).then(
+              () => undefined,
+              (err: unknown) => {
+                this.log(
+                  "error",
+                  `Editorial Agent: post-publish orchestrator threw for ${result.kvKey}: ${errMsg(err)}`,
+                  "editorialAgent"
+                );
+              }
+            )
+          );
+        }
+
+        const mirrorCompetitorUrl =
+          this.state.currentCompetitorUrl?.trim() ?? "";
+        this.log(
+          "info",
+          `generateOne complete: ${result.url ?? keyword} (SEO ${result.seoScore ?? 0})`,
+          "orchestrator",
+          {
+            keyword,
+            categorySlug: category,
+            kanbanStage: "done",
+            ...(mirrorCompetitorUrl !== ""
+              ? { competitorUrl: mirrorCompetitorUrl }
+              : {}),
+            ...(typeof result.plagiarismPercentage === "number"
+              ? {
+                  plagiarismPercentage: result.plagiarismPercentage
+                }
+              : {}),
+            ...(typeof result.liveSeoContentOptimizerNotes === "string" &&
+            result.liveSeoContentOptimizerNotes.trim() !== ""
+              ? {
+                  liveSeoContentOptimizerNotes:
+                    result.liveSeoContentOptimizerNotes
+                }
+              : {}),
+            ...(typeof result.sissScore === "number"
+              ? { sissScore: result.sissScore }
+              : {}),
+            ...(typeof result.sissDelta === "number"
+              ? { sissDelta: result.sissDelta }
+              : {}),
+            ...(typeof result.quoraSeederSummary === "string" &&
+            result.quoraSeederSummary.trim() !== ""
+              ? { quoraSeederSummary: result.quoraSeederSummary }
+              : {}),
+            ...(typeof result.reverseLinksInjected === "number"
+              ? { reverseLinksInjected: result.reverseLinksInjected }
+              : {}),
+            ...(result.rssFeedUrl != null
+              ? { rssFeedUrl: result.rssFeedUrl }
+              : {})
+          }
+        );
+      } else {
+        this.setState({
+          ...this.state,
+          articlesFailed: this.state.articlesFailed + 1
+        });
+        void this.updateScoutKeywordOutcome(
+          slug,
+          "failed",
+          "",
+          result.error ?? "unknown"
+        );
+        this.log(
+          "error",
+          `generateOne failed: ${result.error ?? "unknown"}`,
+          "orchestrator",
+          { keyword, categorySlug: category, kanbanStage: "debug" }
+        );
+      }
+      this.setState(settleSuccessfulPipeline(this.state));
+      this.clearSheetStepColumnECache();
+      return result;
+    } catch (err: unknown) {
+      try {
+        return this.failGenerateOne(keyword, category, slug, err);
+      } catch {
+        return {
+          success: false,
+          error: `${errMsg(err)} — ${PIPELINE_ABORT_HOW_TO_FIX}`
+        } as ArticleResult;
+      }
+    } finally {
+      this._pipelineRunActive = false;
+      const abandoned = this._pipelineAbortSettled;
+      if (!abandoned) {
+        this._pipelineAbort = null;
+        setPipelineAbortSignal(null);
+      }
+      const stepLeft = (this.state.currentStep ?? "").trim();
+      if (abandoned || stepLeft === "") {
+        this.clearPipelineRunRecord();
+        this.disarmPipelineRunWatchdog();
+      }
+    }
   }
 
   /** Hide the Claude failure banner. The next failure shows it again. */
@@ -3925,6 +4290,15 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
         // #endregion
 
+        if (this._pipelineRunActive) {
+          this.log(
+            "info",
+            "autonomousLoop: skipped — an article run is already in flight",
+            "orchestrator"
+          );
+          return;
+        }
+
         // 0. Self-heal the Scout DB. `onStart()` resets rows stuck in
         // 'generating', but only in this DO's LOCAL SQLite table — the
         // D1 `scout_keywords` table it claims work from was never swept,
@@ -4036,7 +4410,17 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
               "orchestrator",
               { kanbanStage: "done" }
             );
-            this.setState({ ...this.state, status: "idle" });
+            if (pipelineRunLooksInterrupted(this.state)) {
+              this.surfacePipelineAbort(
+                "unhandled",
+                "Pipeline went idle while a step was still in progress.",
+                this.state.currentKeyword ?? "",
+                this.state.currentCategory ?? "",
+                this.state.currentArticleSlug ?? ""
+              );
+              return;
+            }
+            this.setState(settleSuccessfulPipeline(this.state));
             return;
           }
           this.enqueueClaimedScoutKeyword(claimed);
@@ -4084,16 +4468,50 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         this.sql`UPDATE keywords SET status='generating' WHERE id=${kw.id}`;
 
         const { generateArticle } = await import("./pipeline/writer");
-        const timeoutSentinel = new Promise<"timeout">((resolve) => {
-          setTimeout(() => resolve("timeout"), ARTICLE_PIPELINE_TIMEOUT_MS);
+        const articleAbort = new AbortController();
+        this._pipelineAbort = articleAbort;
+        this._pipelineAbortSettled = false;
+        this._pipelineRunActive = true;
+        this._pipelineWritesSealed = false;
+        setPipelineAbortSignal(articleAbort.signal);
+        this.writePipelineRunRecord({
+          keyword: kw.keyword,
+          category: kw.category_slug,
+          slug: kw.slug,
+          startedAtMs: Date.now()
         });
-        const raced = await Promise.race([
-          generateArticle(this, kw.keyword, kw.slug, kw.category_slug),
-          timeoutSentinel
-        ]);
-        if (raced === "timeout") {
-          const errorMessage = `Pipeline wall-clock budget exceeded (${ARTICLE_PIPELINE_TIMEOUT_MS / 60_000}min) for "${kw.keyword}" — abandoning the wait so the autonomous loop can continue; the underlying call may still resolve in the background and its result is ignored.`;
-          this.recordKeywordFailure(kw, errorMessage);
+        this.armPipelineRunWatchdog();
+        const work = generateArticle(
+          this,
+          kw.keyword,
+          kw.slug,
+          kw.category_slug
+        );
+        const raced = await racePipelineWork(work, ARTICLE_PIPELINE_TIMEOUT_MS);
+        if (raced.status !== "ok") {
+          this._pipelineWritesSealed = true;
+          articleAbort.abort();
+          const errorMessage =
+            raced.status === "threw"
+              ? errMsg(raced.error)
+              : `Worker timed out during Claude writing (${ARTICLE_PIPELINE_TIMEOUT_MS / 60_000}min budget) for "${kw.keyword}".`;
+          const reason: PipelineAbortReason =
+            raced.status === "threw"
+              ? classifyPipelineAbortReason(errorMessage)
+              : "timeout";
+          this.surfacePipelineAbort(
+            reason,
+            raced.status === "timeout"
+              ? "Worker timed out during Claude writing."
+              : errorMessage,
+            kw.keyword,
+            kw.category_slug,
+            kw.slug
+          );
+          this._pipelineRunActive = false;
+          this.clearPipelineRunRecord();
+          this.disarmPipelineRunWatchdog();
+          this.waitUntil(this.releaseAbandonedPipelineWork(work));
           await escalateToCodingAgent(this, {
             kvKey: `${kw.category_slug}:${kw.slug}`,
             keyword: kw.keyword,
@@ -4117,7 +4535,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           }
           return;
         }
-        const result = raced;
+        const result = raced.value;
+        this._pipelineRunActive = false;
+        setPipelineAbortSignal(null);
+        this.clearPipelineRunRecord();
+        this.disarmPipelineRunWatchdog();
 
         // #region agent log
         emitAgentDebugLog(this, {
@@ -4400,18 +4822,33 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             kanbanStage: "debug"
           });
           try {
-            const claudeStopped =
-              isClaudeChatStoppedError(err) ||
-              this.state.claudeChatFailure != null;
-            this.setState({
-              ...this.state,
-              status: claudeStopped ? "paused" : "idle",
-              currentStep: null,
-              currentKeyword: null,
-              currentArticleSlug: null,
-              currentCategory: null,
-              currentCompetitorUrl: null
-            });
+            const inFlight =
+              this._pipelineRunActive ||
+              pipelineRunLooksInterrupted(this.state);
+            if (inFlight && !this._pipelineAbortSettled) {
+              this._pipelineWritesSealed = true;
+              this._pipelineAbort?.abort();
+              this.surfacePipelineAbort(
+                classifyPipelineAbortReason(errMsg(err)),
+                errMsg(err),
+                this.state.currentKeyword ?? "",
+                this.state.currentCategory ?? "",
+                this.state.currentArticleSlug ?? ""
+              );
+            } else {
+              const claudeStopped =
+                isClaudeChatStoppedError(err) ||
+                this.state.claudeChatFailure != null;
+              this.setState({
+                ...this.state,
+                status: claudeStopped ? "paused" : "idle",
+                currentStep: null,
+                currentKeyword: null,
+                currentArticleSlug: null,
+                currentCategory: null,
+                currentCompetitorUrl: null
+              });
+            }
           } catch (setStateErr: unknown) {
             // Log unexpected setState failures so they aren't silently lost.
             // (DO reset errors never reach here since we already checked above.)
@@ -4423,6 +4860,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             );
           }
           this.clearSheetStepColumnECache();
+          this._pipelineRunActive = false;
+          setPipelineAbortSignal(null);
+          this.clearPipelineRunRecord();
+          this.disarmPipelineRunWatchdog();
         }
       }
     });
@@ -7371,7 +7812,22 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             );
             continue;
           }
-          result = await this.generateOne(reqKeyword, reqCategory);
+          try {
+            result = await this.generateOne(
+              reqKeyword,
+              reqCategory,
+              request.signal
+            );
+          } catch (err: unknown) {
+            return Response.json(
+              generateOneAbortHttpBody({
+                keyword: reqKeyword,
+                category: reqCategory,
+                error: `${errMsg(err)} — ${PIPELINE_ABORT_HOW_TO_FIX}`
+              }),
+              { status: 500 }
+            );
+          }
           break;
         }
         if (!result) {
@@ -7385,7 +7841,22 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
       } else {
         if (!reqCategory) reqCategory = "cat-play-tunnels-and-fabric-products";
-        result = await this.generateOne(reqKeyword, reqCategory);
+        try {
+          result = await this.generateOne(
+            reqKeyword,
+            reqCategory,
+            request.signal
+          );
+        } catch (err: unknown) {
+          return Response.json(
+            generateOneAbortHttpBody({
+              keyword: reqKeyword,
+              category: reqCategory,
+              error: `${errMsg(err)} — ${PIPELINE_ABORT_HOW_TO_FIX}`
+            }),
+            { status: 500 }
+          );
+        }
       }
 
       // Build the audit response payload
@@ -7952,6 +8423,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   }
 
   updateStep(step: string) {
+    if (this._pipelineWritesSealed) return;
     this.bumpSheetStepColumnECacheFromPipelineLabel(step);
     const n = extractPipelineStepNumberForSheet(step);
     this.setState({

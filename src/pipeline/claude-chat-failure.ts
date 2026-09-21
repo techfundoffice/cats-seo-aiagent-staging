@@ -7,6 +7,7 @@
  */
 
 import { errMsg } from "./http-utils";
+import { PIPELINE_ABORT_HOW_TO_FIX } from "./pipeline-run-guard";
 
 export type ClaudeChatFailureNotice = {
   /** Human-readable Claude error (no stack, no secrets). */
@@ -66,6 +67,13 @@ export function describeClaudeChatFailure(
   }
   if (/\bempty\b/.test(lower)) {
     return { message, howToFix: HOW_TO_FIX_EMPTY };
+  }
+  if (
+    /worker timed out|exceeded cpu|cpu time limit|wall-clock|deadline exceeded|etimedout|operation was aborted|request was aborted|isolate|durable object reset/.test(
+      lower
+    )
+  ) {
+    return { message, howToFix: PIPELINE_ABORT_HOW_TO_FIX };
   }
   return { message, howToFix: HOW_TO_FIX_GENERIC };
 }

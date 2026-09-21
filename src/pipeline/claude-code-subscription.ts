@@ -28,6 +28,7 @@ import {
 } from "./claude-code-status-display";
 import { errMsg } from "./http-utils";
 import { refreshClaudeOAuthToken } from "./claude-oauth-flow";
+import { getPipelineAbortSignal, linkAbortSignals } from "./pipeline-run-guard";
 
 export type { ClaudeCodeUiStatus } from "./claude-code-status-display";
 
@@ -1132,7 +1133,10 @@ export async function callClaudeCodeTextResult(
       ] as ModelMessage[],
       maxOutputTokens: params.max_tokens ?? 4096,
       maxRetries,
-      abortSignal: AbortSignal.timeout(callTimeoutMs)
+      abortSignal: linkAbortSignals(
+        AbortSignal.timeout(callTimeoutMs),
+        getPipelineAbortSignal()
+      )
     });
     const raw = text ?? "";
     if (!raw.trim()) return null;
