@@ -229,7 +229,7 @@ export async function analyzeSerpIntentGap(
     const msg = errMsg(err);
     agent.log(
       "warning",
-      `Intent Gap: Kimi K2.5 failed — skipping step (${msg})`,
+      `Intent Gap: Claude failed — skipping step (${msg})`,
       "analyst",
       { modelPrompt: modelPromptCell }
     );

@@ -96,9 +96,9 @@ A sandbox session usually **cannot** reach Doppler: no `doppler` CLI, no
 unreachable, say so plainly and name the specific secret that is blocking you;
 that's a one-step fix for the user, not a reason to call the task impossible or
 invent a workaround. With a `DOPPLER_TOKEN` present, prefer the CLI; the REST
-API (`https://api.doppler.com/v3/configs/config/secret`) is the fallback — the
-Worker already uses it in `SEOArticleAgent.rotateOpenRouterKeyFromDoppler()`
-(`src/server.ts`), triggered from `src/pipeline/kimi-model.ts` on a 401.
+API (`https://api.doppler.com/v3/configs/config/secret`) is the fallback when
+the CLI is missing. Chat does not rotate an OpenRouter key. Doppler reads
+for other secrets still use that REST API when a `DOPPLER_TOKEN` is present.
 
 **Composio was removed from this repo on 2026-07-22.** No `@composio/*` deps, no
 `.mcp.json`, no `COMPOSIO_API_KEY`. Anything you find referencing
@@ -197,29 +197,25 @@ All model calls go through `src/pipeline/kimi-model.ts` — never instantiate a
 provider inline.
 
 - `getKimiModel(env)` returns a `LanguageModel` for AI SDK
-  `generateText()`/`generateObject()` sites. It is the Claude Code
-  subscription model: refresh an expiring access token before the call, and
-  on HTTP 404 walk `CLAUDE_CODE_MODEL_FALLBACKS`. On failure it throws.
+  `generateText()`/`generateObject()` sites, including tool loops. It is the
+  Claude Code subscription model: refresh an expiring access token before the
+  call, and on HTTP 404 walk `CLAUDE_CODE_MODEL_FALLBACKS`. On failure it
+  throws `ClaudeChatStoppedError` and the dashboard shows a red banner.
   `runScoutChat` is the category-scout AI tier and uses `callClaudeCodeText`
-  the same way. `getScoutModel` is the Workers AI Qwen model used only when
-  the hatch below is set.
+  the same way.
 - `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
   siss-optimizer, editorial, keywords, text editor). It calls the Claude Code
   subscription only. On failure it throws — it does not call OpenRouter,
-  Workers AI, or Doppler OpenRouter key rotation.
+  Workers AI, LLaVA, or Doppler OpenRouter key rotation.
 
-Set the Worker var/secret `AI_CHAT_FALLBACK=kimi` to restore the previous
-Kimi chain for **all** of those chat paths (`runKimiWithPoll`,
-`getKimiModel`, scout) without a code rollback. Vision, Flux images, and
-embeddings are unchanged. Do not delete the OpenRouter branches yet.
+There is no `AI_CHAT_FALLBACK` hatch. Vision uses Claude only. Flux image
+generation and OpenAI embeddings are unchanged because they cannot use the
+Claude subscription token.
 
-Staging chat generation is **Claude-only** unless `AI_CHAT_FALLBACK=kimi`.
-
-Kimi thinking mode must stay disabled or the model burns `max_tokens` on
-reasoning and returns `content: null`: Workers AI uses
-`chat_template_kwargs: { enable_thinking: false, … }` (inside
-`aiGenerateWithPoll`); OpenRouter needs `reasoning: { enabled: false }` —
-`{ exclude: true }` only _hides_ reasoning and does not fix the bug.
+A Claude failure pauses the autonomous article loop. The red banner at the
+top of the dashboard shows the error and how to fix it (re-authorize, wait
+out a 429, paste a token). Dismiss hides it; the next failure shows it
+again. A later successful Claude call clears it.
 
 ### Data model
 

@@ -1186,7 +1186,7 @@ function ClaudeCodeSubscriptionPanel({
             /* ignore */
           }
           setClaudeSaveMsg(
-            "Authorized — Claude is primary before OpenRouter/Workers AI."
+            "Authorized — Claude is the only chat and vision model."
           );
           return;
         }
@@ -1210,7 +1210,7 @@ function ClaudeCodeSubscriptionPanel({
           /* ignore */
         }
         setClaudeSaveMsg(
-          "Authorized — Claude is primary before OpenRouter/Workers AI."
+          "Authorized — Claude is the only chat and vision model."
         );
       } catch (e: unknown) {
         setClaudeSaveMsg(errMsg(e));
@@ -1707,6 +1707,14 @@ export default function Dashboard() {
       }}
     >
       <div style={{ maxWidth: "56rem", margin: "0 auto" }}>
+        <ClaudeChatFailureBanner
+          state={state}
+          onDismiss={() => {
+            agent.stub.dismissClaudeChatFailure().catch((error: unknown) => {
+              logDashboardControlError("dismissClaudeChatFailure", error);
+            });
+          }}
+        />
         {/* GitHub repo link */}
         <div style={{ marginBottom: "0.75rem" }}>
           <a
@@ -1755,7 +1763,7 @@ export default function Dashboard() {
                 marginTop: "0.25rem"
               }}
             >
-              Autonomous article generation via Workers AI (Kimi K2.5)
+              Autonomous article generation via Claude Code subscription
             </p>
             <p
               style={{
@@ -2915,6 +2923,76 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 // failure pattern detected. Pure derivation — no new state, endpoint,
 // or scheduled tick. Computation tested in
 // src/__tests__/external-provider-health.test.ts.
+function ClaudeChatFailureBanner({
+  state,
+  onDismiss
+}: {
+  state: SEOAgentState;
+  onDismiss: () => void;
+}) {
+  const failure = state.claudeChatFailure;
+  if (!failure?.message) return null;
+  return (
+    <div
+      role="alert"
+      style={{
+        position: "sticky",
+        top: 0,
+        zIndex: 30,
+        background: "#991b1b",
+        color: "#fff",
+        borderRadius: "0.5rem",
+        padding: "0.875rem 1rem",
+        marginBottom: "1rem",
+        boxShadow: "0 4px 14px rgba(153, 27, 27, 0.35)"
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: "1rem",
+          alignItems: "flex-start"
+        }}
+      >
+        <div>
+          <div style={{ fontWeight: 700, marginBottom: "0.35rem" }}>
+            Claude stopped the pipeline
+          </div>
+          <div style={{ fontSize: "0.875rem", lineHeight: 1.45 }}>
+            {failure.message}
+          </div>
+          <div
+            style={{
+              fontSize: "0.875rem",
+              lineHeight: 1.45,
+              marginTop: "0.5rem"
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>How to fix: </span>
+            {failure.howToFix}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          style={{
+            background: "transparent",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.75)",
+            borderRadius: "0.375rem",
+            padding: "0.25rem 0.65rem",
+            cursor: "pointer",
+            flexShrink: 0
+          }}
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ExternalProviderHealthBanner({ state }: { state: SEOAgentState }) {
   const log = getActivityLogEntries(state);
   const degraded = degradedProviders(log);

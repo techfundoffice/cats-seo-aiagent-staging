@@ -1,21 +1,23 @@
 /**
- * Vision-audit tool — Llava 1.5 7B via Workers AI, routed through the
- * `cats-seo-aiagent` AI Gateway. Takes a JPEG screenshot and returns
- * structured design issues with content-addressable classification.
+ * Vision-audit tool — Claude vision only. Takes a JPEG screenshot and
+ * returns structured design issues with content-addressable classification.
+ * A Claude failure throws `ClaudeChatStoppedError` and does not call
+ * another vision model.
  *
  * Two shapes:
- *   - `analyzeScreenshotWithLlava()` — plain async function used by
- *     Step 11.5's deterministic orchestrator.
+ *   - `analyzeScreenshotWithVision()` — plain async function used by
+ *     Step 15's deterministic orchestrator.
  *   - `createAuditScreenshotTool(agent)` — AI-SDK v6 `tool()` wrapper so
  *     agentic callers (QC/Polish loops, external MCP clients) can ask
- *     the vision model for design findings on an arbitrary URL.
+ *     Claude for design findings on an arbitrary URL.
  */
 import { errMsg, getEnvBinding, repairJson } from "../pipeline/http-utils";
 import { generateText, tool } from "ai";
+import { getKimiModel } from "../pipeline/kimi-model";
 import {
-  getClaudeCodeLanguageModel,
-  getClaudeRateLimitCooldownRemainingMs
-} from "../pipeline/claude-code-subscription";
+  isClaudeChatStoppedError,
+  reportClaudeChatFailure
+} from "../pipeline/claude-chat-failure";
 import { z } from "zod";
 import type { SEOArticleAgent } from "../server";
 import { extractEmbeddedJsonCandidates } from "../objectLike";
@@ -39,18 +41,6 @@ export const AUDIT_SCREENSHOT_TOOL_NAME = "auditScreenshot";
 export const AUDIT_URL_TOOL_NAME = "auditPageDesign";
 const VISION_JSON_CANDIDATE_LIMIT = 8;
 
-// Llava 1.5 7B is vision-capable and takes `image` as a byte array.
-const VISION_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
-const AI_GATEWAY_ID = "cats-seo-aiagent";
-const MAX_VISION_RESPONSE_TEXT_DEPTH = 3;
-const VISION_RESPONSE_DIRECT_TEXT_FIELDS = [
-  "description",
-  "response",
-  "result",
-  "text"
-] as const;
-const VISION_RESPONSE_NESTED_FIELDS = ["data", "output", "payload"] as const;
-
 // ── Issue shape and classification ─────────────────────────────────────────────
 
 /** Triage level for a single design-audit finding. */
@@ -70,7 +60,7 @@ export type DesignAuditCategory =
   | "content";
 
 /**
- * A single design-audit issue surfaced by Llava vision analysis.
+ * A single design-audit issue surfaced by Claude vision analysis.
  *
  * `contentAddressable` flags whether the Polish Agent can fix the issue
  * by rewriting copy (headings, CTA text, hero caption, intro paragraph,
@@ -380,64 +370,7 @@ export interface VisionAnalysisResult {
   rawText?: string;
 }
 
-interface VisionRunInput {
-  prompt: string;
-  image: number[];
-  max_tokens: number;
-}
-
-interface VisionRunOptions {
-  gateway: {
-    id: string;
-  };
-}
-
-function extractVisionResponseText(value: unknown, depth = 0): string {
-  if (
-    depth > MAX_VISION_RESPONSE_TEXT_DEPTH ||
-    value === null ||
-    value === undefined
-  ) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nestedText = extractVisionResponseText(item, depth + 1);
-      if (nestedText) {
-        return nestedText;
-      }
-    }
-    return "";
-  }
-  if (typeof value !== "object") {
-    return "";
-  }
-  const record = value as Record<string, unknown>;
-  for (const field of VISION_RESPONSE_DIRECT_TEXT_FIELDS) {
-    const fieldValue = record[field];
-    if (typeof fieldValue === "string" && fieldValue.length > 0) {
-      return fieldValue;
-    }
-  }
-  for (const field of VISION_RESPONSE_NESTED_FIELDS) {
-    const nestedText = extractVisionResponseText(record[field], depth + 1);
-    if (nestedText) {
-      return nestedText;
-    }
-  }
-  return "";
-}
-
-/**
- * Send an image to Llava via AI Gateway. Returns parsed issues, a raw-text
- * tail for debugging, and an error field when the model emitted text but
- * the parser extracted nothing (distinguishes "clean page" from "malformed
- * model output" — both previously returned []).
- */
-/** Shared response handling for both vision backends. */
+/** Shared response handling for Claude vision. */
 function buildVisionResult(
   text: string,
   viewportLabel: string,
@@ -479,30 +412,18 @@ function buildVisionResult(
 }
 
 /**
- * Ask Claude to read the screenshot. Returns null when no Claude Code
- * subscription is configured, so the caller falls through to Workers AI.
- *
- * Claude is tried first for the same reason `kimi-model.ts` tries it first
- * everywhere else: it is the primary provider for this Worker. It also
- * matters more here than elsewhere — the questions in `buildVisionPrompt`
- * ("has body copy started, or is this still all hero?") are exactly the
- * kind of judgement a 7B captioning model answers unreliably.
+ * Analyze one screenshot with Claude. Throws `ClaudeChatStoppedError` when
+ * Claude cannot answer — Workers AI vision is not called.
  */
-async function analyzeScreenshotWithClaude(
+export async function analyzeScreenshotWithVision(
   agent: SEOArticleAgent,
   imageBytes: Uint8Array,
   url: string,
   viewportLabel: string
-): Promise<VisionAnalysisResult | null> {
-  const model = getClaudeCodeLanguageModel(
-    agent.envBindings as Parameters<typeof getClaudeCodeLanguageModel>[0]
-  );
-  if (!model) return null;
-  if (getClaudeRateLimitCooldownRemainingMs() > 0) return null;
-
+): Promise<VisionAnalysisResult> {
   try {
     const { text } = await generateText({
-      model,
+      model: getKimiModel(agent.envBindings),
       maxOutputTokens: 1024,
       messages: [
         {
@@ -515,77 +436,33 @@ async function analyzeScreenshotWithClaude(
       ]
     });
     const trimmed = (text ?? "").trim();
-    if (!trimmed) return null;
+    if (!trimmed) {
+      throw reportClaudeChatFailure(
+        `[claude-code] vision returned empty for ${viewportLabel}; No other model was called. The pipeline stopped.`
+      );
+    }
     return buildVisionResult(trimmed, viewportLabel, "claude");
   } catch (err: unknown) {
+    if (isClaudeChatStoppedError(err)) {
+      agent.log(
+        "error",
+        `Vision audit stopped the pipeline (${viewportLabel}): ${err.message}`,
+        "qaReviewer"
+      );
+      throw err;
+    }
+    const stopped = reportClaudeChatFailure(err);
     agent.log(
-      "warning",
-      `Vision audit: Claude call failed (${errMsg(err)}); falling back to ${VISION_MODEL}`,
+      "error",
+      `Vision audit stopped the pipeline (${viewportLabel}): ${stopped.message}`,
       "qaReviewer"
     );
-    return null;
+    throw stopped;
   }
 }
 
 /**
- * Analyze one screenshot for conversion signals and click-costing issues.
- *
- * Claude first, Workers AI Llava as the fallback — the same order and the
- * same "skip Claude on no subscription / active cooldown / call failure"
- * rule the rest of the pipeline uses.
- */
-export async function analyzeScreenshotWithVision(
-  agent: SEOArticleAgent,
-  imageBytes: Uint8Array,
-  url: string,
-  viewportLabel: string
-): Promise<VisionAnalysisResult> {
-  const viaClaude = await analyzeScreenshotWithClaude(
-    agent,
-    imageBytes,
-    url,
-    viewportLabel
-  );
-  if (viaClaude) return viaClaude;
-
-  try {
-    const runVision = agent.envBindings.AI.run as (
-      model: string,
-      input: VisionRunInput,
-      options: VisionRunOptions
-    ) => Promise<unknown>;
-    const result = await runVision(
-      VISION_MODEL,
-      {
-        prompt: buildVisionPrompt(url, viewportLabel),
-        image: Array.from(imageBytes),
-        max_tokens: 1024
-      },
-      { gateway: { id: AI_GATEWAY_ID } }
-    );
-    const text = extractVisionResponseText(result).trim();
-    if (!text) {
-      return {
-        issues: [],
-        signals: { ...EMPTY_CONVERSION_SIGNALS },
-        model: "llava",
-        error: `${viewportLabel}: empty Llava response`
-      };
-    }
-    return buildVisionResult(text, viewportLabel, "llava");
-  } catch (err: unknown) {
-    return {
-      issues: [],
-      signals: { ...EMPTY_CONVERSION_SIGNALS },
-      model: "llava",
-      error: `${viewportLabel}: ${errMsg(err)}`
-    };
-  }
-}
-
-/**
- * @deprecated Kept so existing call sites keep compiling; the routing is no
- * longer Llava-only. Use `analyzeScreenshotWithVision`.
+ * Historical name. The implementation is Claude-only.
  */
 export const analyzeScreenshotWithLlava = analyzeScreenshotWithVision;
 
@@ -599,7 +476,7 @@ export const analyzeScreenshotWithLlava = analyzeScreenshotWithVision;
 export function createAuditScreenshotTool(agent: SEOArticleAgent) {
   return tool({
     description:
-      "Analyze a screenshot image with Llava vision model via AI Gateway. Returns design issues (severity, category, description, suggestion) with content-addressability classification. Use when you already have an image and want a visual critique.",
+      "Analyze a screenshot image with Claude vision. Returns design issues (severity, category, description, suggestion) with content-addressability classification. Use when you already have an image and want a visual critique.",
     inputSchema: z.object({
       imageBase64: z.string().describe("Base64-encoded JPEG/PNG image bytes."),
       url: z
@@ -643,14 +520,14 @@ export function createAuditScreenshotTool(agent: SEOArticleAgent) {
 }
 
 /**
- * One-shot tool: given a URL, captures BOTH viewports and runs Llava on
- * each. This is what an agentic caller would pick when it wants the whole
- * design-audit flow in one tool call.
+ * One-shot tool: given a URL, captures BOTH viewports and asks Claude
+ * about each. This is what an agentic caller would pick when it wants the
+ * whole design-audit flow in one tool call.
  */
 export function createAuditPageDesignTool(agent: SEOArticleAgent) {
   return tool({
     description:
-      "Run the full design-audit flow for a URL: capture desktop + mobile screenshots via Browser Rendering, analyze each with Llava via AI Gateway, and return deduplicated content-addressable findings. Use when you want 'what's wrong with this page's design?' answered end-to-end.",
+      "Run the full design-audit flow for a URL: capture desktop + mobile screenshots via Browser Rendering, analyze each with Claude vision, and return deduplicated content-addressable findings. Use when you want 'what's wrong with this page's design?' answered end-to-end.",
     inputSchema: z.object({
       url: z.string().url().describe("Absolute URL of the page to audit.")
     }),

@@ -1,7 +1,7 @@
 /**
  * Step 15/24 — Design Audit orchestrator.
  *
- * The raw capabilities (capture screenshot, analyze with Llava) live in
+ * The raw capabilities (capture screenshot, analyze with Claude vision) live in
  * `src/tools/` as AI-SDK tools so they're also callable from agentic
  * loops and MCP clients. This module is the deterministic wrapper the
  * article pipeline uses: it captures both viewports, persists them to
@@ -75,7 +75,7 @@ export interface DesignAuditReport {
  * Captures desktop (1440×900) and mobile (390×844) screenshots of `url`
  * via Cloudflare Browser Rendering, stores the JPEG frames in R2 under
  * `design-audits/<slug>/{desktop,mobile}.jpg`, then runs each frame through
- * Llava vision analysis (`analyzeScreenshotWithVision`) and merges the
+ * Claude vision analysis (`analyzeScreenshotWithVision`) and merges the
  * per-viewport issue lists into a deduplicated `DesignAuditReport`.
  *
  * Skips gracefully (returns `{ skipped: true }`) when either

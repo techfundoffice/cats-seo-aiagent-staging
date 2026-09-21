@@ -1,6 +1,5 @@
 /**
- * Claude Code subscription OAuth token — the chat path for `runKimiWithPoll`.
- * OpenRouter / Workers AI run only when `AI_CHAT_FALLBACK=kimi`.
+ * Claude Code subscription OAuth token — the only chat and vision path.
  *
  * Official auth flow (Claude Code docs — Authentication → Generate a long-lived
  * token): https://code.claude.com/docs/en/authentication
@@ -428,7 +427,7 @@ export function claudeCodeSubscriptionPublicLogLine(
   const tail = `…${status.tokenLast4 ?? "????"}`;
   switch (kind) {
     case "saved":
-      return `Claude Code OAuth setup-token saved (${tail}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is primary before OpenRouter/Workers AI`;
+      return `Claude Code OAuth setup-token saved (${tail}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is the only chat model`;
     case "oauth-stored":
       return `Claude OAuth tokens stored (${tail}) — Claude is primary`;
     case "oauth-refreshed":

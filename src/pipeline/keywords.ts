@@ -171,9 +171,8 @@ export function isDegenerate(keyword: string): boolean {
  * Tries up to 3 attempts; the second and third attempts use a simplified
  * prompt to recover from over-verbose model responses. Every attempt calls
  * the model via `runKimiWithPoll()` (`kimi-model.ts`), which uses the Claude
- * Code subscription only. Set `AI_CHAT_FALLBACK=kimi` to restore the previous
- * Claude → OpenRouter → Workers AI chain (the same hatch the writer,
- * editorial agent, and SISS optimizer share). Each attempt:
+ * Code subscription only. A Claude failure stops that attempt; OpenRouter
+ * and Workers AI are not called. Each attempt:
  *   1. Calls the model to produce a JSON array of buyer-intent keyword
  *      strings.
  *   2. Runs the raw array through a four-stage filter chain:

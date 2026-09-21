@@ -246,16 +246,12 @@ export async function runEditorialAgent(
     "editorialAgent"
   );
 
-  // ── Step 0a: Kimi-degraded precheck ───────────────────────────────────────
-  // When OpenRouter credits are exhausted, every audit call falls
-  // through to the Workers AI fallback, every rewrite scores worse on
-  // SEO than the original, every gate rejects, and the only outcome is
-  // wasted compute + log noise (observed live: 41/62 of all editorial
-  // fails were `seo-regression` from degraded-mode rewrites). Short-
-  // circuit BEFORE the wireframe load + Kimi audits even start, so the
-  // original article (which we know already cleared the pre-publish
-  // pipeline) stays live cleanly and the stat row tells the operator
-  // exactly why we skipped.
+  // ── Step 0a: provider-degraded precheck ───────────────────────────────────
+  // Historical activity-log lines from OpenRouter credit exhaustion.
+  // Chat does not fall through to Workers AI anymore. If those old lines
+  // are still in the buffer, skip the audit so we don't burn a Claude
+  // call on a category the operator already knows is stuck. The original
+  // article stays live.
   if (isKimiCurrentlyDegraded(agent.state.activityLog ?? [])) {
     agent.log(
       "warning",
@@ -1532,11 +1528,9 @@ Anti-plagiarism hard rules for this rewrite:
       `Editorial Agent: rewrite generation failed: ${errMessage}`,
       "editorialAgent"
     );
-    // Early-exit when the failure is an OpenRouter credits-exhaustion —
-    // retrying with a smaller budget can't help (the budget is the
-    // *user's account*, not the request), and Workers AI fallback
-    // produces weaker output that gets rejected by the SEO regression
-    // gate downstream. Attributing this correctly stops the spiral
+    // Early-exit when the failure is an OpenRouter credits-exhaustion
+    // string left in an error message. Chat does not fall through to
+    // Workers AI. Attributing this correctly stops the spiral
     // where a billing outage manifests as 100% seo-regression failures.
     if (isKimiCreditsExhausted(errMessage)) {
       return { ok: false, rejection: "kimi-credits-exhausted" };
