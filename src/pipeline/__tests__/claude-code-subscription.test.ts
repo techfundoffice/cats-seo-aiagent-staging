@@ -9,6 +9,12 @@ vi.mock("@ai-sdk/anthropic", () => ({
 }));
 
 import {
+  claudeCodeExpiryBadgeLabel,
+  claudeCodeRefreshButtonHint,
+  claudeCodeRefreshButtonLabel,
+  claudeCodeTimeRemainingLabel
+} from "../claude-code-status-display";
+import {
   applyClaudeRateLimitFromError,
   buildClaudeCodeSystemAndMessages,
   CLAUDE_CODE_DEFAULT_TTL_MS,
@@ -16,12 +22,16 @@ import {
   CLAUDE_DEFAULT_RATE_LIMIT_COOLDOWN_MS,
   clearClaudeCodeSubscriptionCache,
   clearClaudeRateLimitCooldown,
+  claudeCodeSubscriptionCacheIsEmpty,
+  claudeCodeSubscriptionPublicLogLine,
   claudeCodeSubscriptionStatus,
   configureClaudeCodeSubscription,
   createAnthropicFromClaudeCodeToken,
   daysRemaining,
   defaultExpiresAtMs,
+  getClaudeCodeCachedRecord,
   getClaudeRateLimitCooldownRemainingMs,
+  hydrateClaudeCodeSubscriptionFromStoredJson,
   isAnthropicApiKey,
   isClaudeCodeOAuthToken,
   isClaudeCodeTokenActive,
@@ -29,8 +39,15 @@ import {
   maskTokenLast4,
   parseAnthropicRetryAfterMs,
   parseClaudeCodeSubscriptionJson,
-  resolveClaudeCodeSubscription
+  resolveClaudeCodeSubscription,
+  withPreservedRefreshToken
 } from "../claude-code-subscription";
+
+function expectNoRawSkAnt(value: unknown, rawToken: string): void {
+  const json = JSON.stringify(value);
+  expect(json).not.toContain(rawToken);
+  expect(json).not.toMatch(/sk-ant-/);
+}
 
 afterEach(() => {
   clearClaudeCodeSubscriptionCache();
@@ -125,8 +142,219 @@ describe("claude-code-subscription helpers", () => {
     expect(status.configured).toBe(true);
     expect(status.active).toBe(true);
     expect(status.tokenLast4).toBe("1234");
-    expect(JSON.stringify(status)).not.toContain("sk-ant-secret");
+    expect(status.hasRefreshToken).toBe(false);
+    expectNoRawSkAnt(status, "sk-ant-secret-token-1234");
     expect(daysRemaining(now + CLAUDE_CODE_DEFAULT_TTL_MS, now)).toBe(365);
+    for (const kind of [
+      "saved",
+      "oauth-stored",
+      "oauth-refreshed",
+      "local-expiry-extended"
+    ] as const) {
+      const line = claudeCodeSubscriptionPublicLogLine(kind, status);
+      expect(line).not.toMatch(/sk-ant-/);
+      if (kind !== "local-expiry-extended") {
+        expect(line).toContain("…1234");
+      }
+    }
+  });
+
+  it("loads a SQL JSON row as the resolved token ahead of ANTHROPIC_API_KEY", () => {
+    const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+    const sqlToken = "sk-ant-oat01-from-sql-row-zzzz";
+    const refresh = "sk-ant-ort01-from-sql-row";
+    const env = {
+      ANTHROPIC_API_KEY: "sk-ant-api03-console-should-lose"
+    };
+    expect(claudeCodeSubscriptionCacheIsEmpty()).toBe(true);
+    const before = claudeCodeSubscriptionStatus(env, now);
+    expect(before.source).not.toBe("dashboard");
+    expect(before.active).toBe(true);
+    expect(before.hasRefreshToken).toBe(false);
+    const loaded = hydrateClaudeCodeSubscriptionFromStoredJson(
+      JSON.stringify({
+        token: sqlToken,
+        refreshToken: refresh,
+        expiresAtMs: now + 8 * 60 * 60 * 1000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      })
+    );
+    expect(loaded?.token).toBe(sqlToken);
+    expect(loaded?.refreshToken).toBe(refresh);
+    const resolved = resolveClaudeCodeSubscription(env, now);
+    expect(resolved?.token).toBe(sqlToken);
+    expect(resolved?.source).toBe("dashboard");
+    const status = claudeCodeSubscriptionStatus(env, now);
+    expect(status.active).toBe(true);
+    expect(status.source).toBe("dashboard");
+    expect(status.hasRefreshToken).toBe(true);
+    expect(status.hoursRemaining).toBe(8);
+    expect(status.uiStatus).toBe("active");
+    expectNoRawSkAnt(status, sqlToken);
+    expectNoRawSkAnt(status, refresh);
+    expect(status.maskedToken).toBe("…zzzz");
+    expect(status.tokenLast4).toBe("zzzz");
+  });
+
+  it("does not resolve an expired SQL row as active", () => {
+    const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+    const sqlToken = "sk-ant-oat01-expired-sql-row";
+    hydrateClaudeCodeSubscriptionFromStoredJson(
+      JSON.stringify({
+        token: sqlToken,
+        refreshToken: "sk-ant-ort01-expired-sql",
+        expiresAtMs: now - 60_000,
+        savedAt: "2026-09-20T12:00:00.000Z"
+      })
+    );
+    expect(resolveClaudeCodeSubscription({}, now)).toBeNull();
+    const env = { ANTHROPIC_API_KEY: "sk-ant-api03-env-fallback-key" };
+    const resolved = resolveClaudeCodeSubscription(env, now);
+    expect(resolved?.token).not.toBe(sqlToken);
+    expect(resolved?.source).toBe("env");
+    const status = claudeCodeSubscriptionStatus(env, now);
+    expect(status.configured).toBe(true);
+    expect(status.active).toBe(false);
+    expect(status.source).toBe("dashboard");
+    expect(status.uiStatus).toBe("expired");
+    expect(status.hasRefreshToken).toBe(true);
+    expectNoRawSkAnt(status, sqlToken);
+    expectNoRawSkAnt(status, "sk-ant-api03-env-fallback-key");
+    expectNoRawSkAnt(status, "sk-ant-ort01-expired-sql");
+  });
+
+  it("preserves refresh_token across same-token configure and save", () => {
+    const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+    const token = "sk-ant-oat01-same-access-token";
+    const refresh = "sk-ant-ort01-keep-across-save";
+    configureClaudeCodeSubscription(
+      {
+        token,
+        refreshToken: refresh,
+        expiresAtMs: now + 60_000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      },
+      "dashboard"
+    );
+    configureClaudeCodeSubscription(
+      {
+        token,
+        expiresAtMs: now + CLAUDE_CODE_DEFAULT_TTL_MS,
+        savedAt: "2026-09-21T13:00:00.000Z"
+      },
+      "dashboard"
+    );
+    expect(getClaudeCodeCachedRecord()?.refreshToken).toBe(refresh);
+
+    const saved = withPreservedRefreshToken(getClaudeCodeCachedRecord(), {
+      token,
+      expiresAtMs: now + CLAUDE_CODE_DEFAULT_TTL_MS,
+      savedAt: "2026-09-21T14:00:00.000Z"
+    });
+    expect(saved.refreshToken).toBe(refresh);
+    expect(JSON.stringify(saved)).toContain(refresh);
+
+    const replaced = withPreservedRefreshToken(saved, {
+      token: "sk-ant-oat01-brand-new-setup",
+      expiresAtMs: now + CLAUDE_CODE_DEFAULT_TTL_MS,
+      savedAt: "2026-09-21T15:00:00.000Z"
+    });
+    expect(replaced.refreshToken).toBeUndefined();
+
+    const rotated = withPreservedRefreshToken(
+      saved,
+      {
+        token: "sk-ant-oat01-rotated-access",
+        expiresAtMs: now + 8 * 60 * 60 * 1000,
+        savedAt: "2026-09-21T16:00:00.000Z"
+      },
+      { keepWhenAccessTokenChanges: true }
+    );
+    expect(rotated.refreshToken).toBe(refresh);
+
+    configureClaudeCodeSubscription(
+      {
+        token,
+        refreshToken: refresh,
+        expiresAtMs: now + 60_000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      },
+      "dashboard"
+    );
+    hydrateClaudeCodeSubscriptionFromStoredJson(
+      JSON.stringify({
+        token,
+        expiresAtMs: now + 60_000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      })
+    );
+    expect(getClaudeCodeCachedRecord()?.refreshToken).toBeUndefined();
+  });
+
+  it("shows hours for an ~8h access token instead of a multi-day expiry warning", () => {
+    const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+    const token = "sk-ant-oat01-eight-hour-token";
+    hydrateClaudeCodeSubscriptionFromStoredJson(
+      JSON.stringify({
+        token,
+        refreshToken: "sk-ant-ort01-eight-hour",
+        expiresAtMs: now + 8 * 60 * 60 * 1000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      })
+    );
+    const status = claudeCodeSubscriptionStatus({}, now);
+    expect(status.daysRemaining).toBe(1);
+    expect(status.hoursRemaining).toBe(8);
+    expect(status.uiStatus).toBe("active");
+    expect(status.hasRefreshToken).toBe(true);
+    const badge = claudeCodeExpiryBadgeLabel(status);
+    expect(badge).toBe("Active — access token · 8h left");
+    expect(badge.toLowerCase()).not.toContain("expiring");
+    expect(badge).not.toMatch(/day/);
+    expect(claudeCodeTimeRemainingLabel(status)).toBe("8 hours left");
+    expect(claudeCodeRefreshButtonLabel(true)).toBe("Refresh token");
+    expect(claudeCodeRefreshButtonHint(true)).toBeNull();
+    expectNoRawSkAnt(badge, token);
+
+    clearClaudeCodeSubscriptionCache();
+    hydrateClaudeCodeSubscriptionFromStoredJson(
+      JSON.stringify({
+        token,
+        expiresAtMs: now + 8 * 60 * 60 * 1000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      })
+    );
+    const shortLived = claudeCodeSubscriptionStatus({}, now);
+    expect(shortLived.hasRefreshToken).toBe(false);
+    expect(shortLived.uiStatus).toBe("expiring_soon");
+    expect(claudeCodeExpiryBadgeLabel(shortLived)).toBe(
+      "Expiring soon — 8 hours left"
+    );
+    expect(claudeCodeExpiryBadgeLabel(shortLived)).not.toMatch(/1 day/);
+    expect(claudeCodeRefreshButtonLabel(false)).toBe("Extend local expiry");
+    const hint = claudeCodeRefreshButtonHint(false);
+    expect(hint).toMatch(/no refresh_token/i);
+    expect(hint).toMatch(/local expiry|saved expiry/i);
+    expect(hint).not.toMatch(/sk-ant-/);
+  });
+
+  it("still warns in days when a setup-token is inside the 7-day window", () => {
+    const now = Date.UTC(2026, 8, 21, 12, 0, 0);
+    configureClaudeCodeSubscription(
+      {
+        token: "sk-ant-oat01-five-day-setup",
+        expiresAtMs: now + 5 * 24 * 60 * 60 * 1000,
+        savedAt: "2026-09-21T12:00:00.000Z"
+      },
+      "dashboard"
+    );
+    const status = claudeCodeSubscriptionStatus({}, now);
+    expect(status.hasRefreshToken).toBe(false);
+    expect(status.uiStatus).toBe("expiring_soon");
+    expect(claudeCodeExpiryBadgeLabel(status)).toBe(
+      "Expiring soon — 5 days left"
+    );
+    expect(claudeCodeTimeRemainingLabel(status)).toBe("5 days left");
   });
 
   it("parses durable JSON records", () => {

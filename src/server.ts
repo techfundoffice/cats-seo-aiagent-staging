@@ -7,13 +7,16 @@ import {
 } from "./pipeline/kimi-model";
 import {
   CLAUDE_CODE_SECRET_KEY,
+  claudeCodeSubscriptionCacheIsEmpty,
+  claudeCodeSubscriptionPublicLogLine,
   claudeCodeSubscriptionStatus,
   configureClaudeCodeSubscription,
   defaultExpiresAtMs,
   getClaudeCodeCachedRecord,
-  parseClaudeCodeSubscriptionJson,
+  hydrateClaudeCodeSubscriptionFromStoredJson,
   setClaudeCodePersistHandler,
   validateClaudeCodeTokenInput,
+  withPreservedRefreshToken,
   type ClaudeCodeSubscriptionRecord
 } from "./pipeline/claude-code-subscription";
 import {
@@ -1410,10 +1413,17 @@ export type SEOAgentState = {
     uiStatus?: "active" | "expiring_soon" | "expired" | "none";
     expiresAt: string | null;
     daysRemaining: number | null;
+    /** Hours until expiry, rounded up. Null when nothing is configured. */
+    hoursRemaining?: number | null;
     tokenLast4: string | null;
     maskedToken?: string | null;
     savedAt: string | null;
     source: "dashboard" | "env" | null;
+    /**
+     * True when a refresh_token is stored. The raw token is never broadcast.
+     * Short-lived OAuth access tokens stay `active` when this is set.
+     */
+    hasRefreshToken?: boolean;
   };
 };
 
@@ -1466,10 +1476,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       uiStatus: "none",
       expiresAt: null,
       daysRemaining: null,
+      hoursRemaining: null,
       tokenLast4: null,
       maskedToken: null,
       savedAt: null,
-      source: null
+      source: null,
+      hasRefreshToken: false
     }
   };
 
@@ -1495,8 +1507,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     try {
       const rows = this.sql<{ value: string }>`
         SELECT value FROM pipeline_secrets WHERE key=${CLAUDE_CODE_SECRET_KEY} LIMIT 1`;
-      const record = parseClaudeCodeSubscriptionJson(rows[0]?.value);
-      configureClaudeCodeSubscription(record, record ? "dashboard" : null);
+      hydrateClaudeCodeSubscriptionFromStoredJson(rows[0]?.value);
     } catch {
       configureClaudeCodeSubscription(null);
     }
@@ -1594,12 +1605,17 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       typeof input?.expiresAtMs === "number" && input.expiresAtMs > Date.now()
         ? input.expiresAtMs
         : defaultExpiresAtMs();
-    const record: ClaudeCodeSubscriptionRecord = {
-      token: accessToken,
-      refreshToken: input?.refreshToken?.trim() || undefined,
-      expiresAtMs,
-      savedAt: new Date().toISOString()
-    };
+    this.hydrateClaudeCodeSubscriptionFromSql();
+    const record = withPreservedRefreshToken(
+      getClaudeCodeCachedRecord(),
+      {
+        token: accessToken,
+        refreshToken: input?.refreshToken?.trim() || undefined,
+        expiresAtMs,
+        savedAt: new Date().toISOString()
+      },
+      { keepWhenAccessTokenChanges: true }
+    );
     this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
       VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
       ON CONFLICT(key) DO UPDATE SET
@@ -1615,7 +1631,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     });
     this.log(
       "info",
-      `Claude OAuth tokens stored (…${status.tokenLast4 ?? "????"}) — Claude is primary`,
+      claudeCodeSubscriptionPublicLogLine("oauth-stored", status),
       "orchestrator"
     );
     return { success: true, claudeCodeSubscription: status };
@@ -1733,11 +1749,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       }
       expiresAtMs = parsed;
     }
-    const record: ClaudeCodeSubscriptionRecord = {
+    this.hydrateClaudeCodeSubscriptionFromSql();
+    const record = withPreservedRefreshToken(getClaudeCodeCachedRecord(), {
       token,
       expiresAtMs,
       savedAt: new Date().toISOString()
-    };
+    });
     this.sql`INSERT INTO pipeline_secrets (key, value, updated_at)
       VALUES (${CLAUDE_CODE_SECRET_KEY}, ${JSON.stringify(record)}, unixepoch())
       ON CONFLICT(key) DO UPDATE SET
@@ -1751,7 +1768,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     });
     this.log(
       "info",
-      `Claude Code OAuth setup-token saved (…${status.tokenLast4 ?? "????"}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is primary before OpenRouter/Workers AI`,
+      claudeCodeSubscriptionPublicLogLine("saved", status),
       "orchestrator"
     );
     return {
@@ -1797,7 +1814,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         });
         this.log(
           "info",
-          `Claude OAuth refresh_token exchange ok (…${status.tokenLast4 ?? "????"})`,
+          claudeCodeSubscriptionPublicLogLine("oauth-refreshed", status),
           "orchestrator"
         );
         return { success: true, claudeCodeSubscription: status };
@@ -1826,7 +1843,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     });
     this.log(
       "info",
-      `Claude Code local expiry extended to ${status.expiresAt ?? "n/a"} (no refresh_token on file)`,
+      claudeCodeSubscriptionPublicLogLine("local-expiry-extended", status),
       "orchestrator"
     );
     return { success: true, claudeCodeSubscription: status };
@@ -2485,6 +2502,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         "Codebase search: disabled (missing one or more of OPENAI_API_KEY, MILVUS_ADDRESS, MILVUS_TOKEN); semantic code lookup unavailable, agent falls back to heuristics"
       );
     }
+
+    // After pipeline_secrets exists, and after onStart's other setState calls
+    // (those spread an earlier snapshot). Loads the dashboard token into this
+    // isolate's module cache and installs the refresh persist handler.
+    this.hydrateClaudeCodeSubscriptionFromSql();
   }
 
   // ── Direct external connectors ─────────────────────────────────────────────
@@ -6838,6 +6860,13 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     }
 
     if (url.pathname === "/api/status") {
+      // Isolate restart clears the module cache while DO state can still say
+      // source "dashboard" + active. Reload SQL before answering so status
+      // cannot claim a token chat callers cannot see. onStart hydrates too;
+      // this covers a request that lands with an empty cache.
+      if (claudeCodeSubscriptionCacheIsEmpty()) {
+        this.hydrateClaudeCodeSubscriptionFromSql();
+      }
       const cats = this.sql<{
         cnt: number;
       }>`SELECT COUNT(*) as cnt FROM categories WHERE status='completed'`;

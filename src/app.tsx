@@ -31,6 +31,13 @@ import type {
 } from "./server";
 import MermaidChart from "./MermaidChart";
 import {
+  claudeCodeExpiryBadgeLabel,
+  claudeCodeRefreshButtonHint,
+  claudeCodeRefreshButtonLabel,
+  claudeCodeTimeRemainingLabel,
+  showsHourlyClaudeExpiry
+} from "./pipeline/claude-code-status-display";
+import {
   createClaudeOAuthPendingSession,
   exchangeClaudeOAuthCode
 } from "./pipeline/claude-oauth-flow";
@@ -980,33 +987,27 @@ function ClaudeCodeSubscriptionPanel({
     sub?.uiStatus ??
     (sub?.active ? "active" : sub?.configured ? "expired" : "none");
   const days = sub?.daysRemaining ?? null;
+  const hours = sub?.hoursRemaining ?? null;
+  const hasRefreshToken = sub?.hasRefreshToken === true;
+  const showHours = showsHourlyClaudeExpiry(hours);
+  const extendsLocalExpiryOnly =
+    Boolean(sub?.configured) && sub?.source === "dashboard" && !hasRefreshToken;
+  const badgeLabel = claudeCodeExpiryBadgeLabel({
+    configured: Boolean(sub?.configured),
+    active: Boolean(sub?.active),
+    uiStatus: ui,
+    daysRemaining: days,
+    hoursRemaining: hours,
+    hasRefreshToken
+  });
+  const refreshHint = extendsLocalExpiryOnly
+    ? claudeCodeRefreshButtonHint(false)
+    : null;
   const badge = (() => {
-    if (ui === "active")
-      return {
-        label:
-          days !== null && days <= 30
-            ? `Active — primary · ${days}d left`
-            : "Active — primary model",
-        bg: "#dcfce7",
-        color: "#166534"
-      };
-    if (ui === "expiring_soon")
-      return {
-        label: `Expiring soon — ${days ?? "?"} days left`,
-        bg: "#fef3c7",
-        color: "#92400e"
-      };
-    if (ui === "expired")
-      return {
-        label: "Expired — re-authorize",
-        bg: "#fee2e2",
-        color: "#991b1b"
-      };
-    return {
-      label: "None — not configured",
-      bg: "#f3f4f6",
-      color: "#4b5563"
-    };
+    if (ui === "active") return { bg: "#dcfce7", color: "#166534" };
+    if (ui === "expiring_soon") return { bg: "#fef3c7", color: "#92400e" };
+    if (ui === "expired") return { bg: "#fee2e2", color: "#991b1b" };
+    return { bg: "#f3f4f6", color: "#4b5563" };
   })();
 
   /**
@@ -1276,7 +1277,7 @@ function ClaudeCodeSubscriptionPanel({
             color: badge.color
           }}
         >
-          {badge.label}
+          {badgeLabel}
         </span>
       </div>
 
@@ -1365,10 +1366,17 @@ function ClaudeCodeSubscriptionPanel({
           </span>
           <span>
             Expires{" "}
-            {sub.expiresAt ? new Date(sub.expiresAt).toLocaleDateString() : "—"}
+            {sub.expiresAt
+              ? showHours
+                ? new Date(sub.expiresAt).toLocaleString()
+                : new Date(sub.expiresAt).toLocaleDateString()
+              : "—"}
           </span>
           <span>
-            {days !== null ? `${days} days left` : "—"}
+            {claudeCodeTimeRemainingLabel({
+              daysRemaining: days,
+              hoursRemaining: hours
+            })}
             {ui === "expiring_soon" ? " · renew soon" : ""}
           </span>
           <span>Source: {sub.source ?? "—"}</span>
@@ -1446,10 +1454,15 @@ function ClaudeCodeSubscriptionPanel({
         <button
           id="refresh-token-btn"
           type="button"
+          title={
+            refreshHint ??
+            "Exchange the stored refresh_token for a new access token"
+          }
           disabled={claudeSaveBusy || sub?.source !== "dashboard"}
           onClick={() => {
             setClaudeSaveBusy(true);
             setClaudeSaveMsg(null);
+            const extendedLocalOnly = extendsLocalExpiryOnly;
             agent.stub
               .refreshClaudeCodeSubscription()
               .then((r) => {
@@ -1458,7 +1471,11 @@ function ClaudeCodeSubscriptionPanel({
                   setClaudeSaveMsg(err);
                   return;
                 }
-                setClaudeSaveMsg("Refreshed OAuth token.");
+                setClaudeSaveMsg(
+                  extendedLocalOnly
+                    ? "Extended local expiry (no refresh_token on file)."
+                    : "Refreshed OAuth token."
+                );
               })
               .catch((e: unknown) => setClaudeSaveMsg(errMsg(e)))
               .finally(() => setClaudeSaveBusy(false));
@@ -1478,7 +1495,7 @@ function ClaudeCodeSubscriptionPanel({
             opacity: sub?.source === "dashboard" ? 1 : 0.5
           }}
         >
-          Refresh token
+          {claudeCodeRefreshButtonLabel(!extendsLocalExpiryOnly)}
         </button>
         <button
           id="clear-token-btn"
@@ -1516,6 +1533,18 @@ function ClaudeCodeSubscriptionPanel({
           Clear token
         </button>
       </div>
+      {sub?.configured && sub.source === "dashboard" && refreshHint ? (
+        <p
+          style={{
+            fontSize: "0.75rem",
+            color: "#92400e",
+            margin: "0 0 0.65rem",
+            lineHeight: 1.4
+          }}
+        >
+          {refreshHint}
+        </p>
+      ) : null}
 
       {/* ONE paste field — CODE#STATE from Claude authorize page */}
       <div
@@ -1606,7 +1635,8 @@ function ClaudeCodeSubscriptionPanel({
             color:
               claudeSaveMsg?.startsWith("Authorized") ||
               claudeSaveMsg?.startsWith("Saved") ||
-              claudeSaveMsg?.startsWith("Refreshed")
+              claudeSaveMsg?.startsWith("Refreshed") ||
+              claudeSaveMsg?.startsWith("Extended")
                 ? "#166534"
                 : claudeSaveMsg?.startsWith("Browser") ||
                     claudeSaveMsg?.startsWith("Cleared")
