@@ -41,6 +41,15 @@ describe("describeClaudeChatFailure", () => {
     expect(notice.howToFix).toMatch(/dashboard/);
   });
 
+  it("tells the operator to retry generate-one when the worker times out", () => {
+    const notice = describeClaudeChatFailure(
+      new Error("The operation was aborted")
+    );
+    expect(notice.message).toBe("The operation was aborted");
+    expect(notice.howToFix).toMatch(/retry generate-one/);
+    expect(notice.howToFix).toMatch(/shorten the article or raise limits/);
+  });
+
   it("marks the thrown error so callers can stop the pipeline", () => {
     const notice = describeClaudeChatFailure(new Error("claude down"));
     const err = new ClaudeChatStoppedError(notice);
