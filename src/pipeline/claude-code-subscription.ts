@@ -21,8 +21,15 @@
 
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
+import {
+  claudeCodeUiStatus,
+  hoursRemaining,
+  type ClaudeCodeUiStatus
+} from "./claude-code-status-display";
 import { errMsg } from "./http-utils";
 import { refreshClaudeOAuthToken } from "./claude-oauth-flow";
+
+export type { ClaudeCodeUiStatus } from "./claude-code-status-display";
 
 /** Default subscription lifetime when the operator does not pick a date. */
 export const CLAUDE_CODE_DEFAULT_TTL_MS = 365 * 24 * 60 * 60 * 1000;
@@ -135,23 +142,6 @@ export function validateClaudeCodeTokenInput(token: string): {
   };
 }
 
-/** Dashboard status band for countdown UI. */
-export type ClaudeCodeUiStatus =
-  | "active"
-  | "expiring_soon"
-  | "expired"
-  | "none";
-
-export function claudeCodeUiStatus(
-  status: ClaudeCodeSubscriptionStatus
-): ClaudeCodeUiStatus {
-  if (!status.configured) return "none";
-  if (!status.active) return "expired";
-  const days = status.daysRemaining ?? 0;
-  if (days <= 7) return "expiring_soon";
-  return "active";
-}
-
 export type ClaudeCodeSubscriptionRecord = {
   token: string;
   /** Unix ms when the token stops being preferred. */
@@ -170,11 +160,18 @@ export type ClaudeCodeSubscriptionStatus = {
   uiStatus: ClaudeCodeUiStatus;
   expiresAt: string | null;
   daysRemaining: number | null;
+  /** Hours until expiry, rounded up. Null when nothing is configured. */
+  hoursRemaining: number | null;
   tokenLast4: string | null;
   /** Masked form e.g. `…JwAA` */
   maskedToken: string | null;
   savedAt: string | null;
   source: "dashboard" | "env" | null;
+  /**
+   * True when a refresh_token is stored alongside the access token.
+   * The raw refresh token is never copied onto this object.
+   */
+  hasRefreshToken: boolean;
 };
 
 type ClaudeCodeEnv = {
@@ -193,24 +190,62 @@ let _cacheSource: "dashboard" | "env" | null = null;
 
 export function configureClaudeCodeSubscription(
   record: ClaudeCodeSubscriptionRecord | null,
-  source: "dashboard" | "env" | null = record ? "dashboard" : null
+  source: "dashboard" | "env" | null = record ? "dashboard" : null,
+  options?: { preserveRefreshToken?: boolean }
 ): void {
   if (!record?.token?.trim()) {
     _cached = null;
     _cacheSource = null;
     return;
   }
+  const token = record.token.trim();
+  const explicitRefresh = record.refreshToken?.trim() || undefined;
+  // Same-token re-saves (dashboard "save" / local expiry bump) often omit
+  // refresh_token. Dropping it made every refresh path fall through to the
+  // "no refresh_token on file" branch, which only extended the *local*
+  // expiry while the real ~8h OAuth access_token stayed dead.
+  // Hydrate from SQL opts out: the row is the source of truth.
+  const preserve = options?.preserveRefreshToken !== false;
+  const refreshToken =
+    explicitRefresh ??
+    (preserve && _cached?.token === token ? _cached.refreshToken : undefined);
   _cached = {
-    token: record.token.trim(),
+    token,
     expiresAtMs: record.expiresAtMs,
     savedAt: record.savedAt || new Date().toISOString(),
-    // MUST be preserved: dropping it here made every refresh path (dashboard
-    // "Refresh" button and the on-401 auto-refresh below) fall through to the
-    // "no refresh_token on file" branch, which only extended the *local*
-    // expiry while the real 8h OAuth access_token stayed dead.
-    refreshToken: record.refreshToken?.trim() || undefined
+    refreshToken
   };
   _cacheSource = source;
+}
+
+/**
+ * Keep a stored refresh_token when a save omits one.
+ *
+ * Same access token: always keep it (manual re-save / local expiry bump).
+ * New access token: keep it only when `keepWhenAccessTokenChanges` is set
+ * (OAuth token exchange that rotates the access token and omits refresh).
+ * A different setup-token paste must not inherit the previous refresh.
+ */
+export function withPreservedRefreshToken(
+  previous: ClaudeCodeSubscriptionRecord | null,
+  next: ClaudeCodeSubscriptionRecord,
+  options?: { keepWhenAccessTokenChanges?: boolean }
+): ClaudeCodeSubscriptionRecord {
+  const token = next.token.trim();
+  const explicit = next.refreshToken?.trim() || undefined;
+  let refreshToken = explicit;
+  if (!refreshToken && previous?.refreshToken) {
+    const sameToken = previous.token === token;
+    if (sameToken || options?.keepWhenAccessTokenChanges) {
+      refreshToken = previous.refreshToken;
+    }
+  }
+  return {
+    token,
+    expiresAtMs: next.expiresAtMs,
+    savedAt: next.savedAt || new Date().toISOString(),
+    ...(refreshToken ? { refreshToken } : {})
+  };
 }
 
 /** Test helper — clear module cache between cases. */
@@ -312,9 +347,11 @@ export function claudeCodeSubscriptionStatus(
       active,
       expiresAt: new Date(_cached.expiresAtMs).toISOString(),
       daysRemaining: daysRemaining(_cached.expiresAtMs, nowMs),
+      hoursRemaining: hoursRemaining(_cached.expiresAtMs, nowMs),
       tokenLast4: maskTokenLast4(_cached.token),
       savedAt: _cached.savedAt,
-      source: _cacheSource ?? "dashboard"
+      source: _cacheSource ?? "dashboard",
+      hasRefreshToken: Boolean(_cached.refreshToken?.trim())
     });
   }
 
@@ -325,9 +362,11 @@ export function claudeCodeSubscriptionStatus(
       active: false,
       expiresAt: null,
       daysRemaining: null,
+      hoursRemaining: null,
       tokenLast4: null,
       savedAt: null,
-      source: null
+      source: null,
+      hasRefreshToken: false
     });
   }
   return buildStatus({
@@ -335,15 +374,72 @@ export function claudeCodeSubscriptionStatus(
     active: true,
     expiresAt: new Date(resolved.expiresAtMs).toISOString(),
     daysRemaining: daysRemaining(resolved.expiresAtMs, nowMs),
+    hoursRemaining: hoursRemaining(resolved.expiresAtMs, nowMs),
     tokenLast4: maskTokenLast4(resolved.token),
     savedAt: null,
-    source: resolved.source
+    source: resolved.source,
+    hasRefreshToken: false
   });
 }
 
 /** Expose current in-memory record for refresh/clear (token never leaves server). */
 export function getClaudeCodeCachedRecord(): ClaudeCodeSubscriptionRecord | null {
   return _cached;
+}
+
+/** True when this isolate has not loaded a dashboard token into memory. */
+export function claudeCodeSubscriptionCacheIsEmpty(): boolean {
+  return !_cached?.token;
+}
+
+/**
+ * Install a `pipeline_secrets` JSON row into the module cache.
+ * Dashboard rows beat env (`ANTHROPIC_API_KEY`) once loaded. An expired row
+ * stays cached so status can show it, but {@link resolveClaudeCodeSubscription}
+ * will not treat it as an active token. Invalid or missing JSON clears the
+ * cache so a stale in-memory token cannot outlive the SQL row.
+ */
+export function hydrateClaudeCodeSubscriptionFromStoredJson(
+  raw: string | null | undefined
+): ClaudeCodeSubscriptionRecord | null {
+  const record = parseClaudeCodeSubscriptionJson(raw);
+  configureClaudeCodeSubscription(record, record ? "dashboard" : null, {
+    preserveRefreshToken: false
+  });
+  return getClaudeCodeCachedRecord();
+}
+
+export type ClaudeCodeSubscriptionLogKind =
+  | "saved"
+  | "oauth-stored"
+  | "oauth-refreshed"
+  | "local-expiry-extended";
+
+/**
+ * Operator log line. Uses last4 / expiry only — never the raw token.
+ */
+export function claudeCodeSubscriptionPublicLogLine(
+  kind: ClaudeCodeSubscriptionLogKind,
+  status: Pick<
+    ClaudeCodeSubscriptionStatus,
+    "tokenLast4" | "expiresAt" | "daysRemaining"
+  >
+): string {
+  const tail = `…${status.tokenLast4 ?? "????"}`;
+  switch (kind) {
+    case "saved":
+      return `Claude Code OAuth setup-token saved (${tail}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is primary before OpenRouter/Workers AI`;
+    case "oauth-stored":
+      return `Claude OAuth tokens stored (${tail}) — Claude is primary`;
+    case "oauth-refreshed":
+      return `Claude OAuth refresh_token exchange ok (${tail})`;
+    case "local-expiry-extended":
+      return `Claude Code local expiry extended to ${status.expiresAt ?? "n/a"} (no refresh_token on file)`;
+    default: {
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
+  }
 }
 
 export function parseClaudeCodeSubscriptionJson(
@@ -564,8 +660,9 @@ export async function mintClaudeCliApiKeyFromOAuthAccessToken(
 
 /**
  * Persistence hook so a refreshed access_token survives isolate restarts.
- * The Durable Object installs this in `onStart` (writes `pipeline_secrets`);
- * without it a refresh only lives in module memory.
+ * `SEOArticleAgent.onStart` installs this via `hydrateClaudeCodeSubscriptionFromSql`
+ * after `pipeline_secrets` exists. Without that call a refresh only lives in
+ * module memory and the next isolate boots with an empty cache.
  */
 export type ClaudeCodePersistHandler = (
   record: ClaudeCodeSubscriptionRecord
