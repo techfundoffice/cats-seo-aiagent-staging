@@ -127,30 +127,18 @@ describe("scoutHighTicketCategory AI tier", () => {
     expect(createOpenRouterMock).not.toHaveBeenCalled();
   });
 
-  it("restores Workers AI Qwen when AI_CHAT_FALLBACK=kimi and Claude is absent", async () => {
-    const seen: unknown[][] = [];
-    createWorkersAIMock.mockImplementation(() => (...args: unknown[]) => {
-      seen.push(args);
-      return "workers-model";
-    });
-    generateTextMock.mockResolvedValue({
-      text: SCOUT_JSON,
-      finishReason: "stop",
-      response: { modelId: "@cf/qwen/qwen3-30b-a3b-fp8" }
-    });
-
+  it("does not call Qwen when AI_CHAT_FALLBACK=kimi and Claude is absent", async () => {
+    const aiRun = vi.fn();
     const saved = await scoutHighTicketCategory(
       scoutAgent({
         AI_CHAT_FALLBACK: "kimi",
-        AI: { run: vi.fn() }
+        AI: { run: aiRun }
       }) as never
     );
 
-    expect(saved?.slug).toBe("cat-ramps-for-senior-cats");
-    expect(seen[0]?.[0]).toBe("@cf/qwen/qwen3-30b-a3b-fp8");
+    expect(saved?.slug).toBe("cat-water-fountains");
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
     expect(createOpenRouterMock).not.toHaveBeenCalled();
-    expect(generateTextMock).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "workers-model" })
-    );
+    expect(aiRun).not.toHaveBeenCalled();
   });
 });

@@ -13,8 +13,10 @@
  * signal was per-row log lines. This helper aggregates them into one
  * tier the banner can show at the top of the dashboard.
  *
- * Source: the canonical log shape emitted by `src/pipeline/kimi-model.ts`
- * at the OpenRouter→Workers-AI fallback boundary:
+ * Source: historical activity-log lines from when chat could fall through
+ * to OpenRouter. Chat no longer emits this prefix — Claude failures use
+ * the dashboard `claudeChatFailure` banner instead. The matcher stays so
+ * older log rows still classify.
  *
  *   "[kimi-model] OpenRouter call failed (<msg>); falling back to
  *    Workers AI"
@@ -25,7 +27,9 @@
  */
 
 import { isKimiCreditsExhausted } from "./pipeline/http-utils";
-import { OPENROUTER_CALL_FAILED_LOG_PREFIX } from "./pipeline/kimi-model";
+
+/** Historical log prefix. Chat does not emit this anymore. */
+const OPENROUTER_CALL_FAILED_LOG_PREFIX = "[kimi-model] OpenRouter call failed";
 
 export type KimiProviderHealthTier = "ok" | "degraded" | "exhausted";
 

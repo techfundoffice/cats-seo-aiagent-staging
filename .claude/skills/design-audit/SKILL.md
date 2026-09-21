@@ -2,7 +2,7 @@
 name: design-audit
 description: >
   Visually audit a published article's live page using Cloudflare
-  Browser Rendering + Workers AI Llava via AI Gateway. Captures desktop
+  Browser Rendering + Claude vision. Captures desktop
   + mobile screenshots, runs vision analysis, classifies findings as
   content-addressable (fixable by rewriting copy) or not, and feeds the
   content-addressable ones into the QC + Polish agents so the article
@@ -16,7 +16,7 @@ triggers:
   - design audit
   - visual audit
   - browser rendering screenshot
-  - llava vision analysis
+  - claude vision analysis
   - step 11.5
 includes:
   - src/tools/browser-rendering.ts
@@ -173,16 +173,14 @@ categories flow into Polish:
   or `"Design Audit skipped: <reason>"` entries with step `11.5`.
 - `GET /api/verify-design-audit?url=<articleUrl>` → full report. Inspect
   `analysisErrors` (empty = clean chain), `issues[]` (deduped findings),
-  `rawVisionResponses.{desktop,mobile}` (truncated Llava output for
+  `rawVisionResponses.{desktop,mobile}` (truncated Claude vision output for
   debugging silent parse failures).
 - R2 bucket `seo-images` → `design-audits/{slug}/{desktop,mobile}.jpg`.
 
 ## When to Customize
 
-- **Swap vision model**: change `VISION_MODEL` in
-  `src/tools/vision-audit.ts`. Llava 1.5 7B is small and generic —
-  `@cf/llava-hf/llava-v1.6-mistral-7b` or Llama 3.2 Vision are likely
-  upgrades when/if available on Workers AI.
+- **Vision model**: Claude only (`getKimiModel` in
+  `src/tools/vision-audit.ts`). Do not add a Workers AI vision fallback.
 - **Add viewports**: extend `DESIGN_AUDIT_VIEWPORTS` in
   `src/tools/browser-rendering.ts` and add a third capture in
   `runDesignAudit()`.

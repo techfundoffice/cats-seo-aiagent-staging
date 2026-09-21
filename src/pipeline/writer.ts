@@ -1,5 +1,6 @@
 import { workshopArticlePath } from "./article-public-url";
 import { runKimiWithPoll } from "./kimi-model";
+import { isClaudeChatStoppedError } from "./claude-chat-failure";
 import type { SEOArticleAgent } from "../server";
 import type { SissOptimizerResult } from "./siss-optimizer";
 import { emitAgentDebugLog } from "../agentDebugEmit";
@@ -1301,7 +1302,7 @@ async function generateArticleUnsafe(
     let article: ArticleData;
     try {
       // Article JSON via runKimiWithPoll: Claude Code subscription only.
-      // Set AI_CHAT_FALLBACK=kimi to restore OpenRouter, then Workers AI.
+      // A Claude failure stops the pipeline. No other chat model is called.
       const systemPrompt = `You are an expert SEO content writer for catsluvus.com. You ALWAYS respond with a single JSON object. Never include markdown code fences, explanations, or commentary. Your response starts with { and ends with }.`;
 
       const modelPromptCell = formatActivityLogModelPromptCell(
@@ -1320,12 +1321,9 @@ async function generateArticleUnsafe(
             ],
             max_tokens: 4096
           },
-          // asyncMaxWaitMs applies only when AI_CHAT_FALLBACK=kimi reaches
-          // Workers AI. On that hatch, a capacity-pressured binding (error
-          // 3040) fails the sync path instantly and the async batch queue
-          // needs well beyond the 90s default — two articles died at 90s
-          // on 6/10.
-          { asyncMaxWaitMs: 600_000 },
+          // syncTimeoutMs is forwarded to the Claude call. There is no
+          // Workers AI chat path behind it.
+          {},
           agent
         );
         text = result ?? "";
@@ -1370,7 +1368,7 @@ async function generateArticleUnsafe(
         const msg = errMsg(err);
         agent.log(
           "error",
-          `❌ Kimi K2.5 failed — pipeline stopped: ${msg}`,
+          `❌ Claude failed — pipeline stopped: ${msg}`,
           "contentCreator",
           { kanbanStage: "done", modelPrompt: modelPromptCell }
         );
@@ -1733,6 +1731,12 @@ async function generateArticleUnsafe(
                 );
               }
             } catch (sectionErr: unknown) {
+              if (
+                isClaudeChatStoppedError(sectionErr) ||
+                isDurableObjectResetError(sectionErr)
+              ) {
+                throw sectionErr;
+              }
               agent.log(
                 "warning",
                 `Section generation ${si + 1}/${toGenerate} failed — skipping: ${errMsg(sectionErr)}`
@@ -1804,6 +1808,12 @@ async function generateArticleUnsafe(
                   );
                 }
               } catch (expandErr: unknown) {
+                if (
+                  isClaudeChatStoppedError(expandErr) ||
+                  isDurableObjectResetError(expandErr)
+                ) {
+                  throw expandErr;
+                }
                 // Surface expand errors so we can see which sections throw
                 // (vs silently time out). Previously the catch was empty.
                 const em = errMsg(expandErr);
@@ -1867,6 +1877,12 @@ async function generateArticleUnsafe(
                   );
                 }
               } catch (err: unknown) {
+                if (
+                  isClaudeChatStoppedError(err) ||
+                  isDurableObjectResetError(err)
+                ) {
+                  throw err;
+                }
                 // Skip this FAQ if expand times out
                 agent.log(
                   "warning",
@@ -3314,7 +3330,7 @@ async function generateArticleUnsafe(
       // Browser Run (formerly Browser Rendering) GA'd during Agents Week 2026
       // with 4× higher concurrency limits — the stuck-session outlier that
       // originally forced the 25s guard is far less likely now.  Raise the
-      // ceiling to 45s so both desktop+mobile screenshots plus the Llava
+      // ceiling to 45s so both desktop+mobile screenshots plus the Claude
       // vision pass can complete reliably without triggering a skip on
       // articles where the live page is slightly slow to render.
       // The published article (KV write at Step 10) is always untouched
@@ -3375,6 +3391,18 @@ async function generateArticleUnsafe(
         }
       }
     } catch (err: unknown) {
+      if (isDurableObjectResetError(err)) throw err;
+      if (isClaudeChatStoppedError(err)) {
+        agent.log(
+          "error",
+          `Design Audit stopped the pipeline for ${url} (kvKey=${kvKey}): ${err.message}`,
+          "qaReviewer"
+        );
+        return failResult({
+          success: false,
+          error: `Claude vision stopped the pipeline: ${err.message}`
+        });
+      }
       agent.log(
         "warning",
         `Design Audit crashed for ${url} (kvKey=${kvKey}): ${errMsg(err)}`

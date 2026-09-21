@@ -1430,7 +1430,8 @@ async function scoutFromDataForSeo(
  *     Google demand instead of Kimi's imagination.
  *  1. **AI scout** — calls the Claude Code subscription with a ROI-scoring
  *     prompt that lists already-covered categories so the model proposes
- *     fresh niches. `AI_CHAT_FALLBACK=kimi` restores Workers AI Qwen.
+ *     fresh niches. A Claude failure does not call another model; the
+ *     curated pool below is a fixed list, not an LLM.
  *  2. **Hardcoded pool** — 130+ manually-curated cat-product
  *     niches, ordered by estimated ROI. Used when the AI returns only
  *     already-covered slugs or fails outright.
@@ -1492,7 +1493,7 @@ export async function scoutHighTicketCategory(
   // (returns only already-covered niches, or trips a transient error) and
   // a bad draw wastes the whole 5-minute cycle, so take up to 3 attempts
   // per tick. maxOutputTokens stays generous so the ROI JSON has room to
-  // complete. Workers AI Qwen runs only when `AI_CHAT_FALLBACK=kimi`.
+  // complete. Workers AI Qwen is not called.
   const scoutAttempts = 3;
   for (let attempt = 1; attempt <= scoutAttempts; attempt++) {
     try {

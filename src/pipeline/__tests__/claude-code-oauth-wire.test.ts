@@ -430,7 +430,7 @@ describe("per-call abort budget", () => {
         { syncTimeoutMs: 250 },
         agent as never
       )
-    ).rejects.toThrow(/OpenRouter and Workers AI were not called/);
+    ).rejects.toThrow(/No other model was called/);
     // Aborted at the caller's 250ms budget on the Claude leg, not the 120s
     // default.
     expect(Date.now() - started).toBeLessThan(2000);
@@ -442,7 +442,7 @@ describe("per-call abort budget", () => {
     expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(false);
   });
 
-  it("AI_CHAT_FALLBACK=kimi still forwards syncTimeoutMs to Workers AI", async () => {
+  it("does not forward a Claude timeout into Workers AI when AI_CHAT_FALLBACK=kimi", async () => {
     globalThis.fetch = slowFetch();
     useOAuthToken();
 
@@ -462,12 +462,12 @@ describe("per-call abort budget", () => {
         { syncTimeoutMs: 250 },
         agent as never
       )
-    ).rejects.toThrow();
+    ).rejects.toThrow(/No other model was called/);
     expect(Date.now() - started).toBeLessThan(2000);
     expect(
       logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
     ).toBe(true);
-    expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(true);
+    expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(false);
   });
 });
 

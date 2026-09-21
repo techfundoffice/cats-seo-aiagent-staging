@@ -1,10 +1,11 @@
 import { Agent, routeAgentRequest, callable } from "agents";
 import { generateText, stepCountIs, type ToolSet } from "ai";
+import { getKimiModel, getKimiProviderOptions } from "./pipeline/kimi-model";
 import {
-  getKimiModel,
-  getKimiProviderOptions,
-  setRotatedOpenRouterKey
-} from "./pipeline/kimi-model";
+  isClaudeChatStoppedError,
+  setClaudeChatFailureSink,
+  type ClaudeChatFailureNotice
+} from "./pipeline/claude-chat-failure";
 import {
   CLAUDE_CODE_SECRET_KEY,
   claudeCodeSubscriptionCacheIsEmpty,
@@ -165,7 +166,7 @@ import {
   activityLogLevelsQualifyForErrorRemediation,
   generateActivityLogErrorRemediationCell
 } from "./pipeline/activity-log-error-remediation";
-import { filterObjectArrayEntries, parseObjectLike } from "./objectLike";
+import { filterObjectArrayEntries } from "./objectLike";
 import { createDesignAuditTools } from "./tools";
 import { handleSkillFetchBatch } from "./skills/consumer";
 import { handleMcpRequest } from "./skills/mcp";
@@ -794,35 +795,6 @@ function pickEditorialReferenceUrl(
   return EDITORIAL_REFERENCE_URLS[slug] ?? DEFAULT_EDITORIAL_REFERENCE_URL;
 }
 
-/**
- * Extract a plain secret value from a Doppler secrets-get response.
- * Doppler's native REST shape is `{ value: { raw, computed } }`; older
- * proxied responses wrapped that in `data` / `response_data` /
- * `responseData` / `response` envelopes (sometimes stringified). Probe
- * the common paths, return trimmed string or null.
- */
-function extractDopplerSecretValue(raw: unknown): string | null {
-  const envelope = parseObjectLike(raw);
-  const response = parseObjectLike(envelope?.response);
-  const outer =
-    parseObjectLike(envelope?.data) ??
-    parseObjectLike(envelope?.response_data) ??
-    parseObjectLike(envelope?.responseData) ??
-    response ??
-    envelope;
-  if (!outer) return null;
-  const inner =
-    parseObjectLike(outer.data) ??
-    parseObjectLike(outer.response_data) ??
-    parseObjectLike(outer.responseData) ??
-    outer;
-  const value = inner.value;
-  if (typeof value === "string") return value.trim() || null;
-  const valueObject = parseObjectLike(value);
-  const v = valueObject?.raw ?? valueObject?.computed;
-  return typeof v === "string" && v.trim() ? v.trim() : null;
-}
-
 function extractCompetitorUrlFromMessage(message: string): string {
   if (!/competitor/i.test(message)) return "";
   return extractFirstHttpUrl(message);
@@ -1405,7 +1377,7 @@ export type SEOAgentState = {
   };
   /**
    * Claude Code subscription status for the dashboard (never includes the
-   * raw token). When `active`, Claude is primary before OpenRouter / Workers AI.
+   * raw token). When `active`, Claude is the only chat and vision model.
    */
   claudeCodeSubscription?: {
     configured: boolean;
@@ -1425,6 +1397,16 @@ export type SEOAgentState = {
      */
     hasRefreshToken?: boolean;
   };
+  /**
+   * Set when a Claude chat or vision call fails. The dashboard renders this
+   * as a red banner. `null` after a later Claude success or an explicit
+   * dismiss. Optional so Durable Objects created before the field hydrate.
+   */
+  claudeChatFailure?: {
+    message: string;
+    howToFix: string;
+    at: string;
+  } | null;
 };
 
 // ── Agent ────────────────────────────────────────────────────────────────────
@@ -1482,7 +1464,8 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       savedAt: null,
       source: null,
       hasRefreshToken: false
-    }
+    },
+    claudeChatFailure: null
   };
 
   /**
@@ -1515,6 +1498,49 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       ...this.state,
       claudeCodeSubscription: claudeCodeSubscriptionStatus(this.env)
     });
+  }
+
+  /**
+   * Chat and vision failures write `state.claudeChatFailure` and cancel the
+   * article loop. A later successful Claude call clears the banner; Start
+   * is how the operator resumes.
+   */
+  private bindClaudeChatFailureSink(): void {
+    setClaudeChatFailureSink({
+      report: (notice: ClaudeChatFailureNotice) => {
+        this.stopAutonomousLoopForClaudeFailure();
+        const running =
+          this.state.status === "generating" ||
+          this.state.status === "scouting";
+        this.setState({
+          ...this.state,
+          status: running ? "paused" : this.state.status,
+          claudeChatFailure: {
+            message: notice.message,
+            howToFix: notice.howToFix,
+            at: new Date().toISOString()
+          }
+        });
+        this.log(
+          "error",
+          `Claude stopped the pipeline: ${notice.message} — ${notice.howToFix}`,
+          "orchestrator"
+        );
+      },
+      clear: () => {
+        if (!this.state.claudeChatFailure) return;
+        this.setState({ ...this.state, claudeChatFailure: null });
+      }
+    });
+  }
+
+  /** Drop the scheduled article loop so the next tick does not start another job. */
+  private stopAutonomousLoopForClaudeFailure(): void {
+    for (const schedule of this.getSchedules()) {
+      if (schedule.callback === "autonomousLoop") {
+        this.cancelSchedule(schedule.id);
+      }
+    }
   }
 
   /** Soft rate limit — only blocks obvious spam, not normal retries. */
@@ -1890,6 +1916,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   onStart() {
+    this.bindClaudeChatFailureSink();
     // Shrink oversized activity-log rows before other migrations: serialized DO
     // state must stay under SQLite limits (SQLITE_TOOBIG). Sheet mirror still
     // receives full payloads via `enqueueSheetActivityLog` at `log()` time.
@@ -2646,85 +2673,6 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   }
 
   /**
-   * Self-heal for Kimi K2.5 auth failures. When the OpenRouter binding on
-   * the Worker is dead (expired / revoked), call the Doppler REST API
-   * directly (basic auth with the DOPPLER_TOKEN service token) to pull
-   * the current value from `replit-n8n-catsluvus/prd`. If Doppler has a
-   * different (fresher) value, install it as an in-memory override via
-   * `setRotatedOpenRouterKey()` so subsequent Kimi calls pick it up
-   * without waiting for a redeploy.
-   *
-   * Returns the fresh key on successful rotation, or `null` when:
-   *   - DOPPLER_TOKEN is unset or the API call fails
-   *   - Doppler returned no value or the same dead value
-   *   - The response shape was unparseable
-   *
-   * `context` is a short tag (e.g. "runKimiWithPoll", "writer-step-5") so
-   * the activity log shows which call site triggered the rotation.
-   */
-  async rotateOpenRouterKeyFromDoppler(
-    context: string
-  ): Promise<string | null> {
-    const dopplerToken = this.env.DOPPLER_TOKEN?.trim();
-    if (!dopplerToken) {
-      this.log(
-        "warning",
-        `Kimi 401 self-heal (${context}): DOPPLER_TOKEN not set — rotation skipped`
-      );
-      return null;
-    }
-    let result: unknown = null;
-    try {
-      const resp = await fetch(
-        "https://api.doppler.com/v3/configs/config/secret?project=replit-n8n-catsluvus&config=prd&name=OPENROUTER_API_KEY",
-        {
-          headers: {
-            Authorization: `Basic ${btoa(`${dopplerToken}:`)}`,
-            Accept: "application/json"
-          },
-          signal: AbortSignal.timeout(10_000)
-        }
-      );
-      if (resp.ok) result = await resp.json();
-      else {
-        this.log(
-          "warning",
-          `Kimi 401 self-heal (${context}): Doppler API HTTP ${resp.status} — rotation skipped`
-        );
-        return null;
-      }
-    } catch (err: unknown) {
-      this.log(
-        "warning",
-        `Kimi 401 self-heal (${context}): Doppler fetch failed (${errMsg(err)}) — rotation skipped`
-      );
-      return null;
-    }
-    const fresh = extractDopplerSecretValue(result);
-    const current = this.env.OPENROUTER_API_KEY?.trim() ?? "";
-    if (!fresh) {
-      this.log(
-        "warning",
-        `Kimi 401 self-heal (${context}): Doppler response missing value — upstream key rotation needed`
-      );
-      return null;
-    }
-    if (fresh === current) {
-      this.log(
-        "warning",
-        `Kimi 401 self-heal (${context}): Doppler key matches Worker env — upstream key rotation needed at OpenRouter`
-      );
-      return null;
-    }
-    setRotatedOpenRouterKey(fresh);
-    this.log(
-      "info",
-      `Kimi 401 self-heal (${context}): rotated OPENROUTER_API_KEY from Doppler — next Kimi call will use the fresh key`
-    );
-    return fresh;
-  }
-
-  /**
    * Registers Cloudflare's Code Mode MCP server when `CLOUDFLARE_API_TOKEN_SECRET`
    * is set (Bearer auth — suitable for Workers/DO). No-op without the secret.
    */
@@ -2863,7 +2811,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
    * Post-deploy verification of the Step 11.5 design-audit chain:
    *   - CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN_SECRET resolvable
    *   - Browser Rendering screenshot against `testUrl`
-   *   - Workers AI Llava via AI Gateway
+   *   - Claude vision (no second vision model)
    * Returns a structured, serializable report. Safe to invoke from the UI
    * or HTTP (`POST /api/verify-design-audit`). Does NOT touch the article
    * pipeline or any persisted state other than the R2 screenshot bucket
@@ -3320,9 +3268,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         { keyword, categorySlug: category, kanbanStage: "debug" }
       );
     }
+    const claudeStopped = this.state.claudeChatFailure != null;
     this.setState({
       ...this.state,
-      status: "idle",
+      status: claudeStopped ? "paused" : "idle",
       currentCategory: null,
       currentKeyword: null,
       currentArticleSlug: null,
@@ -3331,6 +3280,13 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     });
     this.clearSheetStepColumnECache();
     return result;
+  }
+
+  /** Hide the Claude failure banner. The next failure shows it again. */
+  @callable()
+  dismissClaudeChatFailure(): { ok: true } {
+    this.setState({ ...this.state, claudeChatFailure: null });
+    return { ok: true };
   }
 
   @callable()
@@ -3358,14 +3314,21 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     const toolSystem = cloudflareAddon
       ? `You are a tool-using assistant.${cloudflareAddon}`
       : undefined;
-    const result = await generateText({
-      model: getKimiModel(this.env),
-      providerOptions: getKimiProviderOptions(this.env),
-      tools: merged,
-      ...(toolSystem ? { system: toolSystem } : {}),
-      prompt,
-      stopWhen: stepCountIs(5)
-    });
+    let result: Awaited<ReturnType<typeof generateText>>;
+    try {
+      result = await generateText({
+        model: getKimiModel(this.env),
+        providerOptions: getKimiProviderOptions(this.env),
+        tools: merged,
+        ...(toolSystem ? { system: toolSystem } : {}),
+        prompt,
+        stopWhen: stepCountIs(5)
+      });
+    } catch (err: unknown) {
+      const stopped = isClaudeChatStoppedError(err) ? err.message : errMsg(err);
+      this.log("error", `Agent tools stopped: ${stopped}`, "promptEngineer");
+      return { error: stopped };
+    }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
       "info",
@@ -3396,14 +3359,25 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       };
     }
     const cfMcpSystem = `You can call Cloudflare API operations via MCP Code Mode tools only (search: explore OpenAPI; execute: call cloudflare.request). Use the smallest number of calls. Prefer read-only operations unless the user clearly requests changes.`;
-    const result = await generateText({
-      model: getKimiModel(this.env),
-      providerOptions: getKimiProviderOptions(this.env),
-      tools,
-      system: cfMcpSystem,
-      prompt,
-      stopWhen: stepCountIs(8)
-    });
+    let result: Awaited<ReturnType<typeof generateText>>;
+    try {
+      result = await generateText({
+        model: getKimiModel(this.env),
+        providerOptions: getKimiProviderOptions(this.env),
+        tools,
+        system: cfMcpSystem,
+        prompt,
+        stopWhen: stepCountIs(8)
+      });
+    } catch (err: unknown) {
+      const stopped = isClaudeChatStoppedError(err) ? err.message : errMsg(err);
+      this.log(
+        "error",
+        `Cloudflare MCP task stopped: ${stopped}`,
+        "promptEngineer"
+      );
+      return { error: stopped };
+    }
     const mcpNames = collectToolNamesFromGenerateTextResult(result);
     this.log(
       "info",
@@ -4426,9 +4400,12 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             kanbanStage: "debug"
           });
           try {
+            const claudeStopped =
+              isClaudeChatStoppedError(err) ||
+              this.state.claudeChatFailure != null;
             this.setState({
               ...this.state,
-              status: "idle",
+              status: claudeStopped ? "paused" : "idle",
               currentStep: null,
               currentKeyword: null,
               currentArticleSlug: null,
