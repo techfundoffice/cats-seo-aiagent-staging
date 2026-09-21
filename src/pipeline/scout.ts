@@ -1,10 +1,9 @@
-import { generateText } from "ai";
 import { formatActivityLogModelPromptCell } from "../activityLogSheetColumns";
 import { parseJsonStringValue } from "../objectLike";
 import type { SEOArticleAgent } from "../server";
 import { fetchKeywordSuggestions, resolveDataForSeoCreds } from "./dataforseo";
 import { errMsg, keywordToSlug } from "./http-utils";
-import { getScoutModel } from "./kimi-model";
+import { runScoutChat } from "./kimi-model";
 import { isKimiCurrentlyDegraded } from "../kimiProviderHealth";
 
 interface DiscoveredCategory {
@@ -1429,8 +1428,9 @@ async function scoutFromDataForSeo(
  *     suggestions for a rotating seed, picks the first non-duplicate
  *     suggestion that passes volume/CPC/difficulty filters. Uses real
  *     Google demand instead of Kimi's imagination.
- *  1. **AI scout** — calls Kimi K2.5 with a ROI-scoring prompt that
- *     lists already-covered categories so the model proposes fresh niches.
+ *  1. **AI scout** — calls the Claude Code subscription with a ROI-scoring
+ *     prompt that lists already-covered categories so the model proposes
+ *     fresh niches. `AI_CHAT_FALLBACK=kimi` restores Workers AI Qwen.
  *  2. **Hardcoded pool** — 130+ manually-curated cat-product
  *     niches, ordered by estimated ROI. Used when the AI returns only
  *     already-covered slugs or fails outright.
@@ -1487,28 +1487,33 @@ export async function scoutHighTicketCategory(
   }
 
   // ── Tier 1: AI scout ────────────────────────────────────────────────────────
-  // Runs on Cloudflare Workers AI (Qwen3-30B-A3B via `getScoutModel`) — no
-  // OpenRouter credits and no Kimi quota. A single draw is occasionally
-  // unlucky (returns only already-covered niches, or trips a transient
-  // capacity error) and a bad draw wastes the whole 5-minute cycle, so take
-  // up to 3 attempts per tick. maxOutputTokens stays generous so the ROI
-  // JSON has room to complete.
+  // Claude Code subscription via `runScoutChat` (404 model walk + token
+  // refresh live in that helper). A single draw is occasionally unlucky
+  // (returns only already-covered niches, or trips a transient error) and
+  // a bad draw wastes the whole 5-minute cycle, so take up to 3 attempts
+  // per tick. maxOutputTokens stays generous so the ROI JSON has room to
+  // complete. Workers AI Qwen runs only when `AI_CHAT_FALLBACK=kimi`.
   const scoutAttempts = 3;
   for (let attempt = 1; attempt <= scoutAttempts; attempt++) {
     try {
-      const result = await generateText({
-        model: getScoutModel(agent.envBindings),
-        system: scoutSystemPrompt,
-        prompt: scoutUserPrompt,
-        maxOutputTokens: 2000
-      });
+      const result = await runScoutChat(
+        agent.envBindings,
+        {
+          system: scoutSystemPrompt,
+          prompt: scoutUserPrompt,
+          maxOutputTokens: 2000
+        },
+        (message) =>
+          agent.log("warning", message, "legacyScout", {
+            modelPrompt: scoutPromptCell,
+            kanbanStage: "planning"
+          })
+      );
       const { text } = result;
 
-      // Log which Workers AI model answered so quality variance is
-      // diagnosable from the dashboard.
       agent.log(
         "info",
-        `Scout ROI AI (${result.response.modelId}, attempt ${attempt}/${scoutAttempts}): ${text.length} chars`,
+        `Scout ROI AI (${result.modelId}, attempt ${attempt}/${scoutAttempts}): ${text.length} chars`,
         "legacyScout",
         {
           modelPrompt: scoutPromptCell,
@@ -1520,7 +1525,7 @@ export async function scoutHighTicketCategory(
       if (!parsed) {
         agent.log(
           "warning",
-          `Scout AI: empty/unparseable response (attempt ${attempt}/${scoutAttempts}) — retrying Workers AI scout`,
+          `Scout AI: empty/unparseable response (attempt ${attempt}/${scoutAttempts}) — retrying Claude scout`,
           undefined,
           { modelPrompt: scoutPromptCell }
         );
@@ -1539,14 +1544,14 @@ export async function scoutHighTicketCategory(
       if (first && excludedNorm.has(normalizeCategorySlug(first.slug))) {
         agent.log(
           "warning",
-          `Scout AI: all ROI candidates already in database (e.g. ${first.slug}) (attempt ${attempt}/${scoutAttempts}) — retrying Workers AI scout`,
+          `Scout AI: all ROI candidates already in database (e.g. ${first.slug}) (attempt ${attempt}/${scoutAttempts}) — retrying Claude scout`,
           undefined,
           { categorySlug: first.slug, modelPrompt: scoutPromptCell }
         );
       } else {
         agent.log(
           "warning",
-          `Scout AI: no usable category in JSON (attempt ${attempt}/${scoutAttempts}) — retrying Workers AI scout`,
+          `Scout AI: no usable category in JSON (attempt ${attempt}/${scoutAttempts}) — retrying Claude scout`,
           undefined,
           { modelPrompt: scoutPromptCell }
         );
@@ -1554,7 +1559,7 @@ export async function scoutHighTicketCategory(
     } catch (err: unknown) {
       agent.log(
         "warning",
-        `Scout AI failed (attempt ${attempt}/${scoutAttempts}): ${errMsg(err)} — retrying Workers AI scout`,
+        `Scout AI failed (attempt ${attempt}/${scoutAttempts}): ${errMsg(err)} — retrying Claude scout`,
         undefined,
         { modelPrompt: scoutPromptCell }
       );

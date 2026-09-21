@@ -172,18 +172,20 @@ declare namespace Cloudflare {
 		 */
 		DASHBOARD_PASSWORD?: string;
 		/**
-		 * OpenRouter API key. Used by `getKimiModel` / `getFreeModel`, and by
-		 * `runKimiWithPoll` only when `AI_CHAT_FALLBACK=kimi`. Set via Doppler →
+		 * OpenRouter API key. Used by chat (`getKimiModel`, `runKimiWithPoll`)
+		 * only when `AI_CHAT_FALLBACK=kimi`. Set via Doppler →
 		 * `wrangler secret put OPENROUTER_API_KEY`.
 		 */
 		OPENROUTER_API_KEY?: string;
 		/**
-		 * Escape hatch for `runKimiWithPoll`. Unset (default): Claude Code
-		 * subscription only — failures throw and do not call OpenRouter,
-		 * Workers AI, or Doppler key rotation. Set to `kimi` (case-insensitive)
-		 * to restore Claude → OpenRouter → Workers AI. Worker var or secret.
-		 * Persist it in Doppler (`AI_CHAT_FALLBACK`) so deploy secret-bulk
-		 * keeps it, or `npx wrangler secret put AI_CHAT_FALLBACK`.
+		 * Escape hatch for chat: `runKimiWithPoll`, `getKimiModel`, and the
+		 * category scout. Unset (default): Claude Code subscription only —
+		 * failures throw and do not call OpenRouter, Workers AI, or Doppler
+		 * key rotation. Set to `kimi` (case-insensitive) to restore Claude →
+		 * OpenRouter → Workers AI (`runKimiWithPoll` / `getKimiModel`) and
+		 * Workers AI Qwen for the scout. Worker var or secret. Persist it in
+		 * Doppler (`AI_CHAT_FALLBACK`) so deploy secret-bulk keeps it, or
+		 * `npx wrangler secret put AI_CHAT_FALLBACK`.
 		 */
 		AI_CHAT_FALLBACK?: string;
 		/** Optional override of the OpenRouter writer model ID (defaults to kimi-k2.5:nitro). */

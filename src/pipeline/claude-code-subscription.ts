@@ -939,7 +939,7 @@ export function getClaudeCodeLanguageModel(
   );
 }
 
-function isModelNotFoundError(err: unknown): boolean {
+export function isModelNotFoundError(err: unknown): boolean {
   const msg = errMsg(err);
   const status =
     err && typeof err === "object" && "statusCode" in err

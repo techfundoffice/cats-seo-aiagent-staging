@@ -1,16 +1,44 @@
+import type { LanguageModelV3CallOptions } from "@ai-sdk/provider";
+import type { LanguageModel } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   generateTextMock,
   aiGenerateWithPollMock,
   createOpenRouterMock,
-  createWorkersAIMock
-} = vi.hoisted(() => ({
-  generateTextMock: vi.fn(),
-  aiGenerateWithPollMock: vi.fn(),
-  createOpenRouterMock: vi.fn(() => vi.fn(() => "openrouter-model")),
-  createWorkersAIMock: vi.fn(() => vi.fn(() => "workers-model"))
-}));
+  createWorkersAIMock,
+  createAnthropicMock,
+  anthropicDoGenerate,
+  anthropicModelIds,
+  refreshOAuthMock
+} = vi.hoisted(() => {
+  const anthropicDoGenerate = vi.fn();
+  const anthropicModelIds: string[] = [];
+  return {
+    generateTextMock: vi.fn(),
+    aiGenerateWithPollMock: vi.fn(),
+    createOpenRouterMock: vi.fn(
+      (): ((...args: unknown[]) => unknown) => () => "openrouter-model"
+    ),
+    createWorkersAIMock: vi.fn(
+      (): ((...args: unknown[]) => unknown) => () => "workers-model"
+    ),
+    anthropicDoGenerate,
+    anthropicModelIds,
+    createAnthropicMock: vi.fn(() => (modelId: string) => {
+      anthropicModelIds.push(modelId);
+      return {
+        specificationVersion: "v3" as const,
+        provider: "anthropic",
+        modelId,
+        supportedUrls: {},
+        doGenerate: anthropicDoGenerate,
+        doStream: vi.fn()
+      };
+    }),
+    refreshOAuthMock: vi.fn()
+  };
+});
 
 vi.mock("ai", () => ({
   generateText: generateTextMock
@@ -22,6 +50,14 @@ vi.mock("@openrouter/ai-sdk-provider", () => ({
 
 vi.mock("workers-ai-provider", () => ({
   createWorkersAI: createWorkersAIMock
+}));
+
+vi.mock("@ai-sdk/anthropic", () => ({
+  createAnthropic: createAnthropicMock
+}));
+
+vi.mock("../claude-oauth-flow", () => ({
+  refreshClaudeOAuthToken: refreshOAuthMock
 }));
 
 vi.mock("../ai-poll", () => ({
@@ -36,10 +72,48 @@ import {
   setClaudeRateLimitCooldown
 } from "../claude-code-subscription";
 import {
+  getKimiModel,
+  getKimiProviderOptions,
   isDegenerateOutput,
   runKimiWithPoll,
+  runScoutChat,
   setRotatedOpenRouterKey
 } from "../kimi-model";
+
+const EMPTY_CALL = { prompt: [] } as LanguageModelV3CallOptions;
+
+function resetProviderMocks(): void {
+  generateTextMock.mockReset();
+  aiGenerateWithPollMock.mockReset();
+  anthropicDoGenerate.mockReset();
+  refreshOAuthMock.mockReset();
+  anthropicModelIds.length = 0;
+  createOpenRouterMock.mockReset();
+  createOpenRouterMock.mockImplementation(() => () => "openrouter-model");
+  createWorkersAIMock.mockReset();
+  createWorkersAIMock.mockImplementation(() => () => "workers-model");
+  createAnthropicMock.mockReset();
+  createAnthropicMock.mockImplementation(() => (modelId: string) => {
+    anthropicModelIds.push(modelId);
+    return {
+      specificationVersion: "v3" as const,
+      provider: "anthropic",
+      modelId,
+      supportedUrls: {},
+      doGenerate: anthropicDoGenerate,
+      doStream: vi.fn()
+    };
+  });
+}
+
+async function generateWith(model: LanguageModel) {
+  if (typeof model === "string" || model.specificationVersion !== "v3") {
+    throw new Error(
+      `expected LanguageModelV3, got ${typeof model === "string" ? model : model.specificationVersion}`
+    );
+  }
+  return model.doGenerate(EMPTY_CALL);
+}
 
 const CONTINUATION_PROMPT = "Continue from exactly where you left off.";
 
@@ -78,10 +152,7 @@ function testAgent(): {
 
 describe("runKimiWithPoll", () => {
   beforeEach(() => {
-    generateTextMock.mockReset();
-    aiGenerateWithPollMock.mockReset();
-    createOpenRouterMock.mockClear();
-    createWorkersAIMock.mockClear();
+    resetProviderMocks();
     setRotatedOpenRouterKey(null);
     clearClaudeCodeSubscriptionCache();
     clearClaudeRateLimitCooldown();
@@ -463,5 +534,325 @@ describe("isDegenerateOutput", () => {
     const wellOver = "a".repeat(300); // 100% alpha
     expect(isDegenerateOutput(justUnder)).toBe(true);
     expect(isDegenerateOutput(wellOver)).toBe(false);
+  });
+});
+
+describe("getKimiModel", () => {
+  const envWithKey = {
+    OPENROUTER_API_KEY: "test-openrouter-key",
+    AI: { run: vi.fn() }
+  } as unknown as Env;
+
+  beforeEach(() => {
+    resetProviderMocks();
+    setRotatedOpenRouterKey(null);
+    clearClaudeCodeSubscriptionCache();
+    clearClaudeRateLimitCooldown();
+  });
+
+  afterEach(() => {
+    clearClaudeCodeSubscriptionCache();
+    clearClaudeRateLimitCooldown();
+  });
+
+  it("does not hand OpenRouter when the subscription path succeeds", async () => {
+    useClaudeToken();
+    anthropicDoGenerate.mockResolvedValue({
+      finishReason: "stop",
+      content: []
+    });
+
+    const model = getKimiModel(envWithKey);
+    await generateWith(model);
+
+    expect(anthropicDoGenerate).toHaveBeenCalledTimes(1);
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+    expect(getKimiProviderOptions(envWithKey)).toBeUndefined();
+  });
+
+  it("walks Claude model fallbacks on 404 and still skips OpenRouter", async () => {
+    useClaudeToken();
+    const notFound = Object.assign(new Error("not_found_error"), {
+      statusCode: 404
+    });
+    anthropicDoGenerate
+      .mockRejectedValueOnce(notFound)
+      .mockResolvedValueOnce({ finishReason: "stop", content: [] });
+
+    await generateWith(getKimiModel(envWithKey));
+
+    expect(anthropicModelIds.slice(0, 2)).toEqual([
+      "claude-sonnet-4-5",
+      "claude-sonnet-4-5-20250929"
+    ]);
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+  });
+
+  it("throws on Claude failure without calling OpenRouter or Workers AI", async () => {
+    useClaudeToken();
+    anthropicDoGenerate.mockRejectedValue(new Error("overloaded"));
+
+    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
+      /overloaded/
+    );
+
+    expect(anthropicDoGenerate).toHaveBeenCalledTimes(1);
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when no subscription token is configured", async () => {
+    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
+      /OpenRouter and Workers AI were not called/
+    );
+    expect(createAnthropicMock).not.toHaveBeenCalled();
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+    expect(getKimiProviderOptions(envWithKey)).toBeUndefined();
+  });
+
+  it("refreshes an expiring access token before the Claude call", async () => {
+    configureClaudeCodeSubscription(
+      {
+        token: "sk-ant-oat01-old-token",
+        refreshToken: "sk-ant-ort01-refresh",
+        expiresAtMs: Date.now() - 5_000,
+        savedAt: new Date().toISOString()
+      },
+      "dashboard"
+    );
+    refreshOAuthMock.mockResolvedValue({
+      accessToken: "sk-ant-oat01-new-token",
+      refreshToken: "sk-ant-ort01-refresh-2",
+      expiresAtMs: Date.now() + 8 * 60 * 60 * 1000
+    });
+    anthropicDoGenerate.mockResolvedValue({
+      finishReason: "stop",
+      content: []
+    });
+
+    await generateWith(
+      getKimiModel({ AI: { run: vi.fn() } } as unknown as Env)
+    );
+
+    expect(refreshOAuthMock).toHaveBeenCalledWith("sk-ant-ort01-refresh");
+    expect(createAnthropicMock).toHaveBeenCalledWith(
+      expect.objectContaining({ authToken: "sk-ant-oat01-new-token" })
+    );
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+  });
+
+  it("does not call Claude during a rate-limit cooldown", async () => {
+    useClaudeToken();
+    setClaudeRateLimitCooldown(Date.now() + 30_000);
+
+    await expect(generateWith(getKimiModel(envWithKey))).rejects.toThrow(
+      /rate-limit cooldown/
+    );
+    expect(anthropicDoGenerate).not.toHaveBeenCalled();
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+  });
+
+  it("restores OpenRouter when AI_CHAT_FALLBACK=kimi and Claude is unavailable", () => {
+    const env = {
+      AI_CHAT_FALLBACK: "kimi",
+      OPENROUTER_API_KEY: "test-openrouter-key",
+      AI: { run: vi.fn() }
+    } as unknown as Env;
+
+    expect(getKimiModel(env)).toBe("openrouter-model");
+    expect(createAnthropicMock).not.toHaveBeenCalled();
+    expect(getKimiProviderOptions(env)).toEqual({
+      openrouter: { reasoning: { enabled: false } }
+    });
+  });
+
+  it("uses OpenRouter after Claude fails only when AI_CHAT_FALLBACK=kimi", async () => {
+    useClaudeToken();
+    anthropicDoGenerate.mockRejectedValue(new Error("overloaded"));
+    const openrouterDoGenerate = vi.fn().mockResolvedValue({
+      finishReason: "stop",
+      content: []
+    });
+    createOpenRouterMock.mockImplementation(() => () => ({
+      specificationVersion: "v3" as const,
+      provider: "openrouter",
+      modelId: "moonshotai/kimi-k2.5:nitro",
+      supportedUrls: {},
+      doGenerate: openrouterDoGenerate,
+      doStream: vi.fn()
+    }));
+
+    await generateWith(
+      getKimiModel({
+        AI_CHAT_FALLBACK: "kimi",
+        OPENROUTER_API_KEY: "test-openrouter-key",
+        AI: { run: vi.fn() }
+      } as unknown as Env)
+    );
+
+    expect(openrouterDoGenerate).toHaveBeenCalledTimes(1);
+    const options = openrouterDoGenerate.mock.calls[0]?.[0] as {
+      providerOptions?: { openrouter?: { reasoning?: { enabled?: boolean } } };
+    };
+    expect(options.providerOptions?.openrouter?.reasoning?.enabled).toBe(false);
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+  });
+
+  it("uses Workers AI Kimi when the hatch is set and OpenRouter has no key", async () => {
+    useClaudeToken();
+    anthropicDoGenerate.mockRejectedValue(new Error("overloaded"));
+    const workersDoGenerate = vi.fn().mockResolvedValue({
+      finishReason: "stop",
+      content: []
+    });
+    const workersFactory = vi.fn(() => ({
+      specificationVersion: "v3" as const,
+      provider: "workers-ai",
+      modelId: "@cf/moonshotai/kimi-k2.5",
+      supportedUrls: {},
+      doGenerate: workersDoGenerate,
+      doStream: vi.fn()
+    }));
+    createWorkersAIMock.mockImplementation(() => workersFactory);
+
+    await generateWith(
+      getKimiModel({
+        AI_CHAT_FALLBACK: "Kimi",
+        AI: { run: vi.fn() }
+      } as unknown as Env)
+    );
+
+    expect(workersFactory).toHaveBeenCalledWith(
+      "@cf/moonshotai/kimi-k2.5",
+      expect.objectContaining({
+        chat_template_kwargs: expect.objectContaining({
+          enable_thinking: false
+        })
+      })
+    );
+    expect(workersDoGenerate).toHaveBeenCalledTimes(1);
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runScoutChat", () => {
+  beforeEach(() => {
+    resetProviderMocks();
+    setRotatedOpenRouterKey(null);
+    clearClaudeCodeSubscriptionCache();
+    clearClaudeRateLimitCooldown();
+  });
+
+  afterEach(() => {
+    clearClaudeCodeSubscriptionCache();
+    clearClaudeRateLimitCooldown();
+  });
+
+  it("uses the Claude helper and does not call Workers AI Qwen", async () => {
+    useClaudeToken();
+    generateTextMock.mockResolvedValue({
+      text: "senior cat ramps",
+      finishReason: "stop"
+    });
+
+    const out = await runScoutChat({ AI: { run: vi.fn() } } as unknown as Env, {
+      system: "Return JSON. /no_think",
+      prompt: "Scout a niche",
+      maxOutputTokens: 2000
+    });
+
+    expect(out.text).toBe("senior cat ramps");
+    expect(out.modelId).toBe("claude-sonnet-4-5");
+    expect(generateTextMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: "system",
+            content: expect.stringContaining("You are Claude Code")
+          })
+        ])
+      })
+    );
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when Claude fails and does not call Qwen", async () => {
+    useClaudeToken();
+    generateTextMock.mockRejectedValue(new Error("claude down"));
+
+    await expect(
+      runScoutChat({ AI: { run: vi.fn() } } as unknown as Env, {
+        system: "system",
+        prompt: "prompt",
+        maxOutputTokens: 200
+      })
+    ).rejects.toThrow(/OpenRouter and Workers AI were not called|claude down/);
+
+    expect(createWorkersAIMock).not.toHaveBeenCalled();
+  });
+
+  it("restores Workers AI Qwen when AI_CHAT_FALLBACK=kimi and Claude is absent", async () => {
+    const seen: unknown[][] = [];
+    createWorkersAIMock.mockImplementation(() => (...args: unknown[]) => {
+      seen.push(args);
+      return "workers-model";
+    });
+    generateTextMock.mockResolvedValue({
+      text: "qwen niche",
+      finishReason: "stop",
+      response: { modelId: "@cf/qwen/qwen3-30b-a3b-fp8" }
+    });
+
+    const out = await runScoutChat(
+      {
+        AI_CHAT_FALLBACK: "kimi",
+        AI: { run: vi.fn() }
+      } as unknown as Env,
+      { system: "system", prompt: "prompt", maxOutputTokens: 200 }
+    );
+
+    expect(out).toEqual({
+      text: "qwen niche",
+      modelId: "@cf/qwen/qwen3-30b-a3b-fp8"
+    });
+    expect(seen[0]?.[0]).toBe("@cf/qwen/qwen3-30b-a3b-fp8");
+    expect(createOpenRouterMock).not.toHaveBeenCalled();
+    expect(generateTextMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to Qwen after Claude fails when AI_CHAT_FALLBACK=kimi", async () => {
+    useClaudeToken();
+    const seen: unknown[][] = [];
+    createWorkersAIMock.mockImplementation(() => (...args: unknown[]) => {
+      seen.push(args);
+      return "workers-model";
+    });
+    generateTextMock.mockImplementation(async (args: { model?: unknown }) => {
+      if (args.model === "workers-model") {
+        return {
+          text: "qwen after claude",
+          finishReason: "stop",
+          response: { modelId: "@cf/qwen/qwen3-30b-a3b-fp8" }
+        };
+      }
+      throw new Error("claude down");
+    });
+    const warnings: string[] = [];
+
+    const out = await runScoutChat(
+      {
+        AI_CHAT_FALLBACK: "kimi",
+        AI: { run: vi.fn() }
+      } as unknown as Env,
+      { system: "system", prompt: "prompt", maxOutputTokens: 200 },
+      (message) => warnings.push(message)
+    );
+
+    expect(out.text).toBe("qwen after claude");
+    expect(seen[0]?.[0]).toBe("@cf/qwen/qwen3-30b-a3b-fp8");
+    expect(warnings[0]).toMatch(/AI_CHAT_FALLBACK=kimi/);
   });
 });
