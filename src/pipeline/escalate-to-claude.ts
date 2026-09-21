@@ -29,6 +29,7 @@ import {
   normalizeSingleLine,
   redactSecrets
 } from "./http-utils";
+import { prodArticleUrl } from "./article-public-url";
 
 /**
  * Substrings that Cloudflare's Durable Object runtime inserts into errors
@@ -707,7 +708,7 @@ function resolveEscalationRenderableArticleUrl(
     return "";
   }
   const resolvedCategorySlug = normalizedCategorySlug || kvCategorySlug;
-  return `https://catsluvus.com/${resolvedCategorySlug}/${articleSlug}`;
+  return prodArticleUrl("catsluvus.com", resolvedCategorySlug, articleSlug);
 }
 
 function normalizeEscalationSlug(value: unknown): string {

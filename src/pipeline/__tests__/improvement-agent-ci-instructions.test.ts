@@ -284,7 +284,7 @@ describe("triggerCodebaseImprovement CI instructions", () => {
     expect(
       logMessages.some((msg) =>
         msg.includes(
-          'articleUrl="https://catsluvus.com/cat-window-perches-for-large-cats-and-multi-cat-households/cat-window-perch-wall-mount-alternative"'
+          'articleUrl="https://catsluvus.com/reviews/cat-window-perches-for-large-cats-and-multi-cat-households/cat-window-perch-wall-mount-alternative"'
         )
       )
     ).toBe(true);
@@ -440,6 +440,35 @@ describe("triggerCodebaseImprovement CI instructions", () => {
     expect(body).not.toContain("indoor-cat-ramp-stairs-combo-senior-extra");
   });
 
+  it("keeps a /reviews live URL when it identifies the same article", async () => {
+    const kv = {
+      get: vi.fn().mockResolvedValue(null),
+      put: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(undefined)
+    };
+    const agent = {
+      envBindings: {
+        GITHUB_TOKEN_SECRET: "token",
+        ARTICLES_KV: kv
+      },
+      log: vi.fn()
+    };
+    const liveUrl =
+      "https://catsluvus.com/reviews/cat-window-perches-for-apartment-living/window-mounted-cat-hammock";
+
+    await triggerCodebaseImprovement(agent as unknown as SEOArticleAgent, {
+      kvKey:
+        "cat-window-perches-for-apartment-living:window-mounted-cat-hammock",
+      keyword: "window mounted cat hammock",
+      categorySlug: "cat-window-perches-for-apartment-living",
+      articleUrl: liveUrl
+    });
+
+    const body = createIssueDirectMock.mock.calls[0]?.[2]?.body;
+    expect(body).toContain(`- **Live URL**: ${liveUrl}`);
+    expect(body).not.toContain("/reviews/reviews/");
+  });
+
   it("falls back to the kvKey-derived live URL when publish metadata points at a different article", async () => {
     const kv = {
       get: vi.fn().mockResolvedValue(null),
@@ -466,7 +495,7 @@ describe("triggerCodebaseImprovement CI instructions", () => {
     const body = createIssueDirectMock.mock.calls[0]?.[2]?.body;
     expect(typeof body).toBe("string");
     expect(body).toContain(
-      "- **Live URL**: https://catsluvus.com/cat-window-perches-for-apartment-living/window-mounted-cat-hammock"
+      "- **Live URL**: https://catsluvus.com/reviews/cat-window-perches-for-apartment-living/window-mounted-cat-hammock"
     );
     expect(body).not.toContain(
       "https://catsluvus.com/cat-window-perches-for-apartment-living/another-window-perch"

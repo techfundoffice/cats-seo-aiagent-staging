@@ -29,6 +29,14 @@
  */
 
 import { errMsg, keywordToSlug, normalizeSingleLine } from "./http-utils";
+import {
+  articlePathToKvKey,
+  articleUrlsShareKvKey,
+  parseArticlePath,
+  prodArticlePath,
+  prodArticleUrl,
+  workshopArticlePath
+} from "./article-public-url";
 import type { SEOArticleAgent } from "../server";
 import {
   assignCopilotToIssue,
@@ -255,7 +263,10 @@ export async function triggerCodebaseImprovement(
   if (
     normalizedInputArticleUrl &&
     derivedArticleUrlFromKvKey &&
-    normalizedInputArticleUrl !== derivedArticleUrlFromKvKey
+    !articleUrlsShareKvKey(
+      normalizedInputArticleUrl,
+      derivedArticleUrlFromKvKey
+    )
   ) {
     agent.log(
       "warning",
@@ -769,7 +780,8 @@ function fnv1aHash32Hex(value: string): string {
  * article identified by `kvKey`; otherwise falls back to the canonical
  * article path derived from `kvKey`.
  * Returns empty string when neither source yields a valid
- * `https://catsluvus.com/<category>/<slug>` article URL.
+ * catsluvus.com article URL (`/reviews/{category}/{slug}` or the legacy
+ * two-segment form).
  */
 function resolveRenderableArticleUrl(
   articleUrl: string | URL,
@@ -780,7 +792,10 @@ function resolveRenderableArticleUrl(
   if (!derivedArticleUrlFromKvKey) {
     return normalizedArticleUrl;
   }
-  if (normalizedArticleUrl === derivedArticleUrlFromKvKey) {
+  if (
+    normalizedArticleUrl &&
+    articleUrlsShareKvKey(normalizedArticleUrl, derivedArticleUrlFromKvKey)
+  ) {
     return normalizedArticleUrl;
   }
   return derivedArticleUrlFromKvKey;
@@ -789,10 +804,11 @@ function resolveRenderableArticleUrl(
 /**
  * Normalizes published article metadata to the canonical live article URL.
  * Returns empty string for non-HTTPS, non-catsluvus hosts, non-default
- * ports, URLs that are
- * not exactly an article path (`/<category>/<slug>`), or path segments
- * that are not slug-like. Query strings and hash fragments are stripped
- * and the result is normalized to `https://catsluvus.com/...`.
+ * ports, URLs that are not an article path (`/reviews/{category}/{slug}`
+ * or the legacy `/{category}/{slug}` form), or path segments that are
+ * not slug-like. Query strings and hash fragments are stripped and the
+ * result is normalized to `https://catsluvus.com/...`, preserving a
+ * `/reviews` prefix when the input already had one.
  */
 function normalizeRenderableArticleUrl(value: string | URL): string {
   const trimmed =
@@ -813,14 +829,13 @@ function normalizeRenderableArticleUrl(value: string | URL): string {
   ) {
     return "";
   }
-  const pathSegments = getTwoSegmentPath(parsed.pathname);
-  if (!pathSegments) {
+  const articlePath = parseArticlePath(parsed.pathname);
+  if (!articlePath) {
     return "";
   }
-  const normalizedPathSegments = pathSegments.map((segment) =>
-    segment.trim().toLowerCase()
-  );
-  if (!normalizedPathSegments.every(isSlugLikePathSegment)) {
+  const category = articlePath.categorySlug.trim().toLowerCase();
+  const slug = articlePath.slug.trim().toLowerCase();
+  if (!isSlugLikePathSegment(category) || !isSlugLikePathSegment(slug)) {
     return "";
   }
   // The WHATWG URL parser normalises default ports (http:80, https:443) to
@@ -831,7 +846,9 @@ function normalizeRenderableArticleUrl(value: string | URL): string {
   }
   parsed.hostname = "catsluvus.com";
   parsed.port = "";
-  parsed.pathname = `/${normalizedPathSegments.join("/")}`;
+  parsed.pathname = articlePath.reviewsPrefixed
+    ? prodArticlePath(category, slug)
+    : workshopArticlePath(category, slug);
   parsed.username = "";
   parsed.password = "";
   parsed.search = "";
@@ -845,7 +862,11 @@ function deriveRenderableArticleUrl(kvKey: string): string {
   if (!kvKeyPath) {
     return "";
   }
-  return `https://catsluvus.com/${kvKeyPath.normalizedCategorySlug}/${kvKeyPath.normalizedArticleSlug}`;
+  return prodArticleUrl(
+    "catsluvus.com",
+    kvKeyPath.normalizedCategorySlug,
+    kvKeyPath.normalizedArticleSlug
+  );
 }
 
 function deriveArticlePathFromKvKey(normalizedKvKey: string): {
@@ -878,24 +899,10 @@ function deriveArticlePathDedupSuffixFromUrl(
   }
   try {
     const parsed = new URL(normalizedArticleUrl);
-    const pathSegments = getTwoSegmentPath(parsed.pathname);
-    if (!pathSegments) {
-      return "";
-    }
-    return `${pathSegments[0]}:${pathSegments[1]}`;
+    return articlePathToKvKey(parsed.pathname) ?? "";
   } catch {
     return "";
   }
-}
-
-function getTwoSegmentPath(pathname: string): [string, string] | null {
-  const pathSegments = pathname
-    .split("/")
-    .filter((segment) => segment.trim().length > 0);
-  if (pathSegments.length !== 2) {
-    return null;
-  }
-  return [pathSegments[0], pathSegments[1]];
 }
 
 function normalizeSlugLikePathSegment(value: string): string {

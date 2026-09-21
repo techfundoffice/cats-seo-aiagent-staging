@@ -105,11 +105,23 @@ describe("pruneRedirectedFromSitemap", () => {
   });
 
   it("ignores paths that are not exactly category/slug", async () => {
-    // A one-segment or three-segment path is not an article kvKey.
+    // A one-segment path, or a three-segment path that is not /reviews/,
+    // is not an article kvKey.
     const kv = makeKv(sitemapWith("/about", "/a/b/c"), ["cat-toys:a"]);
     const result = await pruneRedirectedFromSitemap(kv, DOMAIN);
     expect(result.removed).toBe(0);
     expect(kv.store.get(SITEMAP_KV_KEY)).toContain("/about");
+  });
+
+  it("prunes /reviews/{category}/{slug} entries against the colon kv key", async () => {
+    const kv = makeKv(sitemapWith("/reviews/cat-toys/a", "/cat-food/b"), [
+      "cat-toys:a"
+    ]);
+    const result = await pruneRedirectedFromSitemap(kv, DOMAIN);
+    expect(result.removed).toBe(1);
+    const after = kv.store.get(SITEMAP_KV_KEY)!;
+    expect(after).not.toContain("/reviews/cat-toys/a<");
+    expect(after).toContain("/cat-food/b");
   });
 
   it("returns a zeroed result when the sitemap key is absent", async () => {

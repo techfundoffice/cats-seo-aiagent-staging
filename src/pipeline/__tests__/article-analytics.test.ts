@@ -30,7 +30,18 @@ describe("article-analytics", () => {
   it("pathToKvKey maps article paths", () => {
     expect(pathToKvKey("/cat-toys/foo-review")).toBe("cat-toys:foo-review");
     expect(pathToKvKey("/cat-toys/foo-review/")).toBe("cat-toys:foo-review");
+    expect(pathToKvKey("/reviews/cat-toys/foo-review")).toBe(
+      "cat-toys:foo-review"
+    );
+    expect(pathToKvKey("/reviews/cat-toys/foo-review/")).toBe(
+      "cat-toys:foo-review"
+    );
+    expect(pathToKvKey("/reviews/cat-toys/foo-review?utm=1")).toBe(
+      "cat-toys:foo-review"
+    );
     expect(pathToKvKey("/")).toBeNull();
+    expect(pathToKvKey("/reviews")).toBeNull();
+    expect(pathToKvKey("/reviews/cat-toys")).toBe("reviews:cat-toys");
   });
 
   it("normalizeAffiliateClick extracts ASIN", () => {

@@ -1,5 +1,6 @@
 import type { AmazonProduct } from "./amazon";
 import { escXml as escapeHtml, unescapeHtml } from "./http-utils";
+import { workshopArticlePath } from "./article-public-url";
 import {
   buildAnalyticsBodyHtml,
   buildAnalyticsHeadHtml
@@ -536,8 +537,10 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
     day: "numeric"
   });
   const currentYear = new Date().getFullYear();
+  // Workshop HTML stays two-segment. Production `/reviews/{category}/{slug}`
+  // is applied later, when promote rewrites this host into catsluvus.com.
   const basePath = `/${categorySlug}`;
-  const canonicalUrl = `https://${domain}${basePath}/${slug}`;
+  const canonicalUrl = `https://${domain}${workshopArticlePath(categorySlug, slug)}`;
 
   const trimmedHeroImageUrl = heroImageUrl?.trim() ?? "";
   const firstProductOgImageUrl =

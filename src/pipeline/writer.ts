@@ -1,3 +1,4 @@
+import { workshopArticlePath } from "./article-public-url";
 import { runKimiWithPoll } from "./kimi-model";
 import type { SEOArticleAgent } from "../server";
 import type { SissOptimizerResult } from "./siss-optimizer";
@@ -637,7 +638,9 @@ async function generateArticleUnsafe(
   const domain = agent.envBindings.DOMAIN || "catsluvus.com";
   const tag = agent.envBindings.AMAZON_AFFILIATE_TAG || "catsluvus03-20";
   const kvKey = `${categorySlug}:${slug}`;
-  const url = `https://${domain}/${categorySlug}/${slug}`;
+  // Staging workshop URL. Promote rewrites this to
+  // `https://catsluvus.com/reviews/{category}/{slug}` in prod-publish.
+  const url = `https://${domain}${workshopArticlePath(categorySlug, slug)}`;
   // Whitelist the keyword's own price-tier token (e.g. "$200" from "best
   // cat tree under $200") so the Amazon-compliance price strip doesn't rip
   // it out of titles/H1/meta. See html-builder.ts for the strip logic.
@@ -2281,7 +2284,7 @@ async function generateArticleUnsafe(
       {
         kanbanStage: "inProgress",
         filePath: `articles/${categorySlug}/${slug}.html`,
-        embedUrl: `https://${domain}/${categorySlug}/${slug}`,
+        embedUrl: url,
         filesJson: JSON.stringify([
           {
             path: `articles/${categorySlug}/${slug}.html`,

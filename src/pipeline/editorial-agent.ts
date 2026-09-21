@@ -24,6 +24,7 @@
 import { parseObjectLike } from "../objectLike";
 import type { SEOArticleAgent } from "../server";
 import { DEFAULT_PROMOTION_TARGET_DOMAIN, prodKvRestApi } from "./prod-publish";
+import { articlePathForHost } from "./article-public-url";
 import { extractKeywordPriceTokens, stripPricesFromHtml } from "./html-builder";
 import { runKimiWithPoll } from "./kimi-model";
 import { assessRenderedFreshness } from "./audit-freshness";
@@ -1058,15 +1059,22 @@ function kvKeyToPublicUrl(
   domainOverride?: string
 ): string {
   const domain = domainOverride || agent.envBindings.DOMAIN || "catsluvus.com";
-  // KV key format varies; if it's `<category>:<slug>` map to
-  // https://<domain>/<category>/<slug>. For additional `:` segments in the
-  // slug part, preserve them as `-` so we still build a valid article URL.
+  // KV key format varies; if it's `<category>:<slug>` map to a public
+  // article URL. Production hosts use `/reviews/{category}/{slug}`; the
+  // staging workshop stays two-segment. Extra `:` segments in the slug
+  // are joined with `-` so we still build a valid article URL.
   const parts = kvKey
     .split(":")
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
   if (parts.length >= 2) {
-    return `https://${domain}/${keywordToSlug(parts[0])}/${keywordToSlug(parts.slice(1).join("-"))}`;
+    const category = keywordToSlug(parts[0] ?? "");
+    const slug = keywordToSlug(parts.slice(1).join("-"));
+    const productionHost =
+      getEnvBinding(agent.envBindings, "PROMOTION_TARGET_DOMAIN") ??
+      DEFAULT_PROMOTION_TARGET_DOMAIN;
+    const path = articlePathForHost(domain, category, slug, productionHost);
+    return `https://${domain}${path}`;
   }
   return `https://${domain}/${keywordToSlug(kvKey)}`;
 }
