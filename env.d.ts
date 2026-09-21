@@ -172,13 +172,20 @@ declare namespace Cloudflare {
 		 */
 		DASHBOARD_PASSWORD?: string;
 		/**
-		 * OpenRouter API key. When set, Kimi K2.5 calls route through
-		 * OpenRouter (~33% cheaper than Workers AI K2.5). Falls back to
-		 * Workers AI automatically on HTTP error or empty response. Leave
-		 * unset to stay on Workers AI only. Set via Doppler →
+		 * OpenRouter API key. Used by `getKimiModel` / `getFreeModel`, and by
+		 * `runKimiWithPoll` only when `AI_CHAT_FALLBACK=kimi`. Set via Doppler →
 		 * `wrangler secret put OPENROUTER_API_KEY`.
 		 */
 		OPENROUTER_API_KEY?: string;
+		/**
+		 * Escape hatch for `runKimiWithPoll`. Unset (default): Claude Code
+		 * subscription only — failures throw and do not call OpenRouter,
+		 * Workers AI, or Doppler key rotation. Set to `kimi` (case-insensitive)
+		 * to restore Claude → OpenRouter → Workers AI. Worker var or secret.
+		 * Persist it in Doppler (`AI_CHAT_FALLBACK`) so deploy secret-bulk
+		 * keeps it, or `npx wrangler secret put AI_CHAT_FALLBACK`.
+		 */
+		AI_CHAT_FALLBACK?: string;
 		/** Optional override of the OpenRouter writer model ID (defaults to kimi-k2.5:nitro). */
 		OPENROUTER_KIMI_MODEL?: string;
 		/**
