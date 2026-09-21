@@ -9,6 +9,7 @@ vi.mock("@ai-sdk/anthropic", () => ({
 }));
 
 import {
+  CLAUDE_ONLY_MODEL_COPY,
   claudeCodeExpiryBadgeLabel,
   claudeCodeRefreshButtonHint,
   claudeCodeRefreshButtonLabel,
@@ -155,6 +156,11 @@ describe("claude-code-subscription helpers", () => {
       expect(line).not.toMatch(/sk-ant-/);
       if (kind !== "local-expiry-extended") {
         expect(line).toContain("…1234");
+      }
+      if (kind === "saved" || kind === "oauth-stored") {
+        expect(line).toContain(CLAUDE_ONLY_MODEL_COPY);
+        expect(line).not.toMatch(/Claude is primary\b/);
+        expect(line).not.toMatch(/OpenRouter|Workers AI|Kimi|Qwen/i);
       }
     }
   });

@@ -21,6 +21,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import {
+  CLAUDE_ONLY_MODEL_COPY,
   claudeCodeUiStatus,
   hoursRemaining,
   type ClaudeCodeUiStatus
@@ -427,9 +428,9 @@ export function claudeCodeSubscriptionPublicLogLine(
   const tail = `…${status.tokenLast4 ?? "????"}`;
   switch (kind) {
     case "saved":
-      return `Claude Code OAuth setup-token saved (${tail}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — Claude is the only chat model`;
+      return `Claude Code OAuth setup-token saved (${tail}, expires ${status.expiresAt ?? "n/a"}, ${status.daysRemaining ?? "?"} days remaining) — ${CLAUDE_ONLY_MODEL_COPY}`;
     case "oauth-stored":
-      return `Claude OAuth tokens stored (${tail}) — Claude is primary`;
+      return `Claude OAuth tokens stored (${tail}) — ${CLAUDE_ONLY_MODEL_COPY}`;
     case "oauth-refreshed":
       return `Claude OAuth refresh_token exchange ok (${tail})`;
     case "local-expiry-extended":

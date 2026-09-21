@@ -18,6 +18,16 @@ export type ClaudeCodeUiStatus =
  */
 export const CLAUDE_CODE_SHORT_LIVED_HOURS = 48;
 
+/**
+ * Operator-facing fact: chat and vision have no OpenRouter, Workers AI,
+ * Kimi, or Qwen fallback. A Claude failure stops the job.
+ */
+export const CLAUDE_ONLY_MODEL_COPY =
+  "Claude is the only chat and vision model. If Claude fails, the job stops and a red banner explains how to fix it.";
+
+/** Success line after a Claude OAuth save on the subscription panel. */
+export const CLAUDE_AUTHORIZED_STATUS = `Authorized — ${CLAUDE_ONLY_MODEL_COPY}`;
+
 export function hoursRemaining(
   expiresAtMs: number,
   nowMs = Date.now()
@@ -84,8 +94,10 @@ export function claudeCodeExpiryBadgeLabel(
     return `Expiring soon — ${status.daysRemaining ?? "?"} days left`;
   }
   const days = status.daysRemaining;
-  if (days !== null && days <= 30) return `Active — primary · ${days}d left`;
-  return "Active — primary model";
+  if (days !== null && days <= 30) {
+    return `Active — only chat model · ${days}d left`;
+  }
+  return "Active — only chat model";
 }
 
 export function claudeCodeTimeRemainingLabel(status: {

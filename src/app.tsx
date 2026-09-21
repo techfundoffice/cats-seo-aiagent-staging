@@ -31,6 +31,8 @@ import type {
 } from "./server";
 import MermaidChart from "./MermaidChart";
 import {
+  CLAUDE_AUTHORIZED_STATUS,
+  CLAUDE_ONLY_MODEL_COPY,
   claudeCodeExpiryBadgeLabel,
   claudeCodeRefreshButtonHint,
   claudeCodeRefreshButtonLabel,
@@ -1185,9 +1187,7 @@ function ClaudeCodeSubscriptionPanel({
           } catch {
             /* ignore */
           }
-          setClaudeSaveMsg(
-            "Authorized — Claude is the only chat and vision model."
-          );
+          setClaudeSaveMsg(CLAUDE_AUTHORIZED_STATUS);
           return;
         }
 
@@ -1209,9 +1209,7 @@ function ClaudeCodeSubscriptionPanel({
         } catch {
           /* ignore */
         }
-        setClaudeSaveMsg(
-          "Authorized — Claude is the only chat and vision model."
-        );
+        setClaudeSaveMsg(CLAUDE_AUTHORIZED_STATUS);
       } catch (e: unknown) {
         setClaudeSaveMsg(errMsg(e));
       } finally {
@@ -1263,7 +1261,8 @@ function ClaudeCodeSubscriptionPanel({
           >
             Sign in with your Claude.ai Pro/Max plan via OAuth (Claude Code
             client PKCE). No CLI required — authorize in the browser, paste the
-            code back here. Tokens stay on the Worker (never localStorage).
+            code back here. Tokens stay on the Worker (never localStorage).{" "}
+            {CLAUDE_ONLY_MODEL_COPY}
           </p>
         </div>
         <span
@@ -2061,7 +2060,7 @@ export default function Dashboard() {
           </button>
         </div>
 
-        {/* ── Claude Code subscription (primary AI path) ───────────────── */}
+        {/* ── Claude Code subscription (only chat and vision path) ─────── */}
         <ClaudeCodeSubscriptionPanel
           state={state}
           agent={agent}
@@ -2311,7 +2310,7 @@ export default function Dashboard() {
         {/* Editorial Agent — autonomous post-publish audit + rewrite loop (src/pipeline/editorial-agent.ts) */}
         <EditorialAgentPanel state={state} />
 
-        {/* AI Observer — Kimi narrates worker state every 15 min (src/pipeline/observer-agent.ts) */}
+        {/* AI Observer — Claude narrates worker state every 15 min (src/pipeline/observer-agent.ts) */}
         <ObserverAgentPanel state={state} />
 
         {/* Rankings — DataForSEO Labs ranked-keywords feedback loop. Data refreshes weekly per article; panel polls every 5 min. */}
@@ -3097,7 +3096,7 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
           label="Editorial Success %"
           value={successRate !== null ? `${successRate}%` : "—"}
         />
-        <StatCard label="Kimi calls (live buffer)" value={kimiCalls} />
+        <StatCard label="Claude calls (live buffer)" value={kimiCalls} />
       </div>
       {topReasons.length > 0 && (
         <div
@@ -4077,8 +4076,9 @@ function LegacyScoutPanel({ state }: { state: SEOAgentState }) {
       description={
         <>
           Original category-discovery chain: DataForSEO Labs keyword volume →
-          Workers AI ROI scoring → hardcoded pool → slug-variant expansion.
-          Fills the gaps between Top Seller Scout's daily sweeps.
+          Claude ROI scoring → hardcoded pool → slug-variant expansion. Fills
+          the gaps between Top Seller Scout's daily sweeps. Claude is the only
+          chat model for that scoring step.
         </>
       }
       emptyMessage="Legacy Scout is idle — no category discovery activity yet."
@@ -4625,7 +4625,8 @@ function TextEditorAgentPanel({ state }: { state: SEOAgentState }) {
           >
             Pipeline step 9.5 — runs for every article. Scans for truncation,
             empty sections, leaked model tokens, and duplicate content; applies
-            minimal surgical fixes via Kimi K2.5.
+            minimal surgical fixes via Claude. If Claude fails, that pass keeps
+            the original text and the red banner explains how to fix it.
           </p>
         </div>
         <div
@@ -6097,11 +6098,12 @@ function TrafficSourcesPanel() {
   );
 }
 
-// ObserverAgentPanel — surfaces the AI Observer's 15-minute Kimi narrative
+// ObserverAgentPanel — surfaces the AI Observer's 15-minute Claude narrative
 // in a readable card. The observer writes one activity-log entry per tick
 // under activeRole="observerAgent" with format:
-//   "Observer (Kimi): HEADLINE: ... | STATUS: ... | WHAT'S HAPPENING: ...
+//   "Observer (Claude): HEADLINE: ... | STATUS: ... | WHAT'S HAPPENING: ...
 //      | WHAT'S NOT HAPPENING (but should be): ... | RECOMMENDED ACTION: ..."
+// Older ticks used the "Observer (Kimi):" prefix. The parser accepts both.
 // This panel parses that one-liner back into its five sections and renders
 // each with appropriate weight + color so the operator can read it without
 // hunting through the raw log table.
@@ -6117,7 +6119,7 @@ type ObserverTick = {
 
 function parseObserverEntry(entry: ActivityLogEntry): ObserverTick {
   const raw = entry.msg ?? "";
-  const body = raw.replace(/^Observer \(Kimi\):\s*/i, "");
+  const body = raw.replace(/^Observer \((?:Kimi|Claude)\):\s*/i, "");
   const sections = body.split(/\s*\|\s*/);
 
   const lookup = (label: RegExp): string => {

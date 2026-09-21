@@ -8,11 +8,13 @@
  *   1. Snapshots the worker: recent activity log entries, defect-finding
  *      counts per class, editorial-stats for today, scout/article
  *      counters, schedule state.
- *   2. Sends the snapshot to Kimi K2.5 with an operations-observer
+ *   2. Sends the snapshot to Claude with an operations-observer
  *      prompt asking what's happening, what's concerning, what's worth
  *      investigating — and crucially, what's NOT happening that should
- *      be (the loop-not-firing class of bug).
- *   3. Writes Kimi's narrative back into the activity log under role
+ *      be (the loop-not-firing class of bug). Claude is the only chat
+ *      model. If the call fails, the tick writes deterministic counters
+ *      and the dashboard red banner explains how to fix it.
+ *   3. Writes Claude's narrative back into the activity log under role
  *      `observerAgent`, so it surfaces in the dashboard alongside every
  *      other agent's activity.
  *
@@ -24,8 +26,8 @@
  * notices the silence and complains in plain English so an operator
  * (or a follow-up Copilot pass) can act.
  *
- * Cost: one Kimi call per 15-min tick ≈ $0.01 (~$1/day) at OpenRouter
- * pricing. Cheap enough to leave running indefinitely.
+ * Cost: one Claude call per 15-min tick. Cheap enough to leave running
+ * indefinitely. OpenRouter and Workers AI are not called.
  */
 
 import { generateText } from "ai";
@@ -289,7 +291,7 @@ function buildFallbackNarrative(
       : findings
           .map(([cls, n]) => `${cls}:${n}/${OBSERVER_NARRATIVE_TRIGGER_COUNT}`)
           .join(", ");
-  const headline = `Observer fallback — Kimi unavailable (${kimiErr.slice(0, 80)})`;
+  const headline = `Observer fallback — Claude unavailable (${kimiErr.slice(0, 80)})`;
   const whatsHappening = `Snapshot only: ${ctx.recentLogCount} recent log entries; editorial today success=${ctx.editorialStatsToday.success} fail=${ctx.editorialStatsToday.fail} skipped=${ctx.editorialStatsToday.skipped}; findings=${findingsSummary}.`;
   const whatsNot = buildObserverWhatsNot(ctx.findingsByClass);
   const recommendedAction =
@@ -354,29 +356,33 @@ export async function runObserverTick(agent: SEOArticleAgent): Promise<void> {
     });
     verdict = (text ?? "").trim().slice(0, MAX_OBSERVER_VERDICT_CHARS);
   } catch (err: unknown) {
-    // Kimi unavailable — synthesise a deterministic narrative in the
+    // Claude unavailable — synthesise a deterministic narrative in the
     // exact same format the panel parser expects so the dashboard
-    // ALWAYS shows something, even when the LLM is down.
+    // ALWAYS shows something, even when the LLM is down. No other
+    // chat model is called.
     verdict = buildFallbackNarrative(context, errMsg(err));
     agent.log(
       "warning",
-      `Observer: Kimi call failed, using fallback narrative — ${errMsg(err)}`,
+      `Observer: Claude call failed, using fallback narrative — ${errMsg(err)}`,
       "observerAgent",
       { kanbanStage: "debug" }
     );
   }
 
   if (!verdict) {
-    // Kimi returned empty — also use the fallback so the panel never
+    // Claude returned empty — also use the fallback so the panel never
     // goes blank just because the model produced no tokens.
-    verdict = buildFallbackNarrative(context, "Kimi returned empty narrative");
+    verdict = buildFallbackNarrative(
+      context,
+      "Claude returned an empty narrative"
+    );
   }
 
   // Compact the verdict to a single log entry so it surfaces cleanly
-  // in the dashboard. Multi-line Kimi response collapsed into a
+  // in the dashboard. Multi-line Claude response collapsed into a
   // bullet-style summary with newline → " | " separators.
   const oneLineVerdict = verdict.replace(/\s*\n+\s*/g, " | ");
-  agent.log("info", `Observer (Kimi): ${oneLineVerdict}`, "observerAgent", {
+  agent.log("info", `Observer (Claude): ${oneLineVerdict}`, "observerAgent", {
     kanbanStage: "debug"
   });
 
