@@ -96,8 +96,8 @@ export const CATEGORIES: readonly DesignAuditCategory[] = [
 ] as const;
 
 /**
- * Category → default content-addressability. Llava routinely claims every
- * issue is content-addressable; we override based on category so Polish
+ * Category → default content-addressability. Vision models routinely claim
+ * every issue is content-addressable; we override based on category so Polish
  * only sees things it can fix by rewriting copy (CTA text, hero headline,
  * intro, nav labels), not CSS/theme issues (spacing, fonts, colors,
  * mobile scaling).
@@ -187,7 +187,7 @@ function coerceIssue(raw: unknown): DesignAuditIssue | null {
 }
 
 /**
- * Parses Llava output into normalized design-audit issues.
+ * Parses Claude vision output into normalized design-audit issues.
  * Accepts a top-level JSON array, `{ issues: [...] }` object, or prose-wrapped
  * responses containing balanced JSON object/array snippets. Retries each
  * candidate after `repairJson()` so fenced or mildly malformed model output
@@ -246,7 +246,7 @@ export function parseVisionJson(text: string): DesignAuditIssue[] {
 // ── Core vision call ──────────────────────────────────────────────────────────
 
 /**
- * Return value of `runVisionAnalysis`. When the Llava model call succeeds
+ * Return value of `runVisionAnalysis`. When the Claude vision call succeeds
  * `issues` is the parsed list of `DesignAuditIssue` objects (may be empty
  * if no problems were found). On failure `error` carries the reason and
  * `issues` is an empty array. `rawText` preserves the raw model response for
@@ -461,15 +461,10 @@ export async function analyzeScreenshotWithVision(
   }
 }
 
-/**
- * Historical name. The implementation is Claude-only.
- */
-export const analyzeScreenshotWithLlava = analyzeScreenshotWithVision;
-
 // ── AI-SDK tool wrappers ──────────────────────────────────────────────────────
 
 /**
- * Given raw image bytes (base64), run Llava and return findings. Useful
+ * Given raw image bytes (base64), run Claude vision and return findings. Useful
  * when a caller already has a screenshot (from a previous screenshotPage
  * tool call, or from R2) and only needs the analysis.
  */
@@ -503,7 +498,7 @@ export function createAuditScreenshotTool(agent: SEOArticleAgent) {
           error: `invalid imageBase64: ${errMsg(err)}`
         };
       }
-      const result = await analyzeScreenshotWithLlava(
+      const result = await analyzeScreenshotWithVision(
         agent,
         bytes,
         url,
@@ -583,13 +578,13 @@ export function createAuditPageDesignTool(agent: SEOArticleAgent) {
       }
       const [desktopAnalysis, mobileAnalysis] = await Promise.all([
         desktopCap.bytes
-          ? analyzeScreenshotWithLlava(agent, desktopCap.bytes, url, "desktop")
+          ? analyzeScreenshotWithVision(agent, desktopCap.bytes, url, "desktop")
           : Promise.resolve<VisionAnalysisResult>({
               issues: [],
               signals: { ...EMPTY_CONVERSION_SIGNALS }
             }),
         mobileCap.bytes
-          ? analyzeScreenshotWithLlava(agent, mobileCap.bytes, url, "mobile")
+          ? analyzeScreenshotWithVision(agent, mobileCap.bytes, url, "mobile")
           : Promise.resolve<VisionAnalysisResult>({
               issues: [],
               signals: { ...EMPTY_CONVERSION_SIGNALS }

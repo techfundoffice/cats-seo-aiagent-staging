@@ -196,19 +196,18 @@ Output format:
  * 15 minutes. Fire-and-forget: errors are swallowed and logged at info
  * level so the observer can't take down the worker.
  *
- * Reasoning is delegated to Kimi via OpenRouter (or Workers AI). One
- * call per tick, ~$0.01.
+ * Reasoning is one Claude call per tick.
  */
 /**
- * Build a deterministic narrative when Kimi is unavailable (OpenRouter
- * credits exhausted, Workers AI quota, transient network error). The
- * shape mirrors the Kimi-generated format so the dashboard
+ * Build a deterministic narrative when Claude is unavailable (missing
+ * token, auth failure, 429 cooldown, or a thrown call). The shape
+ * mirrors the model-generated format so the dashboard
  * `ObserverAgentPanel` parser can render it identically — no special
  * fallback rendering path needed.
  *
  * Status is computed deterministically from the snapshot:
  *   - red:    article pipeline stuck AND no recent activity
- *   - yellow: any defect-class within 1 of trigger, OR Kimi-failure
+ *   - yellow: any defect-class within 1 of trigger, OR a Claude failure
  *             being the reason we're in this branch
  *   - green:  otherwise
  */
@@ -264,7 +263,7 @@ export function buildObserverWhatsNot(
       ? ` Defect finding reads failed for: ${readFailedClasses.join(", ")}.`
       : "";
   if (interesting.length === 0) {
-    return `No AI narrative available this tick — only counters. Top up OpenRouter credits or check kimi-model.ts for the failure detail above.${readFailuresSummary}`;
+    return `No AI narrative available this tick — only counters. Check the red Claude banner or kimi-model.ts for the failure detail above.${readFailuresSummary}`;
   }
   const phrases = interesting.map(([cls, n]) =>
     describeFindingClassForNarrative(cls, n, triggerCount)
@@ -294,7 +293,7 @@ function buildFallbackNarrative(
   const whatsHappening = `Snapshot only: ${ctx.recentLogCount} recent log entries; editorial today success=${ctx.editorialStatsToday.success} fail=${ctx.editorialStatsToday.fail} skipped=${ctx.editorialStatsToday.skipped}; findings=${findingsSummary}.`;
   const whatsNot = buildObserverWhatsNot(ctx.findingsByClass);
   const recommendedAction =
-    "Top up OpenRouter credits (https://openrouter.ai/settings/credits) so the next tick produces a real Kimi narrative.";
+    "Check the red Claude banner (re-authorize, wait out a 429, or paste a token) so the next tick produces a real narrative.";
   return [
     `HEADLINE: ${headline}`,
     `STATUS: ${status}`,
@@ -308,11 +307,11 @@ function buildFallbackNarrative(
  * Periodic observer tick — called by the autonomous loop every cycle.
  *
  * Snapshots current worker state (recent activity-log entries, defect-finding
- * counts, and today's editorial stats), then asks Kimi to produce a
+ * counts, and today's editorial stats), then asks Claude to produce a
  * structured 5-line verdict in the format the dashboard panel parser expects:
  * HEADLINE / STATUS / WHAT'S HAPPENING / WHAT'S NOT HAPPENING / RECOMMENDED ACTION.
  *
- * When Kimi is unreachable or returns empty (e.g. exhausted credits),
+ * When Claude is unreachable or returns empty,
  * `buildFallbackNarrative` synthesises a deterministic verdict from the same
  * snapshot so the dashboard always shows *something* — never a blank panel.
  *

@@ -1972,11 +1972,11 @@ export default function Dashboard() {
         </div>
 
         {/* External-provider health banner — multi-provider derivation
-            from the live activity log. Surfaces OpenRouter credit
-            exhaustion (#4780) and the DataForSEO HTTP 402 quota wall.
-            Hidden during normal
-            operation. Per-provider remediation link makes the operator
-            action one click away. */}
+            from the live activity log. Surfaces DataForSEO HTTP 402,
+            Amazon auth, and IndexNow failures, plus any historical
+            OpenRouter credit lines still in the ring buffer. Hidden
+            during normal operation. Per-provider remediation link makes
+            the operator action one click away. */}
         <ExternalProviderHealthBanner state={state} />
 
         {/* Editorial rewrite-loop counters — mirrored from KV per
@@ -3071,10 +3071,8 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
   const topReasons = Object.entries(s.reasons)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3);
-  // Count Kimi calls in the rolling activity log as a cost proxy.
-  // Real $ figures need the OpenRouter / AI Gateway billing API —
-  // separate PR. The proxy is meaningful: each call is roughly the
-  // same cost band.
+  // Count chat-shaped lines in the rolling activity log. This is a
+  // call-volume proxy, not a dollar figure.
   const kimiCalls = (state.activityLog ?? []).filter((e) => {
     const msg = e.msg ?? "";
     return (
@@ -6329,10 +6327,10 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
               color: "#6b7280"
             }}
           >
-            Kimi K2.5 (via OpenRouter) watches the worker's own state every 15
-            minutes and writes a plain-English status report. Read-only — takes
-            no actions. Falls back to deterministic counters when the model is
-            unavailable.
+            Claude watches the worker's own state every 15 minutes and writes a
+            plain-English status report. Read-only — takes no actions. Falls
+            back to deterministic counters when Claude is unavailable. The red
+            banner at the top of the dashboard is the failure signal.
           </p>
         </div>
         <div

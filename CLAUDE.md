@@ -79,9 +79,11 @@ the required `check (ubuntu-24.04)` status.
 ## Secrets: every token lives in Doppler
 
 **There is no other source of truth.** `ADMIN_API_TOKEN`, `PAGESPEED_API_KEY`,
-`CLOUDFLARE_API_TOKEN`, `OPENROUTER_API_KEY`, `GITHUB_TOKEN_SECRET` — all of
-them. Never ask the user to paste a token, never assume a credential doesn't
-exist because it's absent from the environment, never hardcode one.
+`CLOUDFLARE_API_TOKEN`, `GITHUB_TOKEN_SECRET` — all of them. Never ask the user
+to paste a token, never assume a credential doesn't exist because it's absent
+from the environment, never hardcode one. `OPENROUTER_API_KEY` may still sit in
+Doppler; the Worker does not read it. Chat, vision, Flux, and embeddings do
+not use OpenRouter.
 
 **Project `replit-n8n-catsluvus`, config `prd`** — the only project, the only
 config.
@@ -205,12 +207,17 @@ provider inline.
   the same way.
 - `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
   siss-optimizer, editorial, keywords, text editor). It calls the Claude Code
-  subscription only. On failure it throws — it does not call OpenRouter,
-  Workers AI, LLaVA, or Doppler OpenRouter key rotation.
+  subscription only. On failure it throws. `syncTimeoutMs` is the only option
+  it still honors; it is forwarded to the Claude call.
 
-There is no `AI_CHAT_FALLBACK` hatch. Vision uses Claude only. Flux image
-generation and OpenAI embeddings are unchanged because they cannot use the
-Claude subscription token.
+Chat does not call OpenRouter, Workers AI Qwen/Kimi, LLaVA, or Doppler
+OpenRouter key rotation. `src/pipeline/ai-poll.ts`, `@openrouter/ai-sdk-provider`,
+and `workers-ai-provider` are gone. There is no `AI_CHAT_FALLBACK` hatch.
+Vision uses Claude only (`analyzeScreenshotWithVision`). Flux image generation
+(`env.AI` flux models in `article-image.ts`) and OpenAI embeddings stay,
+because they cannot use the Claude subscription token. Historical activity-log
+classifiers (`kimiProviderHealth`, failure-breakdown OpenRouter categories)
+still match old log lines; they do not call a model.
 
 A Claude failure pauses the autonomous article loop. The red banner at the
 top of the dashboard shows the error and how to fix it (re-authorize, wait

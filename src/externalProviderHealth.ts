@@ -101,12 +101,12 @@ export function computeExternalProviderHealth(
   const statuses: ExternalProviderStatus[] = [
     {
       id: "kimi",
-      label: "Kimi (OpenRouter)",
+      label: "Historical OpenRouter chat lines",
       tier: kimi.tier,
       failures: kimi.openrouterFailures,
-      evidence: `${kimi.openrouterFailures} OpenRouter failure(s), ${kimi.creditsExhaustedHits} credit-exhausted`,
-      remediation: "Top up OpenRouter credits",
-      remediationUrl: "https://openrouter.ai/settings/credits"
+      evidence: `${kimi.openrouterFailures} historical OpenRouter failure line(s), ${kimi.creditsExhaustedHits} credit-exhausted. Chat uses Claude now.`,
+      remediation:
+        "These lines are leftover activity-log rows. Current chat failures show on the red Claude banner."
     },
     {
       id: "dataforseo",

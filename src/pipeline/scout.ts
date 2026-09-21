@@ -1701,21 +1701,16 @@ async function saveCategory(
   const kwCount = cntRows[0]?.cnt ?? 0;
 
   if (kwCount === 0) {
-    // Do NOT insert a stub keyword when Kimi is currently degraded.
-    // The stub is `best <category-name>` — a verbatim restatement of
-    // the category slug. When Kimi is healthy that's a usable seed
-    // that gets enriched on the next cycle. When Kimi is degraded
-    // (OpenRouter credits dry), the stub never gets enriched —
-    // generateKeywords keeps failing the same way — and we end up
-    // publishing thousands of articles for category-slug stubs that
-    // nobody searches for, polluting site authority. Per the
-    // north-star: better to leave the category temporarily empty
-    // (scout retries on the next cycle) than to publish degraded
-    // content the system will have to live with forever.
+    // Do NOT insert a stub keyword when the activity log still shows
+    // historical OpenRouter credit-exhaustion lines. The stub is
+    // `best <category-name>` — a verbatim restatement of the category
+    // slug. Publishing it before keywords exist pollutes site
+    // authority. Chat no longer calls OpenRouter; this gate only
+    // matches old log rows still in the ring buffer.
     if (isKimiCurrentlyDegraded(agent.state.activityLog ?? [])) {
       agent.log(
         "warning",
-        `Scout: category "${row.slug}" has 0 keywords AND Kimi is degraded — SKIPPING stub insertion. Category will be retried next scout cycle once OpenRouter credits return.`,
+        `Scout: category "${row.slug}" has 0 keywords AND historical OpenRouter credit-exhaustion lines are still in the activity log — SKIPPING stub insertion. Category will be retried next scout cycle.`,
         "legacyScout",
         { categorySlug: row.slug, kanbanStage: "debug" }
       );

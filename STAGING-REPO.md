@@ -39,9 +39,10 @@ deploy on push to `main`, set these **GitHub Actions repository secrets**:
 - `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` — Cloudflare deploy creds
 - `DOPPLER_TOKEN` — for the Doppler → `wrangler secret bulk` step
 
-Worker runtime secrets (`OPENROUTER_API_KEY`, `ADMIN_API_TOKEN`,
-`DASHBOARD_PASSWORD`, product/SERP API keys, etc.) are pushed from Doppler by
-CI, or set manually per `CLAUDE.md` § Cloudflare Worker Secret Management.
+Worker runtime secrets (`ADMIN_API_TOKEN`, `DASHBOARD_PASSWORD`, product/SERP
+API keys, etc.) are pushed from Doppler by CI, or set manually per `CLAUDE.md`
+§ Cloudflare Worker Secret Management. `OPENROUTER_API_KEY` may still be in
+Doppler; this Worker does not read it for chat, vision, images, or embeddings.
 
 **Deliberately left unset:** `GITHUB_TOKEN_SECRET`. Without it the worker's
 autonomous coding-agent escalation stays dormant, so this staging repo will not

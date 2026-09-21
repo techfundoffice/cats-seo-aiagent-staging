@@ -411,9 +411,7 @@ describe("per-call abort budget", () => {
     globalThis.fetch = slowFetch();
     useOAuthToken();
 
-    // Default chat path is Claude only. A Claude-leg timeout must abort at
-    // the caller's budget and throw — not continue into OpenRouter or
-    // Workers AI.
+    // A Claude-leg timeout must abort at the caller's budget and throw.
     const { runKimiWithPoll } = await import("../kimi-model");
     const logged: string[] = [];
     const agent = {
@@ -435,35 +433,6 @@ describe("per-call abort budget", () => {
     // default.
     expect(Date.now() - started).toBeLessThan(2000);
 
-    expect(
-      logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
-    ).toBe(true);
-    // Workers AI logs this when the hatch is on. Default must not reach it.
-    expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(false);
-  });
-
-  it("does not forward a Claude timeout into Workers AI when AI_CHAT_FALLBACK=kimi", async () => {
-    globalThis.fetch = slowFetch();
-    useOAuthToken();
-
-    const { runKimiWithPoll } = await import("../kimi-model");
-    const logged: string[] = [];
-    const agent = {
-      log: (_lvl: string, msg: string) => {
-        logged.push(msg);
-      }
-    };
-
-    const started = Date.now();
-    await expect(
-      runKimiWithPoll(
-        { AI_CHAT_FALLBACK: "kimi" } as unknown as Env,
-        { prompt: "Rewrite this article." },
-        { syncTimeoutMs: 250 },
-        agent as never
-      )
-    ).rejects.toThrow(/No other model was called/);
-    expect(Date.now() - started).toBeLessThan(2000);
     expect(
       logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
     ).toBe(true);

@@ -38,8 +38,9 @@ declare namespace Cloudflare {
 		AI_SEARCH?: AiSearchInstance;
 		// Secrets (from Doppler → wrangler secret put)
 		/**
-		 * Doppler service token (dp.st.…) for direct Doppler REST API reads —
-		 * used by the OpenRouter-key rotation self-heal.
+		 * Doppler service token (dp.st.…). No Worker code reads this.
+		 * Chat does not rotate an OpenRouter key. GitHub Actions uses a
+		 * separate Actions secret of the same name for deploy.
 		 */
 		DOPPLER_TOKEN?: string;
 		/**
@@ -172,14 +173,6 @@ declare namespace Cloudflare {
 		 */
 		DASHBOARD_PASSWORD?: string;
 		/**
-		 * OpenRouter API key. Chat and vision do not read this. Flux image
-		 * generation and OpenAI embeddings do not use it either. Left on the
-		 * Env type so an existing Doppler secret still typechecks.
-		 */
-		OPENROUTER_API_KEY?: string;
-		/** Unused by chat. Historical OpenRouter writer model id override. */
-		OPENROUTER_KIMI_MODEL?: string;
-		/**
 		 * Bearer token for the `/api/admin/*` debug/control surface.
 		 * Consumed by `.github/workflows/claude.yml` so Claude Code in CI
 		 * can read logs, inspect KV, and trigger keyword retries without
@@ -260,8 +253,8 @@ declare namespace Cloudflare {
 		 * `claude setup-token` (Pro/Max/Team/Enterprise subscription).
 		 * Docs: https://code.claude.com/docs/en/authentication
 		 * Dashboard `setClaudeCodeSubscription` is preferred (DO SQLite +
-		 * 1-year expiry default). When active, Claude is tried before
-		 * OpenRouter Kimi and Workers AI. Sent as Authorization: Bearer.
+		 * 1-year expiry default). Chat and vision use this token only.
+		 * Sent as Authorization: Bearer.
 		 */
 		CLAUDE_CODE_OAUTH_TOKEN?: string;
 		/**

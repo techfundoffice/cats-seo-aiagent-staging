@@ -134,26 +134,26 @@ Indexes: `idx_kw_cat` on `keywords(category_slug, status)`, `idx_art_cat` on
 `autonomousLoop()` fires immediately on `start()` and every 5 minutes via
 `scheduleEvery(300, "autonomousLoop")`.
 
-| Step | Label                 | File                                     | Model                                                          |
-| ---- | --------------------- | ---------------------------------------- | -------------------------------------------------------------- |
-| 0    | KV dedupe check       | `writer.ts`                              | —                                                              |
-| 1    | Amazon products       | `pipeline/amazon.ts`                     | Tiers: Creators API → Apify → SerpAPI → synthetic              |
-| 2    | SERP analysis         | `pipeline/serp.ts`                       | Composio                                                       |
-| 2.5  | Competitor capture    | `pipeline/competitor.ts`                 | Composio → direct fetch                                        |
-| 3    | PAA expansion         | `writer.ts` (step 3 helper)              | Google autocomplete                                            |
-| 4    | Internal links        | `writer.ts` (step 4 helper)              | SQLite                                                         |
-| 5    | AI content generation | `writer.ts`                              | `@cf/moonshotai/kimi-k2.5` + `llama-3.3-70b-instruct-fp8-fast` |
-| 6    | Content enhancement   | `writer.ts`                              | `llama-3.3-70b-instruct-fp8-fast`                              |
-| 7    | YouTube video search  | `writer.ts`                              | HTML scrape                                                    |
-| 9    | HTML assembly         | `pipeline/html-builder.ts`               | —                                                              |
-| 9.5  | SEO score             | `pipeline/seo-score.ts`                  | 100 checks, 5 pillars                                          |
-| 10   | Deploy to KV          | `writer.ts`                              | —                                                              |
-| 11   | Live URL verify       | `writer.ts`                              | HEAD/GET probe                                                 |
-| 11.5 | Design audit          | `pipeline/design-audit.ts`               | Cloudflare Browser Rendering + Llava                           |
-| 12   | Sitemap update        | `pipeline/indexing.ts`                   | —                                                              |
-| 12.5 | QC agent              | `pipeline/qc-agent.ts`                   | `llama-3.3-70b-instruct-fp8-fast`                              |
-| 13   | Polish agent          | `pipeline/polish-agent.ts`               | `llama-3.3-70b-instruct-fp8-fast`                              |
-| 15   | Live SEO optimizer    | `pipeline/live-seo-content-optimizer.ts` | `llama-3.3-70b-instruct-fp8-fast`                              |
+| Step | Label                 | File                                     | Model                                             |
+| ---- | --------------------- | ---------------------------------------- | ------------------------------------------------- |
+| 0    | KV dedupe check       | `writer.ts`                              | —                                                 |
+| 1    | Amazon products       | `pipeline/amazon.ts`                     | Tiers: Creators API → Apify → SerpAPI → synthetic |
+| 2    | SERP analysis         | `pipeline/serp.ts`                       | Composio                                          |
+| 2.5  | Competitor capture    | `pipeline/competitor.ts`                 | Composio → direct fetch                           |
+| 3    | PAA expansion         | `writer.ts` (step 3 helper)              | Google autocomplete                               |
+| 4    | Internal links        | `writer.ts` (step 4 helper)              | SQLite                                            |
+| 5    | AI content generation | `writer.ts`                              | Claude Code subscription (`runKimiWithPoll`)      |
+| 6    | Content enhancement   | `writer.ts`                              | Claude Code subscription                          |
+| 7    | YouTube video search  | `writer.ts`                              | HTML scrape                                       |
+| 9    | HTML assembly         | `pipeline/html-builder.ts`               | —                                                 |
+| 9.5  | SEO score             | `pipeline/seo-score.ts`                  | 100 checks, 5 pillars                             |
+| 10   | Deploy to KV          | `writer.ts`                              | —                                                 |
+| 11   | Live URL verify       | `writer.ts`                              | HEAD/GET probe                                    |
+| 11.5 | Design audit          | `pipeline/design-audit.ts`               | Cloudflare Browser Rendering + Claude vision      |
+| 12   | Sitemap update        | `pipeline/indexing.ts`                   | —                                                 |
+| 12.5 | QC agent              | `pipeline/qc-agent.ts`                   | Claude Code subscription (`getKimiModel`)         |
+| 13   | Polish agent          | `pipeline/polish-agent.ts`               | Claude Code subscription (`getKimiModel`)         |
+| 15   | Live SEO optimizer    | `pipeline/live-seo-content-optimizer.ts` | Claude Code subscription (`getKimiModel`)         |
 
 **Image generation** (within step 6/9 path):
 
@@ -163,8 +163,8 @@ Indexes: `idx_kw_cat` on `keywords(category_slug, status)`, `idx_art_cat` on
 
 **Scout + Keywords** (pre-pipeline, when queue empty):
 
-- `pipeline/scout.ts` → `llama-3.3-70b-instruct-fp8-fast`
-- `pipeline/keywords.ts` → `@cf/moonshotai/kimi-k2.5`
+- `pipeline/scout.ts` → Claude (`runScoutChat`); DataForSEO and the curated list stay non-LLM
+- `pipeline/keywords.ts` → Claude (`runKimiWithPoll`)
 
 ---
 

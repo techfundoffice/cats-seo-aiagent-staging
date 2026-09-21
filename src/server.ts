@@ -2452,7 +2452,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     }
     // Observer tick runs unconditionally — even when the worker is idle
     // it should narrate WHY it's idle. Re-register if missing after
-    // restart. Fixed 15-min cadence; ~$1/day at OpenRouter Kimi pricing.
+    // restart. Fixed 15-min cadence. The tick calls Claude, not OpenRouter.
     {
       const existing = this.getSchedules();
       const hasObserver = existing.some((s) => s.callback === "observerTick");
@@ -2832,7 +2832,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       const { runDesignAudit } = await import("./pipeline/design-audit");
       const report = await runDesignAudit(this, url, "_verify");
       // ok = chain executed end-to-end: env present, at least one
-      // screenshot captured, and Llava returned without erroring on
+      // screenshot captured, and Claude vision returned without erroring on
       // any viewport. Zero issues with zero analysisErrors = clean
       // page. Zero issues with non-empty analysisErrors = vision
       // chain is broken and the report is NOT trustworthy.

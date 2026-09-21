@@ -26,7 +26,6 @@
     "@ai-sdk/anthropic": "^3.0.107",
     "@cloudflare/ai-chat": "^0.4.1",
     "@cloudflare/kumo": "^1.18.0",
-    "@openrouter/ai-sdk-provider": "^2.9.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "^0.10.1",
@@ -35,7 +34,6 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.1.10",
     "zod": "^4.3.6"
   },
   "devDependencies": {

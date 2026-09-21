@@ -4,8 +4,10 @@
  *
  * Background: the operator reported an 8.7% failure rate but couldn't
  * tell what fraction was REAL (content gates rejected the article) vs
- * PROVIDER (OpenRouter out of credits, Workers AI rate-limited,
- * DataForSEO 401, Amazon 401). Provider failures are a billing /
+ * PROVIDER (historical OpenRouter credit lines, Workers AI rate limits,
+ * DataForSEO 401, Amazon 401). Those OpenRouter and Workers AI chat
+ * categories classify stored messages; chat does not call those providers.
+ * Provider failures are a billing /
  * rotation problem; content failures are a code / prompt problem. The
  * autonomous defect loop should only target content failures — chasing
  * a credentials issue with a Copilot PR wastes a cycle.
