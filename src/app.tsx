@@ -19,7 +19,26 @@ import {
   isActivityLogWarningLevel,
   normalizeActivityLogLevel
 } from "./activityLogLevels";
-import { degradedProviders } from "./externalProviderHealth";
+import {
+  CLAUDE_FAILURE_BANNER_TITLE,
+  CLAUDE_FAILURE_NO_FALLBACK,
+  STAGING_IDENTITY_LABEL,
+  deriveDependencyChips,
+  deriveOperatorRunPresentation,
+  formatDashboardFreshness,
+  formatSeoPillarRows,
+  latestObserverNarrativeRaw,
+  parseObserverNarrative,
+  partitionEditorialReasonCounts,
+  type DependencyTier,
+  type ObserverNarrativeStatus,
+  type ObserverTrustAssessment,
+  type OperatorRunKind
+} from "./dashboardTruth";
+import {
+  computeExternalProviderHealth,
+  degradedProviders
+} from "./externalProviderHealth";
 import { filterObjectArrayEntries, parseJsonStringValue } from "./objectLike";
 import { computeObserverHealth } from "./observerHealth";
 import { resolvePublishedArticleLink } from "./publishedArticleLiveLink";
@@ -1653,6 +1672,8 @@ function ClaudeCodeSubscriptionPanel({
 export default function Dashboard() {
   const [state, setState] = useState<SEOAgentState | null>(null);
   const [connected, setConnected] = useState(false);
+  const [stateReceivedAt, setStateReceivedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [sheetInput, setSheetInput] = useState("");
   const [claudeTokenInput, setClaudeTokenInput] = useState("");
   const [claudeSaveBusy, setClaudeSaveBusy] = useState(false);
@@ -1671,9 +1692,15 @@ export default function Dashboard() {
     agent: "SEOArticleAgent",
     onStateUpdate: (s) => {
       setState(s);
+      setStateReceivedAt(Date.now());
       setConnected(true);
     }
   });
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (state?.googleSheetUrl) setSheetInput(state.googleSheetUrl);
@@ -1696,6 +1723,24 @@ export default function Dashboard() {
     );
   }
   const activityLog = getActivityLogEntries(state);
+  const run = deriveOperatorRunPresentation({
+    status: state.status,
+    currentStep: state.currentStep,
+    claudeChatFailure: state.claudeChatFailure
+  });
+  const freshness = formatDashboardFreshness({
+    lastActivity: state.lastActivity,
+    stateAgeMs: stateReceivedAt == null ? null : nowMs - stateReceivedAt
+  });
+  const providerHealth = computeExternalProviderHealth(activityLog);
+  const dependencyChips = deriveDependencyChips({
+    claudeConfigured: Boolean(state.claudeCodeSubscription?.configured),
+    claudeActive: Boolean(state.claudeCodeSubscription?.active),
+    claudeUiStatus: state.claudeCodeSubscription?.uiStatus,
+    claudeFailureMessage: state.claudeChatFailure?.message,
+    providers: providerHealth,
+    observerRaw: latestObserverNarrativeRaw(state.observerLog ?? [])
+  });
 
   return (
     <div
@@ -1762,7 +1807,24 @@ export default function Dashboard() {
                 marginTop: "0.25rem"
               }}
             >
-              Autonomous article generation via Claude Code subscription
+              Autonomous article generation. {STAGING_IDENTITY_LABEL}.{" "}
+              {CLAUDE_FAILURE_NO_FALLBACK}
+            </p>
+            <p
+              style={{
+                fontSize: "0.8rem",
+                color: freshness.stale ? "#92400e" : "#6b7280",
+                marginTop: "0.35rem",
+                fontWeight: freshness.stale ? 600 : 400
+              }}
+            >
+              {freshness.activityLine}
+              {" · "}
+              {freshness.stateLine}
+              {" · "}
+              Counters as of this state: {state.articlesGenerated} generated,{" "}
+              {state.articlesFailed} failed, avg SEO{" "}
+              {Number.isFinite(state.avgSeoScore) ? state.avgSeoScore : "—"}
             </p>
             <p
               style={{
@@ -1844,24 +1906,17 @@ export default function Dashboard() {
             style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}
           >
             <span
+              title={run.detail}
               style={{
                 padding: "0.375rem 0.75rem",
                 borderRadius: "9999px",
                 fontSize: "0.875rem",
                 fontWeight: 600,
-                background:
-                  state.status === "generating" || state.status === "scouting"
-                    ? "#d1fae5"
-                    : "#f3f4f6",
-                color:
-                  state.status === "generating" || state.status === "scouting"
-                    ? "#065f46"
-                    : "#374151"
+                background: run.background,
+                color: run.color
               }}
             >
-              {state.status === "generating" || state.status === "scouting"
-                ? "● PROCESSING"
-                : "■ STOPPED"}
+              {run.kind === "running" ? "●" : "■"} {run.label}
             </span>
             <a
               href="https://cats-seo-playground.webmaster-bc8.workers.dev/dashboard"
@@ -1911,6 +1966,18 @@ export default function Dashboard() {
             </a>
           </div>
         </div>
+
+        <p
+          style={{
+            fontSize: "0.8125rem",
+            color: run.color,
+            margin: "-0.75rem 0 1rem",
+            fontWeight: 600
+          }}
+        >
+          {run.detail}
+        </p>
+        <DependencyStrip chips={dependencyChips} />
 
         {/* Current Activity */}
         {state.currentKeyword && (
@@ -1969,13 +2036,20 @@ export default function Dashboard() {
             value={Number.isFinite(state.avgSeoScore) ? state.avgSeoScore : "—"}
           />
         </div>
+        <p
+          style={{
+            fontSize: "0.75rem",
+            color: "#6b7280",
+            margin: "-0.25rem 0 1rem"
+          }}
+        >
+          Hero counters match this agent state ({freshness.activityLine}).
+        </p>
+        <LastSeoScorecardPanel state={state} />
 
-        {/* External-provider health banner — multi-provider derivation
-            from the live activity log. Surfaces DataForSEO HTTP 402,
-            Amazon auth, and IndexNow failures, plus any historical
-            OpenRouter credit lines still in the ring buffer. Hidden
-            during normal operation. Per-provider remediation link makes
-            the operator action one click away. */}
+        {/* External-provider health banner. DataForSEO, Amazon, and
+            IndexNow only. Historical OpenRouter credit lines are not
+            current health — Claude failures use the red banner. */}
         <ExternalProviderHealthBanner state={state} />
 
         {/* Editorial rewrite-loop counters — mirrored from KV per
@@ -2956,10 +3030,20 @@ function ClaudeChatFailureBanner({
       >
         <div>
           <div style={{ fontWeight: 700, marginBottom: "0.35rem" }}>
-            Claude stopped the pipeline
+            {CLAUDE_FAILURE_BANNER_TITLE}
           </div>
           <div style={{ fontSize: "0.875rem", lineHeight: 1.45 }}>
             {failure.message}
+          </div>
+          <div
+            style={{
+              fontSize: "0.875rem",
+              lineHeight: 1.45,
+              marginTop: "0.35rem",
+              fontWeight: 600
+            }}
+          >
+            {CLAUDE_FAILURE_NO_FALLBACK}
           </div>
           <div
             style={{
@@ -3058,6 +3142,135 @@ function ExternalProviderHealthBanner({ state }: { state: SEOAgentState }) {
   );
 }
 
+const DEPENDENCY_TIER_COLOR: Record<DependencyTier, string> = {
+  green: "#15803d",
+  amber: "#a16207",
+  red: "#b91c1c",
+  unknown: "#6b7280"
+};
+
+function DependencyStrip({
+  chips
+}: {
+  chips: Array<{
+    id: string;
+    label: string;
+    tier: DependencyTier;
+    detail: string;
+  }>;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "0.5rem",
+        marginBottom: "1rem"
+      }}
+    >
+      {chips.map((chip) => (
+        <div
+          key={chip.id}
+          title={chip.detail}
+          style={{
+            background: "#fff",
+            border: "1px solid #e5e7eb",
+            borderRadius: "999px",
+            padding: "0.35rem 0.75rem",
+            fontSize: "0.75rem",
+            color: "#374151",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.4rem"
+          }}
+        >
+          <span
+            style={{
+              width: "0.55rem",
+              height: "0.55rem",
+              borderRadius: "50%",
+              background: DEPENDENCY_TIER_COLOR[chip.tier],
+              display: "inline-block"
+            }}
+          />
+          <span style={{ fontWeight: 700 }}>{chip.label}</span>
+          <span style={{ color: "#6b7280" }}>{chip.detail}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LastSeoScorecardPanel({ state }: { state: SEOAgentState }) {
+  const card = state.lastSeoScorecard;
+  const pillars = formatSeoPillarRows(card?.pillars);
+  return (
+    <div
+      style={{
+        background: "#fff",
+        borderRadius: "0.75rem",
+        border: "1px solid #e5e7eb",
+        padding: "0.875rem 1rem",
+        marginBottom: "1rem"
+      }}
+    >
+      <div
+        style={{
+          fontSize: "0.8125rem",
+          fontWeight: 700,
+          color: "#111827",
+          marginBottom: "0.35rem"
+        }}
+      >
+        Last SEO scorecard
+        {card ? ` · ${card.score}/100` : ""}
+      </div>
+      {!card ? (
+        <div style={{ fontSize: "0.8125rem", color: "#6b7280" }}>
+          No scorecard on this agent state yet.
+        </div>
+      ) : (
+        <>
+          <div
+            style={{
+              fontSize: "0.8125rem",
+              color: "#4b5563",
+              marginBottom: "0.5rem"
+            }}
+          >
+            {card.keyword || "Unknown keyword"}
+            {card.url ? (
+              <>
+                {" · "}
+                <a href={card.url} target="_blank" rel="noreferrer noopener">
+                  {card.url}
+                </a>
+              </>
+            ) : null}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+            {pillars.map((pillar) => (
+              <span
+                key={pillar.name}
+                style={{
+                  fontSize: "0.75rem",
+                  background:
+                    pillar.passed === pillar.total ? "#dcfce7" : "#fef3c7",
+                  color: pillar.passed === pillar.total ? "#166534" : "#92400e",
+                  borderRadius: "0.375rem",
+                  padding: "0.2rem 0.45rem"
+                }}
+              >
+                {pillar.name} {pillar.label}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function EditorialStatsRow({ state }: { state: SEOAgentState }) {
   const s = state.editorialStats;
   // Hide the row entirely until the DO instance has hydrated the
@@ -3067,12 +3280,19 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
   const attempted = s.success + s.fail;
   const successRate =
     attempted > 0 ? Math.round((s.success / attempted) * 100) : null;
-  const topReasons = Object.entries(s.reasons)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3);
-  // Count chat-shaped lines in the rolling activity log. This is a
-  // call-volume proxy, not a dollar figure.
-  const kimiCalls = (state.activityLog ?? []).filter((e) => {
+  const topReasons = partitionEditorialReasonCounts(s.reasons).visible.slice(
+    0,
+    3
+  );
+  const hiddenCreditSkips = partitionEditorialReasonCounts(
+    s.skipReasons ?? {}
+  ).hiddenHistoricalCreditSkips;
+  const topSkipReasons = partitionEditorialReasonCounts(
+    s.skipReasons ?? {}
+  ).visible.slice(0, 3);
+  // Chat-shaped lines in the rolling buffer. `[kimi-model]` rows are
+  // historical; they are not live Claude calls and not a second model.
+  const chatShapedLines = (state.activityLog ?? []).filter((e) => {
     const msg = e.msg ?? "";
     return (
       msg.includes("[kimi-model]") ||
@@ -3096,7 +3316,7 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
           label="Editorial Success %"
           value={successRate !== null ? `${successRate}%` : "—"}
         />
-        <StatCard label="Claude calls (live buffer)" value={kimiCalls} />
+        <StatCard label="Chat-shaped log lines" value={chatShapedLines} />
       </div>
       {topReasons.length > 0 && (
         <div
@@ -3112,10 +3332,12 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
           <span style={{ fontWeight: 600, color: "#374151" }}>
             Top editorial rejection reasons:
           </span>{" "}
-          {topReasons.map(([reason, count], i) => (
-            <span key={reason}>
-              <code style={{ color: "#111827" }}>{reason}</code>{" "}
-              <span style={{ color: "#9ca3af" }}>×{count}</span>
+          {topReasons.map((row, i) => (
+            <span key={row.reason}>
+              <code style={{ color: "#111827" }} title={row.reason}>
+                {row.label}
+              </code>{" "}
+              <span style={{ color: "#9ca3af" }}>×{row.count}</span>
               {i < topReasons.length - 1 ? " · " : ""}
             </span>
           ))}
@@ -3130,36 +3352,45 @@ function EditorialStatsRow({ state }: { state: SEOAgentState }) {
         `fail`. Empty histogram → nothing renders (typical first hours
         after a DO restart).
       */}
-      {(() => {
-        const topSkipReasons = Object.entries(s.skipReasons ?? {})
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3);
-        if (topSkipReasons.length === 0) return null;
-        return (
-          <div
-            style={{
-              background: "#fff",
-              borderRadius: "0.5rem",
-              border: "1px solid #e5e7eb",
-              padding: "0.5rem 0.75rem",
-              fontSize: "0.8125rem",
-              color: "#6b7280",
-              marginTop: "0.5rem"
-            }}
-          >
-            <span style={{ fontWeight: 600, color: "#374151" }}>
-              Top editorial skip reasons:
-            </span>{" "}
-            {topSkipReasons.map(([reason, count], i) => (
-              <span key={reason}>
-                <code style={{ color: "#111827" }}>{reason}</code>{" "}
-                <span style={{ color: "#9ca3af" }}>×{count}</span>
-                {i < topSkipReasons.length - 1 ? " · " : ""}
-              </span>
-            ))}
-          </div>
-        );
-      })()}
+      {topSkipReasons.length > 0 && (
+        <div
+          style={{
+            background: "#fff",
+            borderRadius: "0.5rem",
+            border: "1px solid #e5e7eb",
+            padding: "0.5rem 0.75rem",
+            fontSize: "0.8125rem",
+            color: "#6b7280",
+            marginTop: "0.5rem"
+          }}
+        >
+          <span style={{ fontWeight: 600, color: "#374151" }}>
+            Top editorial skip reasons:
+          </span>{" "}
+          {topSkipReasons.map((row, i) => (
+            <span key={row.reason}>
+              <code style={{ color: "#111827" }} title={row.reason}>
+                {row.label}
+              </code>{" "}
+              <span style={{ color: "#9ca3af" }}>×{row.count}</span>
+              {i < topSkipReasons.length - 1 ? " · " : ""}
+            </span>
+          ))}
+        </div>
+      )}
+      {hiddenCreditSkips > 0 && (
+        <div
+          style={{
+            fontSize: "0.75rem",
+            color: "#6b7280",
+            marginTop: "0.35rem"
+          }}
+        >
+          {hiddenCreditSkips} historical OpenRouter credit skip
+          {hiddenCreditSkips === 1 ? "" : "s"} hidden. Those keys are obsolete.
+          Chat is Claude-only, and a Claude failure stops on the red banner.
+        </div>
+      )}
     </div>
   );
 }
@@ -3198,11 +3429,13 @@ function buildPipelineFlowDiagram(currentStep: string | null): string {
     D --> E --> F --> G --> H --> I --> J --> K --> PUB`;
 }
 
-function buildStatusDiagram(status: string): string {
-  const isIdle = status === "idle";
-  const isScouting = status === "scouting";
-  const isGenerating = status === "generating";
-  const isPaused = status === "paused";
+function buildStatusDiagram(status: string, kind: OperatorRunKind): string {
+  const isIdle = kind === "idle";
+  const isScouting = status === "scouting" && kind === "running";
+  const isGenerating = status === "generating" && kind === "running";
+  const isPaused = kind === "paused";
+  const isStuck = kind === "stuck";
+  const isFailed = kind === "failed";
 
   const style = (active: boolean, color: string) =>
     active
@@ -3214,17 +3447,23 @@ function buildStatusDiagram(status: string): string {
     SCOUT([🔍 Scouting])
     GEN([⚙️ Generating])
     PAUSE([⏸️ Paused])
+    STUCK([⚠️ Stuck])
+    FAILRUN([🛑 Failed])
 
     IDLE --> |Start| SCOUT
     SCOUT --> |Keywords ready| GEN
     GEN --> |Stop| PAUSE
     PAUSE --> |Start| GEN
     GEN --> |All done| IDLE
+    GEN --> |Step frozen| STUCK
+    GEN --> |Claude failure| FAILRUN
 
     style IDLE ${style(isIdle, "#6b7280")}
     style SCOUT ${style(isScouting, "#d97706")}
     style GEN ${style(isGenerating, "#2563eb")}
-    style PAUSE ${style(isPaused, "#7c3aed")}`;
+    style PAUSE ${style(isPaused, "#7c3aed")}
+    style STUCK ${style(isStuck, "#d97706")}
+    style FAILRUN ${style(isFailed, "#dc2626")}`;
 }
 
 function buildProgressDiagram(
@@ -6103,57 +6342,41 @@ function TrafficSourcesPanel() {
 // under activeRole="observerAgent" with format:
 //   "Observer (Claude): HEADLINE: ... | STATUS: ... | WHAT'S HAPPENING: ...
 //      | WHAT'S NOT HAPPENING (but should be): ... | RECOMMENDED ACTION: ..."
-// Older ticks used the "Observer (Kimi):" prefix. The parser accepts both.
-// This panel parses that one-liner back into its five sections and renders
-// each with appropriate weight + color so the operator can read it without
-// hunting through the raw log table.
+// Older ticks used the "Observer (Kimi):" prefix. Those are untrusted:
+// an invalid Kimi OAuth line must not render as a healthy observer.
+// Score-distribution and other `Observer:` meta lines are not narratives.
 type ObserverTick = {
   ranAt: string;
   headline: string;
-  status: "green" | "yellow" | "red" | "unknown";
+  status: ObserverNarrativeStatus;
   whatsHappening: string;
   whatsNot: string;
   recommendedAction: string;
   raw: string;
+  trust: ObserverTrustAssessment;
 };
 
-function parseObserverEntry(entry: ActivityLogEntry): ObserverTick {
+function parseObserverEntry(entry: ActivityLogEntry): ObserverTick | null {
   const raw = entry.msg ?? "";
-  const body = raw.replace(/^Observer \((?:Kimi|Claude)\):\s*/i, "");
-  const sections = body.split(/\s*\|\s*/);
-
-  const lookup = (label: RegExp): string => {
-    for (const s of sections) {
-      const m = s.match(label);
-      if (m)
-        return s
-          .replace(label, "")
-          .replace(/^\s*:?\s*/, "")
-          .trim();
-    }
-    return "";
-  };
-
-  const headline = lookup(/^HEADLINE\b/i);
-  const statusRaw = lookup(/^STATUS\b/i).toLowerCase();
-  const status: ObserverTick["status"] =
-    statusRaw === "green" || statusRaw === "yellow" || statusRaw === "red"
-      ? statusRaw
-      : "unknown";
-  const whatsHappening = lookup(/^WHAT['’]S HAPPENING\b/i);
-  const whatsNot = lookup(/^WHAT['’]S NOT HAPPENING\b[^:]*/i);
-  const recommendedAction = lookup(/^RECOMMENDED ACTION\b/i);
-
+  const parsed = parseObserverNarrative(raw);
+  if (!parsed) return null;
   const ranAt = `${entry.timeDate ?? ""} ${entry.timeTime ?? ""}`.trim();
   return {
     ranAt,
-    headline: headline || "(no headline)",
-    status,
-    whatsHappening,
-    whatsNot,
-    recommendedAction,
-    raw
+    headline: parsed.headline,
+    status: parsed.status,
+    whatsHappening: parsed.whatsHappening,
+    whatsNot: parsed.whatsNot,
+    recommendedAction: parsed.recommendedAction,
+    raw,
+    trust: parsed.trust
   };
+}
+
+function displayedObserverStatus(tick: ObserverTick): ObserverNarrativeStatus {
+  if (tick.trust.trust === "untrusted") return "red";
+  if (tick.trust.trust === "fallback") return "yellow";
+  return tick.status;
 }
 
 function statusBadge(status: ObserverTick["status"]) {
@@ -6188,7 +6411,9 @@ type ObserverHistoryRecord = {
   narrative: string;
 };
 
-function tickFromHistoryRecord(rec: ObserverHistoryRecord): ObserverTick {
+function tickFromHistoryRecord(
+  rec: ObserverHistoryRecord
+): ObserverTick | null {
   // The KV record stores the same one-line narrative `agent.log()` emits,
   // so reuse the same parser by synthesising an ActivityLogEntry shape.
   // `ts` is a full ISO string; the parser only needs a printable label
@@ -6218,7 +6443,10 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
   // Merge by `ranAt`, dedup, take newest 20. If both are empty the panel
   // shows the existing "no observations yet" placeholder.
   const observerLog = sanitizeActivityLogEntries(state.observerLog);
-  const stateTicks = [...observerLog].reverse().map(parseObserverEntry);
+  const stateTicks = [...observerLog]
+    .reverse()
+    .map(parseObserverEntry)
+    .filter((tick): tick is ObserverTick => tick !== null);
 
   const [historyTicks, setHistoryTicks] = useState<ObserverTick[]>([]);
   useEffect(() => {
@@ -6234,7 +6462,11 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
           ticks?: ObserverHistoryRecord[];
         };
         if (cancelled || !body.ok || !Array.isArray(body.ticks)) return;
-        setHistoryTicks(body.ticks.map(tickFromHistoryRecord));
+        setHistoryTicks(
+          body.ticks
+            .map(tickFromHistoryRecord)
+            .filter((tick): tick is ObserverTick => tick !== null)
+        );
       } catch {
         // Network blip — keep last known ticks; next poll will retry.
       }
@@ -6274,16 +6506,25 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
     latest?.ranAt ?? null,
     state.lastActivity ?? null
   );
-  const observerHealthColor = {
-    green: "#15803d",
-    yellow: "#a16207",
-    red: "#b91c1c",
-    unknown: "#6b7280"
-  }[observerHealth.tier];
-  const observerHealthLine =
-    observerHealth.ageMinutes === null || !latest
-      ? null
-      : `Last observer tick: ${observerHealth.ageMinutes} min ago (${latest.ranAt})`;
+  const trustOverridesAge =
+    latest?.trust.trust === "untrusted" || latest?.trust.trust === "fallback";
+  const observerHealthColor = trustOverridesAge
+    ? latest?.trust.tier === "red"
+      ? "#b91c1c"
+      : "#a16207"
+    : {
+        green: "#15803d",
+        yellow: "#a16207",
+        red: "#b91c1c",
+        unknown: "#6b7280"
+      }[observerHealth.tier];
+  const observerHealthLine = !latest
+    ? null
+    : trustOverridesAge
+      ? `${latest.trust.summary} (${latest.ranAt})`
+      : observerHealth.ageMinutes === null
+        ? null
+        : `Last observer tick: ${observerHealth.ageMinutes} min ago (${latest.ranAt})`;
 
   return (
     <details
@@ -6329,10 +6570,10 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
               color: "#6b7280"
             }}
           >
-            Claude watches the worker's own state every 15 minutes and writes a
-            plain-English status report. Read-only — takes no actions. Falls
-            back to deterministic counters when Claude is unavailable. The red
-            banner at the top of the dashboard is the failure signal.
+            Claude writes this report. Read-only — it takes no actions. If
+            Claude is down, the tick is amber counters only, not a switch to
+            Kimi or another model. A Kimi or invalid-OAuth tick is red and
+            untrusted. The red banner at the top is the Claude failure signal.
           </p>
         </div>
         <div
@@ -6412,12 +6653,53 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
                 gap: "0.5rem"
               }}
             >
-              {statusBadge(latest.status)}
+              {statusBadge(displayedObserverStatus(latest))}
+              {latest.trust.trust !== "trusted" && (
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    fontWeight: 700,
+                    color: latest.trust.tier === "red" ? "#b91c1c" : "#a16207"
+                  }}
+                >
+                  {latest.trust.trust === "untrusted"
+                    ? "Untrusted"
+                    : "Counters only"}
+                </span>
+              )}
               <span style={{ fontSize: "0.75rem", color: "#6b7280" }}>
                 {latest.ranAt}
               </span>
             </div>
           </div>
+
+          {latest.trust.howToFix && (
+            <div
+              style={{
+                marginBottom: "0.625rem",
+                padding: "0.5rem 0.75rem",
+                background: latest.trust.tier === "red" ? "#fee2e2" : "#fef3c7",
+                borderLeft: `3px solid ${latest.trust.tier === "red" ? "#dc2626" : "#d97706"}`,
+                borderRadius: "0.25rem",
+                fontSize: "0.875rem",
+                color: latest.trust.tier === "red" ? "#7f1d1d" : "#78350f",
+                lineHeight: 1.45
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "0.6875rem",
+                  fontWeight: 700,
+                  letterSpacing: "0.05em",
+                  textTransform: "uppercase",
+                  marginBottom: "0.125rem"
+                }}
+              >
+                How to fix
+              </div>
+              {latest.trust.howToFix}
+            </div>
+          )}
 
           {latest.whatsHappening && (
             <div style={{ marginBottom: "0.625rem" }}>
@@ -6559,7 +6841,7 @@ function ObserverAgentPanel({ state }: { state: SEOAgentState }) {
                   alignItems: "baseline"
                 }}
               >
-                {statusBadge(t.status)}
+                {statusBadge(displayedObserverStatus(t))}
                 <span style={{ color: "#9ca3af", fontSize: "0.6875rem" }}>
                   {t.ranAt}
                 </span>
@@ -6635,12 +6917,12 @@ function PublishedArticleLogPanel({ state }: { state: SEOAgentState }) {
             }}
           >
             Last {rows.length === 0 ? "50" : rows.length} published articles,
-            newest first. SEO score ≥70 is a pass. <b>Live</b> says where the
-            article actually serves: <code>prod</code> = promoted to
-            catsluvus.com, <code>staging only</code> = it never cleared
-            PROD_PUBLISH_MIN_SCORE and 404s on catsluvus.com. The link opens
-            whichever of the two is real; <code>kv</code> fetches the raw HTML
-            via /api/admin/kv.
+            newest first. SEO score ≥70 is a pass. <b>Live</b> is prod only when
+            promotionStatus or prodUrl says so. A promoted link opens
+            catsluvus.com<code>/reviews/…</code>. <code>staging only</code>{" "}
+            never cleared production and is not a prod ship. Rows with no
+            promotion fields stay <code>unknown</code>. <code>kv</code> fetches
+            raw HTML via /api/admin/kv.
           </p>
         </div>
         <div
@@ -7528,7 +7810,14 @@ function N8nAgentPanel({ state }: { state: SEOAgentState }) {
 
 function PipelineDiagrams({ state }: { state: SEOAgentState }) {
   const flowDiagram = buildPipelineFlowDiagram(state.currentStep);
-  const statusDiagram = buildStatusDiagram(state.status);
+  const statusDiagram = buildStatusDiagram(
+    state.status,
+    deriveOperatorRunPresentation({
+      status: state.status,
+      currentStep: state.currentStep,
+      claudeChatFailure: state.claudeChatFailure
+    }).kind
+  );
   const progressDiagram = buildProgressDiagram(
     state.articlesGenerated,
     state.articlesFailed,

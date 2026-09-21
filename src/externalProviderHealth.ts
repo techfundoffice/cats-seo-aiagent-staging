@@ -1,17 +1,15 @@
 /**
- * Multi-provider health derivation from the in-memory activity log.
- * Generalizes the Kimi-only banner shipped in #4780. Operators have
- * been silently losing multiple external services at once (OpenRouter
- * credit wall + DataForSEO 402 paid-tier exhaustion). Without a unified
- * view, each surfaces only as scattered warning lines that are easy to
- * miss.
+ * Current external-provider health from the in-memory activity log.
+ *
+ * Chat is Claude-only. Historical OpenRouter / Kimi credit lines are not a
+ * provider in this snapshot — they must not light up the health banner.
+ * Claude failures use `claudeChatFailure`. The providers here are the ones
+ * that still fail in production: DataForSEO, Amazon Creators, IndexNow.
  *
  * Pure derivation. No state field, endpoint, scheduled tick.
  */
 
-import { computeKimiProviderHealth } from "./kimiProviderHealth";
-
-export type ExternalProviderId = "kimi" | "dataforseo" | "amazon" | "indexnow";
+export type ExternalProviderId = "dataforseo" | "amazon" | "indexnow";
 
 type ProviderHealthTier = "ok" | "degraded" | "exhausted";
 
@@ -63,7 +61,7 @@ const AMAZON_CREATORS_AUTH_PATTERN =
 const INDEXNOW_403_PATTERN =
   /IndexNow:\s*403\b[^\n]*(?:Forbidden|UserForbiddedToAccessSite)/i;
 
-/** Threshold above which any non-Kimi provider gets the "exhausted" tier. */
+/** Threshold above which a provider gets the "exhausted" tier. */
 const EXHAUSTED_THRESHOLD = 5;
 
 function classify(failures: number): { tier: ProviderHealthTier } {
@@ -81,10 +79,6 @@ function classify(failures: number): { tier: ProviderHealthTier } {
 export function computeExternalProviderHealth(
   activityLog: ReadonlyArray<{ msg?: string }>
 ): ExternalProviderStatus[] {
-  // Kimi delegates to the dedicated helper so detection thresholds stay
-  // pinned to the existing tests.
-  const kimi = computeKimiProviderHealth(activityLog);
-
   let dataforseoFailures = 0;
   let amazonFailures = 0;
   let indexnowFailures = 0;
@@ -99,15 +93,6 @@ export function computeExternalProviderHealth(
   const indexnow = classify(indexnowFailures);
 
   const statuses: ExternalProviderStatus[] = [
-    {
-      id: "kimi",
-      label: "Historical OpenRouter chat lines",
-      tier: kimi.tier,
-      failures: kimi.openrouterFailures,
-      evidence: `${kimi.openrouterFailures} historical OpenRouter failure line(s), ${kimi.creditsExhaustedHits} credit-exhausted. Chat uses Claude now.`,
-      remediation:
-        "These lines are leftover activity-log rows. Current chat failures show on the red Claude banner."
-    },
     {
       id: "dataforseo",
       label: "DataForSEO (analytics + ranked keywords)",

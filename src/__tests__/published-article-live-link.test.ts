@@ -3,13 +3,14 @@ import { resolvePublishedArticleLink } from "../publishedArticleLiveLink";
 
 const STAGING =
   "https://cats-seo-aiagent-staging.webmaster-bc8.workers.dev/cat-toys/x-review";
-const PROD = "https://catsluvus.com/cat-toys/x-review";
+const PROD = "https://catsluvus.com/reviews/cat-toys/x-review";
+const LEGACY_PROD = "https://catsluvus.com/cat-toys/x-review";
 
 describe("resolvePublishedArticleLink", () => {
-  it("links a promoted article at production, not the 301 tombstone", () => {
+  it("links a promoted article at the canonical /reviews/ production URL", () => {
     const r = resolvePublishedArticleLink({
       url: STAGING,
-      prodUrl: PROD,
+      prodUrl: LEGACY_PROD,
       promotionStatus: "published-prod"
     });
     expect(r).toEqual({
@@ -42,8 +43,20 @@ describe("resolvePublishedArticleLink", () => {
     expect(r.href).toBe(STAGING);
   });
 
+  it("does not double-prefix a prodUrl that already uses /reviews/", () => {
+    const r = resolvePublishedArticleLink({
+      url: STAGING,
+      prodUrl: PROD,
+      promotionStatus: "published-prod"
+    });
+    expect(r.href).toBe(PROD);
+  });
+
   it("infers promotion from a bare prodUrl on a legacy row", () => {
-    const r = resolvePublishedArticleLink({ url: STAGING, prodUrl: PROD });
+    const r = resolvePublishedArticleLink({
+      url: STAGING,
+      prodUrl: LEGACY_PROD
+    });
     expect(r.promoted).toBe(true);
     expect(r.promotionKnown).toBe(true);
     expect(r.href).toBe(PROD);
