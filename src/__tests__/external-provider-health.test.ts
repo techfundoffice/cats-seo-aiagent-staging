@@ -31,15 +31,16 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
     expect(dfs.failures).toBe(1);
   });
 
-  it("OpenRouter credit-exhausted shape → kimi exhausted at 5+", () => {
+  it("historical OpenRouter credit lines are not a current provider", () => {
     const log = Array.from({ length: 5 }, () =>
       makeEntry(
         "[kimi-model] OpenRouter call failed (This request requires more credits); falling back to Workers AI"
       )
     );
     const out = computeExternalProviderHealth(log);
-    const kimi = out.find((p) => p.id === "kimi")!;
-    expect(kimi.tier).toBe("exhausted");
+    expect(out.map((p) => p.id)).toEqual(["dataforseo", "amazon", "indexnow"]);
+    expect(out.every((p) => p.tier === "ok")).toBe(true);
+    expect(degradedProviders(log)).toEqual([]);
   });
 
   it("DataForSEO reaches exhausted tier at the 5+ threshold", () => {
@@ -54,7 +55,7 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
     expect(dfs.failures).toBe(5);
   });
 
-  it("mixed: multiple providers degraded simultaneously", () => {
+  it("mixed: OpenRouter history does not add a degraded provider", () => {
     const log = [
       makeEntry(
         "[kimi-model] OpenRouter call failed (This request requires more credits); falling back to Workers AI"
@@ -64,7 +65,8 @@ describe("computeExternalProviderHealth — per-provider detection", () => {
       )
     ];
     const out = computeExternalProviderHealth(log);
-    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(2);
+    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(1);
+    expect(out.find((p) => p.tier !== "ok")?.id).toBe("dataforseo");
   });
 
   it("non-secret prose does not trip any provider", () => {
@@ -104,7 +106,7 @@ describe("degradedProviders — filtered view for banner", () => {
       )
     ];
     const out = degradedProviders(log);
-    expect(out.map((p) => p.id)).toEqual(["kimi", "dataforseo"]);
+    expect(out.map((p) => p.id)).toEqual(["dataforseo"]);
   });
 });
 
@@ -182,7 +184,7 @@ describe("computeExternalProviderHealth — Amazon + IndexNow patterns", () => {
     expect(indexnow.tier).toBe("ok");
   });
 
-  it("all 4 providers detected at once when all degraded", () => {
+  it("current providers degrade together; OpenRouter history stays out", () => {
     const log = [
       makeEntry(
         "[kimi-model] OpenRouter call failed (This request requires more credits); falling back to Workers AI"
@@ -198,6 +200,7 @@ describe("computeExternalProviderHealth — Amazon + IndexNow patterns", () => {
       )
     ];
     const out = computeExternalProviderHealth(log);
-    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(4);
+    expect(out.filter((p) => p.tier !== "ok")).toHaveLength(3);
+    expect(out.map((p) => p.id)).toEqual(["dataforseo", "amazon", "indexnow"]);
   });
 });

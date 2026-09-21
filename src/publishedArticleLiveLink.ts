@@ -1,3 +1,5 @@
+import { prefixReviewsOnArticlePath } from "./pipeline/article-public-url";
+
 /**
  * Where does a published article actually serve?
  *
@@ -45,12 +47,35 @@ export interface PublishedArticleLink {
 }
 
 /**
+ * Production articles serve at `/reviews/{category}/{slug}`. Older prodUrl
+ * values stored the two-segment path. Both shapes return HTTP 200 on
+ * catsluvus.com today; the dashboard link uses the current canonical path
+ * so a promoted row opens `/reviews/...`. Staging hosts are left alone.
+ */
+export function canonicalPromotedArticleHref(prodUrl: string): string {
+  try {
+    const url = new URL(prodUrl);
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (host !== "catsluvus.com" && host !== "www.catsluvus.com") {
+      return prodUrl;
+    }
+    const rewritten = prefixReviewsOnArticlePath(
+      `${url.pathname}${url.search}${url.hash}`
+    );
+    return `${url.origin}${rewritten}`;
+  } catch {
+    return prodUrl;
+  }
+}
+
+/**
  * Resolve a published-article row into its real live link + state.
  *
  * A row counts as promoted when it says so explicitly, or when it carries a
  * `prodUrl` (older rows recorded the URL before the status field existed).
  * `href` falls back to the staging URL whenever production is unavailable,
- * so a row never renders as an empty link.
+ * so a row never renders as an empty link. A staging-only row never receives
+ * a catsluvus.com `/reviews/` href.
  */
 export function resolvePublishedArticleLink(
   row: PublishedArticleLinkInput
@@ -59,10 +84,14 @@ export function resolvePublishedArticleLink(
   const stagingUrl = row.url?.trim() ?? "";
   const promoted = row.promotionStatus === "published-prod" || prodUrl !== "";
   const promotionKnown = row.promotionStatus != null || prodUrl !== "";
+  const href =
+    promoted && prodUrl !== ""
+      ? canonicalPromotedArticleHref(prodUrl)
+      : stagingUrl;
   return {
     promoted,
     promotionKnown,
-    href: promoted && prodUrl !== "" ? prodUrl : stagingUrl,
+    href,
     label: promoted ? "prod" : promotionKnown ? "staging only" : "unknown"
   };
 }
