@@ -11,15 +11,17 @@
  *
  * That var (Worker var or secret; case-insensitive) restores the previous
  * chain: Claude, then OpenRouter when `OPENROUTER_API_KEY` is set, then
- * Workers AI Qwen via `aiGenerateWithPoll`. Any other value, including
- * unset, keeps the Claude-only path. OpenRouter code stays in this file
- * for that hatch and for `getKimiModel` / `getFreeModel` (later PRs).
+ * Workers AI. Any other value, including unset, keeps the Claude-only path.
+ * OpenRouter code stays in this file for that hatch. Do not delete it.
  *
- * - `getKimiModel(env)` → unchanged this release. Returns a LanguageModel
- *   for Vercel AI SDK `generateText()` / `generateObject()` sites: Claude
- *   when a subscription is active and not cooling down, otherwise
- *   OpenRouter/Workers AI Kimi. It cannot retry mid-call. Scout and
- *   `getKimiModel`-only sites are out of scope here.
+ * - `getKimiModel(env)` → LanguageModel for Vercel AI SDK `generateText()` /
+ *   `generateObject()` sites. Claude only: a pre-call refresh runs when the
+ *   access token is near expiry, and a 404 walks `CLAUDE_CODE_MODEL_FALLBACKS`.
+ *   On failure it throws. It does not call OpenRouter or Workers AI unless
+ *   `AI_CHAT_FALLBACK=kimi`.
+ * - `runScoutChat(env, params)` → category-scout AI tier. Claude helper
+ *   (`callClaudeCodeText`) only, unless `AI_CHAT_FALLBACK=kimi`, which
+ *   restores Workers AI Qwen after Claude fails or is absent.
  * - `runKimiWithPoll(env, params)` → raw-binding call sites (writer,
  *   siss-optimizer, editorial, keywords, text editor). Claude only, unless
  *   `AI_CHAT_FALLBACK=kimi`.
@@ -39,19 +41,28 @@
 import { errMsg } from "./http-utils";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createWorkersAI } from "workers-ai-provider";
+import type {
+  LanguageModelV3,
+  LanguageModelV3CallOptions
+} from "@ai-sdk/provider";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { aiGenerateWithPoll, type AiPollOptions } from "./ai-poll";
 import type { SEOArticleAgent } from "../server";
 import {
+  callClaudeCodeText,
   callClaudeCodeTextResult,
   CLAUDE_CODE_CALL_FAILED_LOG_PREFIX,
-  getClaudeCodeLanguageModel,
+  CLAUDE_CODE_MODEL_FALLBACKS,
+  createAnthropicFromClaudeCodeToken,
   getClaudeCodeModelId,
   getClaudeRateLimitCooldownRemainingMs,
   isClaudeAuthError,
+  isModelNotFoundError,
   lastClaudeSuccessMeta,
+  refreshClaudeCodeAccessToken,
   resolveClaudeCallTimeoutMs,
-  resolveClaudeCodeSubscription
+  resolveClaudeCodeSubscription,
+  shouldRefreshClaudeToken
 } from "./claude-code-subscription";
 
 const WORKERS_AI_KIMI_MODEL = "@cf/moonshotai/kimi-k2.5";
@@ -65,7 +76,6 @@ const OPENROUTER_KIMI_MODEL_DEFAULT = "moonshotai/kimi-k2.5:nitro";
 function openRouterKimiModelId(env: Env): string {
   return env.OPENROUTER_KIMI_MODEL?.trim() || OPENROUTER_KIMI_MODEL_DEFAULT;
 }
-const OPENROUTER_FREE_MODEL = "openrouter/free";
 const OPENROUTER_REASONING_DISABLED = { reasoning: { enabled: false } };
 const OPENROUTER_REASONING_LOW = { reasoning: { effort: "low" as const } };
 
@@ -135,7 +145,8 @@ export function isDegenerateOutput(text: string): boolean {
  * no OpenRouter credits, no paid-Kimi tokens, no external key to rotate.
  *
  * Used as:
- *   1. the category-scout model (`getScoutModel`), and
+ *   1. the category-scout model when `AI_CHAT_FALLBACK=kimi` (`getScoutModel`),
+ *      and
  *   2. the `runKimiWithPoll` Workers AI fallback when `AI_CHAT_FALLBACK=kimi`
  *      — so that escape hatch still generates when OpenRouter credits are
  *      exhausted instead of wedging on the timing-out Kimi binding (the root
@@ -185,46 +196,205 @@ function isOpenRouterAuthError(err: unknown): boolean {
   );
 }
 
+const NO_KIMI_FALLBACK_SUFFIX =
+  "OpenRouter and Workers AI were not called. Set AI_CHAT_FALLBACK=kimi to restore that chain.";
+
 /**
- * True when `getKimiModel`/`getKimiProviderOptions` should prefer Claude:
- * an active Claude Code subscription token exists AND we are not sitting
- * out an Anthropic 429 cooldown. Shared so the model-selection decision and
- * the provider-options decision never disagree with each other.
+ * True only for the explicit escape hatch. Any other value, including
+ * unset, keeps chat on the Claude Code subscription alone.
+ */
+export function isAiChatFallbackKimi(env: {
+  AI_CHAT_FALLBACK?: string;
+}): boolean {
+  return env.AI_CHAT_FALLBACK?.trim().toLowerCase() === "kimi";
+}
+
+/**
+ * True when a Claude Code subscription token is active and we are not
+ * sitting out an Anthropic 429 cooldown. An expired-but-refreshable token
+ * is handled inside the chat model (`shouldRefreshClaudeToken`), not here.
  */
 function useClaudeForKimi(env: Env): boolean {
   if (getClaudeRateLimitCooldownRemainingMs() > 0) return false;
   return resolveClaudeCodeSubscription(env) != null;
 }
 
-/**
- * Returns a LanguageModel for Vercel AI SDK call sites (Claude-first).
- *
- * Prefers the Claude Code subscription (`getClaudeCodeLanguageModel`) when
- * one is active and not rate-limit-cooling-down; otherwise falls back to
- * Kimi K2.5 — OpenRouter when OPENROUTER_API_KEY is set, otherwise Workers
- * AI. Unchanged this release (PR 3 covers scout / getKimiModel-only sites).
- * Unlike `runKimiWithPoll`, this returns a model reference rather than an
- * awaited call, so it cannot switch providers mid-request. Raw-binding
- * callers (writer, siss-optimizer, text-editor-agent, editorial-agent,
- * keywords) should use `runKimiWithPoll` instead.
- *
- * Both Kimi paths disable Kimi's thinking mode so max_tokens fund visible
- * content, not internal reasoning that overflows and leaves content="":
- *   - Workers AI: `chat_template_kwargs` passthrough on model settings
- *     (matches the raw-binding behavior in `aiGenerateWithPoll`).
- *   - OpenRouter: `providerOptions.openrouter.reasoning.enabled=false` —
- *     applied separately via `getKimiProviderOptions(env)`.
- */
-export function getKimiModel(env: Env): LanguageModel {
-  if (useClaudeForKimi(env)) {
-    const claude = getClaudeCodeLanguageModel(env);
-    if (claude) return claude;
+function claudeModelIds(env: Env): string[] {
+  const primary = getClaudeCodeModelId(env);
+  const out = [primary];
+  for (const id of CLAUDE_CODE_MODEL_FALLBACKS) {
+    if (!out.includes(id)) out.push(id);
   }
+  return out;
+}
+
+function asLanguageModelV3(model: LanguageModel): LanguageModelV3 {
+  if (typeof model === "string" || model.specificationVersion !== "v3") {
+    const spec = typeof model === "string" ? model : model.specificationVersion;
+    throw new Error(`Expected LanguageModelV3, received ${spec}`);
+  }
+  return model;
+}
+
+/**
+ * OpenRouter when a key is set, otherwise Workers AI Kimi. This is the
+ * pre-Claude `getKimiModel` choice, restored only when
+ * `AI_CHAT_FALLBACK=kimi`.
+ */
+function legacyKimiLanguageModel(env: Env): LanguageModel {
   const key = resolveOpenRouterKey(env);
   if (key) {
     return createOpenRouter({ apiKey: key })(openRouterKimiModelId(env));
   }
   return makeWorkersAiKimiModel(env);
+}
+
+function withOpenRouterReasoning(
+  env: Env,
+  options: LanguageModelV3CallOptions
+): LanguageModelV3CallOptions {
+  if (!resolveOpenRouterKey(env)) return options;
+  const existing = options.providerOptions?.openrouter;
+  return {
+    ...options,
+    providerOptions: {
+      ...options.providerOptions,
+      openrouter: {
+        ...(existing ?? {}),
+        ...openRouterReasoningOptions(env)
+      }
+    }
+  };
+}
+
+/**
+ * Claude subscription call for `generateText` / `generateObject`. Refreshes
+ * an expiring access token first, then walks model ids on 404. Throws when
+ * Claude cannot answer — the caller decides whether `AI_CHAT_FALLBACK=kimi`
+ * may continue on OpenRouter / Workers AI.
+ */
+async function callClaudeChatModel<T>(
+  env: Env,
+  options: LanguageModelV3CallOptions,
+  invoke: (
+    model: LanguageModelV3,
+    options: LanguageModelV3CallOptions
+  ) => PromiseLike<T>,
+  onModelId: (modelId: string) => void
+): Promise<T> {
+  if (shouldRefreshClaudeToken()) {
+    try {
+      await refreshClaudeCodeAccessToken();
+    } catch {
+      /* the call below surfaces the real auth error */
+    }
+  }
+
+  const cooldownMs = getClaudeRateLimitCooldownRemainingMs();
+  if (cooldownMs > 0) {
+    throw new Error(
+      `[claude-code] Claude rate-limit cooldown ${Math.ceil(cooldownMs / 1000)}s remaining after the existing retry/cooldown; ${NO_KIMI_FALLBACK_SUFFIX}`
+    );
+  }
+
+  const resolved = resolveClaudeCodeSubscription(env);
+  if (!resolved) {
+    throw new Error(
+      `[claude-code] no active Claude subscription token; ${NO_KIMI_FALLBACK_SUFFIX}`
+    );
+  }
+
+  const candidates = claudeModelIds(env);
+  let lastErr: unknown;
+  for (const modelId of candidates) {
+    const model = asLanguageModelV3(
+      createAnthropicFromClaudeCodeToken(resolved.token)(modelId)
+    );
+    try {
+      onModelId(modelId);
+      return await invoke(model, options);
+    } catch (err: unknown) {
+      lastErr = err;
+      if (isModelNotFoundError(err)) continue;
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(
+        `[claude-code] no Claude model answered; ${errMsg(lastErr)}; ${NO_KIMI_FALLBACK_SUFFIX}`
+      );
+}
+
+function createClaudeChatLanguageModel(env: Env): LanguageModelV3 {
+  let modelId = getClaudeCodeModelId(env);
+  const dispatch = <T>(
+    options: LanguageModelV3CallOptions,
+    invoke: (
+      model: LanguageModelV3,
+      options: LanguageModelV3CallOptions
+    ) => PromiseLike<T>
+  ): Promise<T> => {
+    const run = (
+      model: LanguageModelV3,
+      next: LanguageModelV3CallOptions
+    ): Promise<T> => {
+      modelId = model.modelId;
+      return Promise.resolve(invoke(model, next));
+    };
+    return callClaudeChatModel(env, options, run, (id) => {
+      modelId = id;
+    }).catch((err: unknown) => {
+      if (!isAiChatFallbackKimi(env)) throw err;
+      const fallback = asLanguageModelV3(legacyKimiLanguageModel(env));
+      const next = resolveOpenRouterKey(env)
+        ? withOpenRouterReasoning(env, options)
+        : options;
+      return run(fallback, next);
+    });
+  };
+
+  return {
+    specificationVersion: "v3",
+    provider: "anthropic",
+    get modelId() {
+      return modelId;
+    },
+    supportedUrls: {},
+    doGenerate: (options) =>
+      dispatch(options, (model, next) => model.doGenerate(next)),
+    doStream: (options) =>
+      dispatch(options, (model, next) => model.doStream(next))
+  };
+}
+
+/**
+ * LanguageModel for Vercel AI SDK chat sites (`generateText` /
+ * `generateObject`).
+ *
+ * Default: Claude Code subscription. The model refreshes an expiring
+ * access token before the call and, on HTTP 404, tries
+ * `CLAUDE_CODE_MODEL_FALLBACKS`. Failure throws so existing non-fatal
+ * callers keep their catch paths. OpenRouter and Workers AI are not called.
+ *
+ * `AI_CHAT_FALLBACK=kimi` restores the previous selector: Claude when a
+ * subscription is active and not cooling down, otherwise OpenRouter (when
+ * `OPENROUTER_API_KEY` is set) or Workers AI Kimi. A Claude failure on
+ * that hatch also continues on that same Kimi model.
+ *
+ * Kimi thinking stays off on the hatch:
+ *   - Workers AI: `chat_template_kwargs` on the model
+ *   - OpenRouter: `providerOptions.openrouter.reasoning.enabled=false`
+ *     via `getKimiProviderOptions`, and again inside this model if a
+ *     Claude attempt fails over to OpenRouter mid-call.
+ */
+export function getKimiModel(env: Env): LanguageModel {
+  const kimiOnly =
+    isAiChatFallbackKimi(env) &&
+    !useClaudeForKimi(env) &&
+    !shouldRefreshClaudeToken();
+  if (kimiOnly) return legacyKimiLanguageModel(env);
+  return createClaudeChatLanguageModel(env);
 }
 
 function makeWorkersAiKimiModel(env: Env): LanguageModel {
@@ -240,30 +410,9 @@ function makeWorkersAiKimiModel(env: Env): LanguageModel {
 }
 
 /**
- * OpenRouter's Free Models Router (`openrouter/free`) — auto-routes to an
- * available free model at zero credit cost using the same
- * `OPENROUTER_API_KEY`. Used where basic text generation doesn't need
- * Kimi-grade output and a paid-credit outage must not block the pipeline:
- * the category scout (all attempts) and keyword-generation retries.
- * Falls back to the Workers AI Kimi path when no OpenRouter key is
- * configured (local dev).
- */
-export function getFreeModel(env: Env): LanguageModel {
-  const key = resolveOpenRouterKey(env);
-  if (key) {
-    return createOpenRouter({ apiKey: key })(OPENROUTER_FREE_MODEL);
-  }
-  return makeWorkersAiKimiModel(env);
-}
-
-/**
- * Cloudflare Workers AI model for the category scout. Unconditionally runs on
- * the `env.AI` binding (Qwen3-30B-A3B) — it never touches OpenRouter or Kimi,
- * regardless of whether `OPENROUTER_API_KEY` is set. The scout is a low-stakes,
- * high-frequency discovery task that does not need Kimi-grade output, so this
- * keeps it off paid credits and off the shared Kimi quota. `enable_thinking:
- * false` keeps Qwen3's default reasoning from overflowing the scout's modest
- * output budget and returning empty content.
+ * Workers AI Qwen for the category scout. Used only when
+ * `AI_CHAT_FALLBACK=kimi` (`runScoutChat`). `enable_thinking: false` keeps
+ * Qwen3's default reasoning from overflowing the scout's output budget.
  */
 export function getScoutModel(env: Env): LanguageModel {
   return createWorkersAI({ binding: env.AI })(WORKERS_AI_QWEN_MODEL, {
@@ -272,12 +421,80 @@ export function getScoutModel(env: Env): LanguageModel {
 }
 
 /**
- * Provider options to pass to `generateText()` so Kimi thinking stays off.
- * Workers AI disables thinking via model-level `chat_template_kwargs`
- * (handled by the provider); OpenRouter uses `reasoning: { enabled: false }`.
- * Claude needs no special provider options, so this returns `undefined`
- * whenever `getKimiModel` would have picked Claude — keep the two in sync
- * via `useClaudeForKimi`.
+ * Category-scout AI tier. Claude Code subscription (`callClaudeCodeText`)
+ * by default — that helper refreshes an expiring token and walks
+ * `CLAUDE_CODE_MODEL_FALLBACKS` on 404. An empty or missing Claude
+ * response throws so the scout can retry and then use the non-LLM tiers. Workers AI
+ * Qwen is not called.
+ *
+ * `AI_CHAT_FALLBACK=kimi` tries Claude first, then the previous Qwen model.
+ */
+export async function runScoutChat(
+  env: Env,
+  params: { system: string; prompt: string; maxOutputTokens: number },
+  warn?: (message: string) => void
+): Promise<{ text: string; modelId: string }> {
+  const fromClaude = async (): Promise<{
+    text: string;
+    modelId: string;
+  } | null> => {
+    const text = await callClaudeCodeText(env, {
+      messages: [
+        { role: "system", content: params.system },
+        { role: "user", content: params.prompt }
+      ],
+      max_tokens: params.maxOutputTokens
+    });
+    if (!text) return null;
+    return {
+      text,
+      modelId: lastClaudeSuccessMeta?.modelId ?? getClaudeCodeModelId(env)
+    };
+  };
+
+  if (!isAiChatFallbackKimi(env)) {
+    const out = await fromClaude();
+    if (!out) {
+      throw new Error(
+        `[claude-code] scout returned empty; ${NO_KIMI_FALLBACK_SUFFIX}`
+      );
+    }
+    return out;
+  }
+
+  try {
+    const out = await fromClaude();
+    if (out) return out;
+    warn?.(
+      `[claude-code] scout returned empty; falling back to Workers AI Qwen because AI_CHAT_FALLBACK=kimi`
+    );
+  } catch (err: unknown) {
+    warn?.(
+      `[claude-code] scout failed (${errMsg(err)}); falling back to Workers AI Qwen because AI_CHAT_FALLBACK=kimi`
+    );
+  }
+
+  const result = await generateText({
+    model: getScoutModel(env),
+    system: params.system,
+    prompt: params.prompt,
+    maxOutputTokens: params.maxOutputTokens
+  });
+  const text = result.text?.trim() ?? "";
+  if (!text) {
+    throw new Error("[kimi-model] scout Workers AI returned empty");
+  }
+  return {
+    text,
+    modelId: result.response?.modelId || WORKERS_AI_QWEN_MODEL
+  };
+}
+
+/**
+ * Provider options so Kimi thinking stays off on the OpenRouter hatch.
+ * Claude needs none. Returns `undefined` unless `AI_CHAT_FALLBACK=kimi`
+ * and this call will actually use OpenRouter (no active Claude token and
+ * nothing to refresh).
  *
  * Shape matches the AI SDK's `SharedV3ProviderOptions`
  * (`Record<string, JSONObject>`); the explicit literal avoids the looser
@@ -288,7 +505,8 @@ export function getKimiProviderOptions(env: Env):
       openrouter: { reasoning: { enabled: boolean } | { effort: "low" } };
     }
   | undefined {
-  if (useClaudeForKimi(env)) return undefined;
+  if (!isAiChatFallbackKimi(env)) return undefined;
+  if (useClaudeForKimi(env) || shouldRefreshClaudeToken()) return undefined;
   if (resolveOpenRouterKey(env)) {
     return { openrouter: openRouterReasoningOptions(env) };
   }
@@ -307,25 +525,12 @@ const MAX_CONTINUATION_ROUNDS = 2;
 const CONTINUATION_USER_PROMPT =
   "Continue from exactly where you left off. Do not repeat any text. Do not add a preamble. Finish the response cleanly so the final character is part of a complete sentence (or, if you were emitting JSON, a complete and valid JSON object).";
 
-const NO_KIMI_FALLBACK_SUFFIX =
-  "OpenRouter and Workers AI were not called. Set AI_CHAT_FALLBACK=kimi to restore that chain.";
-
 type ChatTurn = {
   role: "user" | "system" | "assistant";
   content: string;
 };
 
 type TextFinish = { text: string; finishReason: string };
-
-/**
- * True only for the explicit escape hatch. Any other value, including
- * unset, keeps `runKimiWithPoll` on the Claude Code subscription alone.
- */
-export function isAiChatFallbackKimi(env: {
-  AI_CHAT_FALLBACK?: string;
-}): boolean {
-  return env.AI_CHAT_FALLBACK?.trim().toLowerCase() === "kimi";
-}
 
 function continuationTurns(base: ChatTurn[], combined: string): ChatTurn[] {
   return [

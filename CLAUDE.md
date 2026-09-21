@@ -197,21 +197,23 @@ All model calls go through `src/pipeline/kimi-model.ts` — never instantiate a
 provider inline.
 
 - `getKimiModel(env)` returns a `LanguageModel` for AI SDK
-  `generateText()`/`generateObject()` sites. `getScoutModel` / `getFreeModel`
-  are the cheaper variants.
+  `generateText()`/`generateObject()` sites. It is the Claude Code
+  subscription model: refresh an expiring access token before the call, and
+  on HTTP 404 walk `CLAUDE_CODE_MODEL_FALLBACKS`. On failure it throws.
+  `runScoutChat` is the category-scout AI tier and uses `callClaudeCodeText`
+  the same way. `getScoutModel` is the Workers AI Qwen model used only when
+  the hatch below is set.
 - `runKimiWithPoll(env, params)` is the raw-binding call site helper (writer,
   siss-optimizer, editorial, keywords, text editor). It calls the Claude Code
   subscription only. On failure it throws — it does not call OpenRouter,
-  Workers AI, or Doppler OpenRouter key rotation. Set the Worker var/secret
-  `AI_CHAT_FALLBACK=kimi` to restore the previous Claude → OpenRouter →
-  Workers AI chain without a code rollback. `getKimiModel` / `getScoutModel`
-  / vision / embeddings are unchanged (later PRs). Do not delete the
-  OpenRouter branches yet.
+  Workers AI, or Doppler OpenRouter key rotation.
 
-Staging chat generation is **Claude-only** on `runKimiWithPoll`. `getKimiModel`
-still returns Claude when a subscription is active and otherwise OpenRouter or
-Workers AI Kimi — that selector is a later PR. The Kimi fallback inside
-`runKimiWithPoll` stays in the file behind `AI_CHAT_FALLBACK=kimi`.
+Set the Worker var/secret `AI_CHAT_FALLBACK=kimi` to restore the previous
+Kimi chain for **all** of those chat paths (`runKimiWithPoll`,
+`getKimiModel`, scout) without a code rollback. Vision, Flux images, and
+embeddings are unchanged. Do not delete the OpenRouter branches yet.
+
+Staging chat generation is **Claude-only** unless `AI_CHAT_FALLBACK=kimi`.
 
 Kimi thinking mode must stay disabled or the model burns `max_tokens` on
 reasoning and returns `content: null`: Workers AI uses
