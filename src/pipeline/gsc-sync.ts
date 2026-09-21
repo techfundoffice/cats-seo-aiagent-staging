@@ -1,4 +1,5 @@
 import { errMsg, getEnvBinding } from "./http-utils";
+import { articlePathToKvKey } from "./article-public-url";
 
 /**
  * gsc-sync.ts — Google Search Console → article_ledger performance sync.
@@ -91,13 +92,14 @@ export async function getGscAccessToken(env: unknown): Promise<string> {
   return tok.access_token;
 }
 
-/** Map a GSC page URL to the article kv_key (`categorySlug:slug`). */
+/**
+ * Map a GSC page URL to the article kv_key (`categorySlug:slug`).
+ * Accepts `/reviews/{category}/{slug}` and the legacy `/{category}/{slug}` form.
+ */
 export function pageUrlToKvKey(pageUrl: string): string | null {
   try {
     const u = new URL(pageUrl);
-    const m = u.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
-    if (!m) return null;
-    return `${m[1]}:${m[2]}`;
+    return articlePathToKvKey(u.pathname);
   } catch {
     return null;
   }

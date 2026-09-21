@@ -5,6 +5,7 @@ import {
   getEnvBinding,
   normalizeSingleLine
 } from "./http-utils";
+import { articlePathToKvKey } from "./article-public-url";
 
 /**
  * KV key holding the IndexNow retry queue. JSON array of
@@ -561,11 +562,11 @@ export async function pruneRedirectedFromSitemap(
     }
     if (parsed.hostname.toLowerCase() !== domainHost) continue;
 
-    // `/categorySlug/slug` → `categorySlug:slug`, the KV key convention.
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    if (parts.length !== 2) continue;
+    // `/category/slug` or `/reviews/category/slug` → `category:slug`.
+    const kvKey = articlePathToKvKey(parsed.pathname);
+    if (!kvKey) continue;
 
-    if (tombstones.has(`${parts[0]}:${parts[1]}`)) {
+    if (tombstones.has(kvKey)) {
       removed.push(rawUrl);
       removedLocTags.add(locMatch[0]);
     }

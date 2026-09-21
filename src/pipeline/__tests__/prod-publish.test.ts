@@ -18,17 +18,44 @@ describe("rewriteHtmlForDomain", () => {
       PROD
     );
     expect(out).not.toContain(STAGING);
-    expect(out).toContain(`https://${PROD}/cat-toys/best-cat-toy`);
-    expect(out).toContain(`https://${PROD}/cat-beds/heated-cat-bed`);
+    expect(out).toContain(`https://${PROD}/reviews/cat-toys/best-cat-toy`);
+    expect(out).toContain(`https://${PROD}/reviews/cat-beds/heated-cat-bed`);
+    expect(out).not.toContain(`https://${PROD}/cat-toys/best-cat-toy`);
     expect(replacements).toBe(4);
   });
 
   it("covers http:// and protocol-relative references", () => {
     const html = `<a href="http://${STAGING}/a/b">x</a><img src="//${STAGING}/i.png">`;
     const { html: out } = rewriteHtmlForDomain(html, STAGING, PROD);
-    expect(out).toContain(`https://${PROD}/a/b`);
+    expect(out).toContain(`https://${PROD}/reviews/a/b`);
     expect(out).toContain(`https://${PROD}/i.png`);
     expect(out).not.toContain(STAGING);
+  });
+
+  it("prefixes article paths and leaves one-segment assets and hashes", () => {
+    const html = [
+      `<link rel="canonical" href="https://${STAGING}/cat-toys/best-toy#section-1">`,
+      `<a href="https://${STAGING}/cat-toys">category</a>`,
+      `<link rel="icon" href="https://${STAGING}/logo.png">`,
+      `<a href="https://${STAGING}/feed.rss">rss</a>`,
+      `<a href="https://catsluvus.com/author/amelia-hartwell">author</a>`
+    ].join("\n");
+    const { html: out } = rewriteHtmlForDomain(html, STAGING, PROD);
+    expect(out).toContain(
+      `https://${PROD}/reviews/cat-toys/best-toy#section-1`
+    );
+    expect(out).toContain(`https://${PROD}/cat-toys`);
+    expect(out).not.toContain(`https://${PROD}/reviews/cat-toys"`);
+    expect(out).toContain(`https://${PROD}/logo.png`);
+    expect(out).toContain(`https://${PROD}/feed.rss`);
+    expect(out).toContain("https://catsluvus.com/author/amelia-hartwell");
+  });
+
+  it("does not double-prefix a path that already starts with /reviews", () => {
+    const html = `<link rel="canonical" href="https://${STAGING}/reviews/cat-toys/best-toy">`;
+    const { html: out } = rewriteHtmlForDomain(html, STAGING, PROD);
+    expect(out).toContain(`https://${PROD}/reviews/cat-toys/best-toy`);
+    expect(out).not.toContain("/reviews/reviews/");
   });
 
   it("leaves third-party URLs untouched", () => {

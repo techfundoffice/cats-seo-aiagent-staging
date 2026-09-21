@@ -1,6 +1,11 @@
 import { errMsg, getEnvBinding } from "./http-utils";
 import { enforceNoFabricatedTestingClaims } from "./fabricated-testing-claims";
 import { removeTrustBox } from "./trust-box-removal";
+import {
+  prefixReviewsOnArticlePath,
+  prodArticlePath,
+  prodArticleUrl
+} from "./article-public-url";
 
 /**
  * prod-publish.ts — direct-to-production article publishing.
@@ -59,6 +64,11 @@ export function prodKvRestApi(env: unknown): {
  * canonical link, og:url, JSON-LD @id/url fields, internal links,
  * breadcrumbs — anything carrying the old origin. Scheme-qualified and
  * protocol-relative forms both covered.
+ *
+ * Two-segment article paths (`/{category}/{slug}`) also gain the
+ * production `/reviews` prefix. One-segment assets (logo, feed, category
+ * index) stay put, and a path that already starts with `/reviews` is
+ * not prefixed again.
  */
 export function rewriteHtmlForDomain(
   html: string,
@@ -69,10 +79,14 @@ export function rewriteHtmlForDomain(
   const escaped = fromHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   let replacements = 0;
   const rewritten = html.replace(
-    new RegExp(`(https?:)?//${escaped}`, "gi"),
-    () => {
+    new RegExp(`(https?:)?//${escaped}([^\\s"'<>)]*)`, "gi"),
+    (_full, _scheme: string, rest: string) => {
       replacements++;
-      return `https://${toHost}`;
+      const suffix = rest ?? "";
+      const path = suffix.startsWith("/")
+        ? prefixReviewsOnArticlePath(suffix)
+        : suffix;
+      return `https://${toHost}${path}`;
     }
   );
   return { html: rewritten, replacements };
@@ -193,7 +207,8 @@ export function mergeGlobalIndex(
 /**
  * Publish one staging article to production:
  *  1. read staging HTML from ARTICLES_KV
- *  2. rewrite staging host → production host
+ *  2. rewrite staging host → production host and insert `/reviews`
+ *     on two-segment article paths
  *  3. PUT into the production ARTICLES_KV namespace via the CF REST API
  *  4. replace the staging copy with a `redirect:<kvKey>` tombstone
  *     (served as a 301) and delete the staging HTML
@@ -258,7 +273,7 @@ export async function publishArticleToProduction(
     stagingHost,
     targetHost
   );
-  const prodUrl = `https://${targetHost}/${categorySlug}/${slug}`;
+  const prodUrl = prodArticleUrl(targetHost, categorySlug, slug);
 
   if (dryRun) {
     return {
@@ -332,7 +347,7 @@ export async function publishArticleToProduction(
     const globalJson = globalRes.ok ? await globalRes.text() : null;
     const globalMerge = mergeGlobalIndex(globalJson, {
       slug,
-      url: `/${categorySlug}/${slug}`,
+      url: prodArticlePath(categorySlug, slug),
       title: extractArticleTitleForIndex(rewritten, slug),
       category: categorySlug,
       image: null

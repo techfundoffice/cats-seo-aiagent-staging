@@ -14,6 +14,8 @@
  * HTML at serve time.
  */
 
+import { articlePathToKvKey } from "./article-public-url";
+
 /** Matches production Universal Chrome / petinsurance worker. */
 export const GA4_MEASUREMENT_ID = "G-QBGF94YE7C";
 export const GTM_CONTAINER_ID = "GTM-KPSXGQWC";
@@ -135,13 +137,12 @@ export function ensureArticleAnalytics(html: string): string {
   return out;
 }
 
-/** Parse path `/category/slug` → `category:slug` ledger key. */
+/**
+ * Parse an article path into the `category:slug` ledger key.
+ * Accepts `/reviews/{category}/{slug}` and legacy `/{category}/{slug}`.
+ */
 export function pathToKvKey(path: string): string | null {
-  if (!path || typeof path !== "string") return null;
-  const clean = path.split("?")[0].split("#")[0].replace(/\/+$/, "");
-  const m = clean.match(/^\/([^/]+)\/([^/]+)$/);
-  if (!m) return null;
-  return `${m[1]}:${m[2]}`;
+  return articlePathToKvKey(path);
 }
 
 export interface AffiliateClickEvent {
