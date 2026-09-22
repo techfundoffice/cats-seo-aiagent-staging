@@ -61,6 +61,7 @@ export type PipelineRunSnapshot = {
     message: string;
     howToFix: string;
     at: string;
+    title?: string;
   } | null;
 };
 

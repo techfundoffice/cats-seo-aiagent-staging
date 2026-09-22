@@ -23,13 +23,15 @@ export const CLAUDE_FAILURE_NO_FALLBACK =
 export function formatClaudeFailureBannerText(input: {
   message: string;
   howToFix: string;
+  title?: string;
 }): string {
-  return [
-    CLAUDE_FAILURE_BANNER_TITLE,
-    input.message.trim(),
-    CLAUDE_FAILURE_NO_FALLBACK,
-    `How to fix: ${input.howToFix.trim()}`
-  ].join("\n");
+  const title = input.title?.trim() || CLAUDE_FAILURE_BANNER_TITLE;
+  const lines = [title, input.message.trim()];
+  if (title === CLAUDE_FAILURE_BANNER_TITLE) {
+    lines.push(CLAUDE_FAILURE_NO_FALLBACK);
+  }
+  lines.push(`How to fix: ${input.howToFix.trim()}`);
+  return lines.join("\n");
 }
 
 /** A dashboard that has not received a state push in this long looks frozen. */
@@ -79,7 +81,7 @@ function presentation(
 export function deriveOperatorRunPresentation(input: {
   status: AgentStatus;
   currentStep?: string | null;
-  claudeChatFailure?: { message?: string } | null;
+  claudeChatFailure?: { message?: string; title?: string } | null;
 }): OperatorRunPresentation {
   const step = (input.currentStep ?? "").trim();
   const midPipeline = pipelineRunLooksInterrupted({
@@ -94,6 +96,13 @@ export function deriveOperatorRunPresentation(input: {
   });
   const failure = (input.claudeChatFailure?.message ?? "").trim();
   const live = input.status === "generating" || input.status === "scouting";
+  const amazonProductGate =
+    failure.startsWith("No Amazon products found") ||
+    (input.claudeChatFailure?.title ?? "").startsWith("No Amazon products");
+
+  if (failure && amazonProductGate) {
+    return presentation("failed", "FAILED", failure);
+  }
 
   if (failure) {
     const frozen = midPipeline ? ` Frozen step still set: ${step}.` : "";

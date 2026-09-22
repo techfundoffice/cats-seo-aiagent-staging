@@ -65,6 +65,22 @@ describe("deriveOperatorRunPresentation", () => {
     expect(failed.kind).toBe("failed");
     expect(failed.detail).toMatch(/No other chat model/);
   });
+
+  it("shows an Amazon product-gate failure without calling it a Claude stop", () => {
+    const failed = deriveOperatorRunPresentation({
+      status: "paused",
+      currentStep: null,
+      claudeChatFailure: {
+        message:
+          "No Amazon products found for this keyword — write aborted. Pick a real product keyword.",
+        title: "No Amazon products — write aborted"
+      }
+    });
+    expect(failed.kind).toBe("failed");
+    expect(failed.label).toBe("FAILED");
+    expect(failed.detail).toMatch(/No Amazon products found/);
+    expect(failed.detail).not.toMatch(/Claude failure/);
+  });
 });
 
 describe("formatClaudeFailureBannerText", () => {

@@ -40,6 +40,10 @@ import {
   stripAsinParentheticals,
   type AmazonProduct
 } from "./amazon";
+import {
+  hasRealAmazonProduct,
+  NO_AMAZON_PRODUCTS_ABORT_MESSAGE
+} from "./product-write-gate";
 import { generateAndStoreHeroImage } from "./article-image";
 import { analyzeSERP, computeTargetWordCount, type SerpData } from "./serp";
 import {
@@ -691,18 +695,13 @@ async function generateArticleUnsafe(
 
   return withArticleCompetitorUrlSession(agent, async () => {
     // ═══════════════════════════════════════════════════════════════════════════
-    // Steps 2–6/24: Research fan-out. Amazon products (2), the SERP →
-    // competitor-capture chain (3–4, internally sequential), the PAA
-    // autocomplete prefetch (5), and internal links (6) have no data
-    // dependencies on each other, so they run concurrently and the pipeline
-    // waits only for the slowest task instead of the sum of all five.
-    // Error semantics match the sequential version: each task handles its
-    // own failures internally except analyzeSERP, whose throw remains fatal
-    // to the run.
+    // Step 2/24: Amazon products FIRST. Article prose, HTML, and KV publish
+    // stay blocked until a tier returns a real ASIN. SERP / PAA / internal
+    // links start only after that gate passes.
     // ═══════════════════════════════════════════════════════════════════════════
-    agent.updateStep("2-6/24: Research (parallel)");
+    agent.updateStep("2/24: Amazon products");
 
-    const amazonTask = (async (): Promise<AmazonProduct[]> => {
+    const products = await (async (): Promise<AmazonProduct[]> => {
       let products: AmazonProduct[] = [];
 
       // Strip content-marketing suffixes ("reviews", "buying guide", year, etc.)
@@ -1015,18 +1014,10 @@ async function generateArticleUnsafe(
         }
       }
 
-      // If no real product source returned anything, skip the Top Picks
-      // section entirely rather than render keyword-as-name placeholders
-      // that read as fake product recommendations. The rest of the article
-      // (intro, sections, FAQs, conclusion) still generates — it just
-      // doesn't pretend to have editorially-reviewed picks it doesn't
-      // have.
       if (products.length === 0) {
-        agent.log(
-          "info",
-          `Amazon: all tiers returned 0 products — suppressing Our Top Picks section for "${keyword}"`
-        );
-      } else {
+        return products;
+      }
+      {
         const before = products.length;
         products = dedupeProducts(products);
         if (products.length < before) {
@@ -1110,6 +1101,20 @@ async function generateArticleUnsafe(
 
       return products;
     })();
+
+    if (!hasRealAmazonProduct(products)) {
+      agent.log("error", NO_AMAZON_PRODUCTS_ABORT_MESSAGE, "productManager", {
+        kanbanStage: "debug",
+        keyword
+      });
+      return failResult({
+        success: false,
+        error: NO_AMAZON_PRODUCTS_ABORT_MESSAGE,
+        kvKey
+      });
+    }
+
+    agent.updateStep("3-6/24: Research");
 
     // Steps 3–4: SERP analysis (URLs + titles only), then competitor capture
     // chained on its organic URLs — the word target is set once the real
@@ -1204,17 +1209,12 @@ async function generateArticleUnsafe(
       domain
     );
 
-    const [
-      products,
-      { serpData, competitorData },
-      prefetchedPaa,
-      internalLinks
-    ] = await Promise.all([
-      amazonTask,
-      serpCompetitorTask,
-      paaPrefetchTask,
-      internalLinksTask
-    ]);
+    const [{ serpData, competitorData }, prefetchedPaa, internalLinks] =
+      await Promise.all([
+        serpCompetitorTask,
+        paaPrefetchTask,
+        internalLinksTask
+      ]);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Step 5/24: PAA (People Also Ask) — merge the prefetched autocomplete
