@@ -894,33 +894,43 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
           );
           amazonUrl = `https://www.amazon.com/s?k=${searchTerm}&tag=${tag}`;
         }
-        const amazonBtnHtml = `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn">Check price on Amazon</a>`;
+        // Narrow `.pick-cta` (~140px, ~100px on mobile) clips a single
+        // nowrap "Check price on Amazon" label. Two spans let CSS stack
+        // "Check price" / "on Amazon". The no-image fallback and the
+        // sticky bar stay one line — they are not in that column.
+        const singleLineAmazonBtnHtml = `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" class="amazon-btn">Check price on Amazon</a>`;
+        const safeProductName = escapeHtml(productName);
+        const pickCardAmazonBtnHtml =
+          `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" ` +
+          `class="amazon-btn" aria-label="Check price on Amazon for ${safeProductName}">` +
+          `<span class="amazon-btn-line">Check price</span>` +
+          `<span class="amazon-btn-line">on Amazon</span>` +
+          `</a>`;
 
         // When an Amazon image URL is available, stack a clickable
         // image above the button in a CTA column. Both anchors share
         // `amazonUrl` so the affiliate tag cannot drift between them.
-        // Missing imageUrl → emit the button alone, byte-identical to
-        // the prior render. The #1 pick's image additionally carries the
+        // Missing imageUrl → emit the single-line button alone, outside
+        // `.pick-cta`. The #1 pick's image additionally carries the
         // "Cats Luv Us Best Pick" award seal (deliberately year-free) —
         // it lives INSIDE the anchor, so the award itself is a purchase
         // link like the rest of the card.
         let ctaHtml: string;
         if (product.imageUrl) {
-          const safeAlt = escapeHtml(productName);
           const awardHtml =
             idx === 0
               ? `<span class="pick-award" aria-hidden="true">${PICK_AWARD_BADGE_SVG}</span>`
               : "";
           const imageLinkHtml =
             `<a href="${amazonUrl}" target="_blank" rel="nofollow sponsored" ` +
-            `class="pick-image-link" aria-label="View ${safeAlt} on Amazon" tabindex="-1">` +
-            `<img class="pick-image" src="${escapeHtml(product.imageUrl)}" alt="${safeAlt}" ` +
+            `class="pick-image-link" aria-label="View ${safeProductName} on Amazon" tabindex="-1">` +
+            `<img class="pick-image" src="${escapeHtml(product.imageUrl)}" alt="${safeProductName}" ` +
             `width="${PICK_IMAGE_SIZE_PX}" height="${PICK_IMAGE_SIZE_PX}" loading="lazy" decoding="async">` +
             awardHtml +
             `</a>`;
-          ctaHtml = `<div class="pick-cta">${imageLinkHtml}${amazonBtnHtml}</div>`;
+          ctaHtml = `<div class="pick-cta">${imageLinkHtml}${pickCardAmazonBtnHtml}</div>`;
         } else {
-          ctaHtml = amazonBtnHtml;
+          ctaHtml = singleLineAmazonBtnHtml;
         }
 
         // Editorial reasoning — the 2-3 sentence "Why we picked this"
@@ -1484,6 +1494,12 @@ article *{max-width:100%}
 .amazon-cta-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:14px 20px;background:linear-gradient(90deg,#fffbeb,#fef3c7);border-top:1px solid #fcd34d}
 .amazon-cta-bar-text{font-size:14px;font-weight:600;color:#78350f}
 .pick-cta{flex-shrink:0;display:flex;flex-direction:column;align-items:stretch;gap:10px;max-width:140px}
+/* Stack the pick-card label. !important beats site-chrome .amazon-btn
+   nowrap / row-flex / 14px / 10px 18px padding, which clips this column.
+   The sticky .amazon-cta-bar .amazon-btn keeps the single-line rule above. */
+.pick-cta .amazon-btn{flex-direction:column !important;align-items:center !important;justify-content:center;text-align:center;white-space:normal !important;line-height:1.15;gap:0 !important;padding:6px 8px !important;width:100%;max-width:100%;min-width:0;font-size:12px !important}
+.pick-cta .amazon-btn::before{margin:0 0 2px}
+.pick-cta .amazon-btn .amazon-btn-line{display:block;width:100%;text-align:center;white-space:nowrap;line-height:1.15}
 .pick-image-link{display:block;line-height:0;border-radius:6px;position:relative}
 .pick-award{position:absolute;top:-10px;left:-10px;width:54px;height:54px;line-height:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.3));pointer-events:none}
 .pick-award svg{width:100%;height:100%;display:block}
@@ -1550,6 +1566,7 @@ input::placeholder{color:#767676 !important}
   .top-pick-item{flex-wrap:wrap;gap:12px;padding:14px 16px}
   .pick-rank{width:28px;height:28px;font-size:12px}
   .pick-cta{max-width:100px;gap:8px}
+  .pick-cta .amazon-btn{font-size:11px !important;padding:5px 4px !important;line-height:1.15}
   .pick-image{width:90px;height:90px}
   }
 @media (max-width:480px){
