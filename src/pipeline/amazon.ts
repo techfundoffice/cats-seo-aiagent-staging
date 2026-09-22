@@ -1,16 +1,16 @@
 import { errMsg } from "./http-utils";
 /**
- * Amazon product lookup — 3-tier approach for Cloudflare Workers.
+ * Amazon product lookup for Cloudflare Workers.
  *
- * Strict order (Amazon first, scraper only as last resort):
- *   Tier 1: Amazon Creators API (OAuth2 → real ASINs, prices, ratings, images)
- *   Tier 2: Amazon PA API v5 (HMAC-SHA256 → real ASINs, prices, ratings)
- *   Tier 3: Apify Amazon scraper (FALLBACK ONLY when tiers 1–2 return 0 products)
+ * Strict order (Creators API is the only Amazon catalog source):
+ *   Tier 1: Amazon Creators API (OAuth2 → real ASINs, prices, images)
+ *   Tier 2: Apify Amazon scraper (FALLBACK ONLY when Creators returns 0)
  *
- * Callers in writer.ts must never invert this order or call Apify when
- * Creators/PA already returned products.
- * Tier 4: SerpAPI Shopping (Google Shopping results)
- * Tier 5: Keyword-derived fallback
+ * Callers in writer.ts must never call Apify when Creators already
+ * returned products. Legacy PA-API v5 keyword search (AWS SigV4 against
+ * webservices.amazon.com/paapi5) is not part of this chain. Browse-node
+ * bestseller lookup for Top Seller Scout still signs that endpoint; it
+ * is not a product-search fallback.
  */
 
 /** Timeout for OAuth2 LWA token exchange (ms). */
@@ -74,7 +74,7 @@ export interface AmazonProduct {
  * the same client_id within the same DO isolate is guaranteed to fail the
  * same way until a Worker secret rotation or Amazon-side app
  * authorization. Cache the failure for 1h so we fire ONE warning per
- * isolate × credential, and let Tier 2 / fallback creds handle the rest.
+ * isolate × credential. Product search does not fall through to PA-API.
  */
 const creatorsCredentialState = new Map<
   string,
@@ -139,7 +139,7 @@ async function getCreatorsToken(
       // Arm the same per-credential circuit breaker the search path uses;
       // the disabledUntil guard at the top of this function and of
       // fetchViaCreatorsApi then short-circuits silently until the TTL
-      // expires (Tier 2 PA-API fallback takes over automatically).
+      // expires. Product search does not fall through to PA-API v5.
       const isAuthFailure = resp.status === 401 || resp.status === 403;
       if (isAuthFailure) {
         state.disabledUntil = Date.now() + CREATORS_API_FAILURE_TTL_MS;
@@ -148,7 +148,7 @@ async function getCreatorsToken(
         token: null,
         warning: `Creators API: OAuth2 token exchange failed (${resp.status} ${resp.statusText})${body ? ` — ${body}` : ""}${bodyReadFailure}${
           isAuthFailure
-            ? ` — credential disabled for ${Math.round(CREATORS_API_FAILURE_TTL_MS / 60000)} min; PA-API fallback takes over`
+            ? ` — credential disabled for ${Math.round(CREATORS_API_FAILURE_TTL_MS / 60000)} min`
             : ""
         }`
       };
@@ -181,12 +181,11 @@ async function getCreatorsToken(
  * then calls `POST /catalog/v1/searchItems` with the keyword.
  * Returns up to 5 products with title, ASIN, image, and price (when available).
  * Ratings and review counts are NOT available from this endpoint — those fields
- * are returned empty/zero so callers fall back to PA API v5 (Tier 2) when
- * review data is required.
+ * are returned empty/zero. Callers do not fall back to PA-API v5 for them.
  *
  * Circuit-breaker: a 401 InvalidToken response disables the credential for 1 h
  * via `creatorsCredentialState` so the same broken credential does not spam
- * warnings on every article. Tier 2 takes over automatically.
+ * warnings on every article.
  *
  * @param credentialId   Cognito client_id (AMAZON_APP_ID env secret).
  * @param credentialSecret Cognito client_secret (AMAZON_API_SECRET env secret).
@@ -250,15 +249,16 @@ export async function fetchViaCreatorsApi(
       // to a Creators-API-provisioned app. Retrying with the same client_id
       // produces the same outcome until either AMAZON_APP_ID is rotated to
       // a provisioned app or Amazon authorizes the existing app. Trip the
-      // circuit breaker so we fire ONE remediation warning and skip Tier 1
-      // for the next hour — Tier 2 (PA API v5) takes over.
+      // circuit breaker so we fire ONE remediation warning and skip this
+      // credential for the next hour. Product search does not fall through
+      // to PA-API v5.
       if (resp.status === 401) {
         state.disabledUntil = Date.now() + CREATORS_API_FAILURE_TTL_MS;
         state.token = null;
         state.tokenExpiry = 0;
         const idHint = credentialId.slice(0, 8);
         onWarn?.(
-          `Creators API 401 InvalidToken for client_id ${idHint}... — disabling this credential for 1h. ${body.slice(0, 160).replace(/\s+/g, " ")}. Remediation: confirm the secret matches a Creators-API-provisioned Cognito app, or set AMAZON_APP_ID_FALLBACK to a known-good pair. Tier 2 (PA API v5) handles product lookup in the meantime.`
+          `Creators API 401 InvalidToken for client_id ${idHint}... — disabling this credential for 1h. ${body.slice(0, 160).replace(/\s+/g, " ")}. Remediation: confirm the secret matches a Creators-API-provisioned app, or set AMAZON_APP_ID_FALLBACK to a known-good pair.`
         );
         return [];
       }
@@ -338,10 +338,9 @@ export async function fetchViaCreatorsApi(
   }
 }
 
-// ── Tier 2: Amazon Product Advertising API v5 (SigV4) ──────────────────────
-// Reaches the real catalog. Works when AMAZON_ACCESS_KEY + AMAZON_SECRET_KEY
-// + AMAZON_PARTNER_TAG are set as Worker secrets. Independent of the
-// Creators API — uses classic AWS SigV4 auth and the long-standing PA API.
+// ── PA-API v5 signing (Top Seller Scout browse nodes only) ─────────────────
+// Keyword product search no longer calls PA-API. These helpers remain for
+// `fetchBestsellersByBrowseNode`, which is not a catalog-search fallback.
 
 const PA_API_HOST = "webservices.amazon.com";
 const PA_API_REGION = "us-east-1";
@@ -350,9 +349,7 @@ const PA_API_SEARCH_TARGET =
   "com.amazon.paapi5.v1.ProductAdvertisingAPIv1.SearchItems";
 /**
  * Items requested per browse-node bestseller lookup. 10 is PA API 5.0's
- * per-request max for `SearchItems`; a browse-node sweep wants breadth
- * (compare several current bestsellers), unlike `fetchViaPaApi`'s
- * keyword search which only needs enough candidates for one product pick.
+ * per-request max for `SearchItems`.
  */
 const PA_API_BROWSE_NODE_ITEM_COUNT = 10;
 
@@ -402,193 +399,12 @@ async function deriveSigningKey(
 }
 
 /**
- * Tier 2 — Amazon Product Advertising API v5 (PA API) product search.
- *
- * Signs the request with AWS Signature Version 4 (HMAC-SHA256) and calls
- * `POST /paapi5/searchitems` on the us-east-1 endpoint. Returns up to 5
- * products including title, ASIN, image, price, star rating, and review count.
- *
- * Unlike Tier 1 (Creators API), this endpoint returns `CustomerReviews`
- * (star rating + count), making it the preferred source when real review
- * data is needed for article grounding.
- *
- * Note: new Associates accounts may not receive `Offers.Listings.Price` data
- * until they generate sales. The price field is intentionally omitted from the
- * returned product when the API response does not include a dollar-prefixed
- * amount — see the inline comment near `priceDisplay` for details.
- *
- * @param accessKey  AWS Access Key ID (AMAZON_CREDENTIAL_ID env secret).
- * @param secretKey  AWS Secret Access Key (AMAZON_CREDENTIAL_SECRET env secret).
- * @param tag        Amazon Associates tracking tag appended to all product URLs.
- * @param onWarn     Optional callback for non-fatal warnings surfaced in the
- *                   activity feed; defaults to a no-op when omitted.
- */
-export async function fetchViaPaApi(
-  keyword: string,
-  accessKey: string,
-  secretKey: string,
-  tag: string,
-  onWarn?: (msg: string) => void
-): Promise<AmazonProduct[]> {
-  const payload = JSON.stringify({
-    Keywords: keyword,
-    Resources: [
-      "Images.Primary.Large",
-      "Images.Primary.Medium",
-      "ItemInfo.Title",
-      "ItemInfo.Features",
-      "ItemInfo.ByLineInfo",
-      "Offers.Listings.Price",
-      "CustomerReviews.StarRating",
-      "CustomerReviews.Count"
-    ],
-    PartnerTag: tag,
-    PartnerType: "Associates",
-    Marketplace: "www.amazon.com"
-  });
-  const now = new Date();
-  const amzdate = now
-    .toISOString()
-    .replace(/[:-]|\.\d{3}/g, "")
-    .replace(/Z$/, "Z");
-  const datestamp = amzdate.slice(0, 8);
-  const canonicalHeaders =
-    `content-encoding:amz-1.0\n` +
-    `host:${PA_API_HOST}\n` +
-    `x-amz-date:${amzdate}\n` +
-    `x-amz-target:${PA_API_SEARCH_TARGET}\n`;
-  const signedHeaders = "content-encoding;host;x-amz-date;x-amz-target";
-  const payloadHash = await sha256Hex(payload);
-  const canonicalRequest = `POST\n/paapi5/searchitems\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
-  const credentialScope = `${datestamp}/${PA_API_REGION}/${PA_API_SERVICE}/aws4_request`;
-  const stringToSign =
-    `AWS4-HMAC-SHA256\n${amzdate}\n${credentialScope}\n` +
-    (await sha256Hex(canonicalRequest));
-  const signingKey = await deriveSigningKey(secretKey, datestamp);
-  const signatureBuf = await hmacSha256(signingKey, stringToSign);
-  const signature = bytesToHex(signatureBuf);
-  const authHeader = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-  let resp: Response;
-  try {
-    resp = await fetch(`https://${PA_API_HOST}/paapi5/searchitems`, {
-      method: "POST",
-      headers: {
-        "content-encoding": "amz-1.0",
-        host: PA_API_HOST,
-        "x-amz-date": amzdate,
-        "x-amz-target": PA_API_SEARCH_TARGET,
-        "content-type": "application/json; charset=utf-8",
-        authorization: authHeader
-      },
-      body: payload,
-      signal: AbortSignal.timeout(PA_API_TIMEOUT_MS)
-    });
-  } catch (err: unknown) {
-    onWarn?.(`PA API v5 fetch threw: ${errMsg(err)}`);
-    return [];
-  }
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    onWarn?.(
-      `PA API v5 ${resp.status} ${resp.statusText}: ${body.slice(0, MAX_ERROR_BODY_LENGTH).replace(/\s+/g, " ")}`
-    );
-    return [];
-  }
-  let data: Record<string, unknown>;
-  try {
-    data = (await resp.json()) as Record<string, unknown>;
-  } catch (err: unknown) {
-    onWarn?.(`PA API v5 JSON parse failed: ${errMsg(err)}`);
-    return [];
-  }
-  const searchResult = data?.SearchResult as
-    | Record<string, unknown>
-    | undefined;
-  const items =
-    (searchResult?.Items as Record<string, unknown>[] | undefined) || [];
-  return items
-    .slice(0, 5)
-    .map((item) => {
-      const asin = String(item.ASIN || "").toUpperCase();
-      // Drop products whose API response lacks a real 10-char ASIN.
-      // Without this filter the affiliate URL ends as
-      // `https://www.amazon.com/dp/?tag=…` — broken link → lost
-      // commission for any click on the pick.
-      if (!isValidAsin(asin)) return null;
-      const itemInfo = item.ItemInfo as Record<string, unknown> | undefined;
-      const titleObj = itemInfo?.Title as Record<string, unknown> | undefined;
-      const title = String(titleObj?.DisplayValue || keyword);
-      const featuresObj = itemInfo?.Features as
-        | Record<string, unknown>
-        | undefined;
-      const featureValues =
-        (featuresObj?.DisplayValues as string[] | undefined) || [];
-      const byLineInfo = itemInfo?.ByLineInfo as
-        | Record<string, unknown>
-        | undefined;
-      const brandObj = byLineInfo?.Brand as Record<string, unknown> | undefined;
-      const brand = String(brandObj?.DisplayValue || "");
-      const offers = item.Offers as Record<string, unknown> | undefined;
-      const listings = offers?.Listings as
-        | Record<string, unknown>[]
-        | undefined;
-      const price = listings?.[0]?.Price as Record<string, unknown> | undefined;
-      // Suppress the price slot entirely when PA API v5 didn't return a
-      // real amount. New partner-tag accounts don't get price data until
-      // they show sales; rendering "Check Price" as a fake price line is
-      // worse than hiding it and letting the "View on Amazon" button be
-      // the sole CTA.
-      const priceDisplay =
-        price?.DisplayAmount &&
-        typeof price.DisplayAmount === "string" &&
-        price.DisplayAmount.match(/\$\d/)
-          ? String(price.DisplayAmount)
-          : "";
-      const priceValue = parseFloat(String(price?.Amount || "0")) || 0;
-      const imagesObj = item.Images as Record<string, unknown> | undefined;
-      const primary = imagesObj?.Primary as Record<string, unknown> | undefined;
-      const large = primary?.Large as Record<string, unknown> | undefined;
-      const medium = primary?.Medium as Record<string, unknown> | undefined;
-      const reviews = item.CustomerReviews as
-        | Record<string, unknown>
-        | undefined;
-      const starRating = reviews?.StarRating as
-        | Record<string, unknown>
-        | undefined;
-      const ratingValue = Number(starRating?.Value) || 0;
-      const reviewCount = Number(reviews?.Count) || 0;
-      return {
-        name: title,
-        displayName:
-          title.length > MAX_DISPLAY_NAME_LENGTH
-            ? title.slice(0, TRUNCATED_DISPLAY_NAME_PREFIX_LENGTH) + "..."
-            : title,
-        asin,
-        price: priceDisplay,
-        priceValue,
-        rating: ratingValue > 0 ? String(ratingValue) : "",
-        ratingValue,
-        reviewCount,
-        imageUrl: String(large?.URL || medium?.URL || ""),
-        url: `https://www.amazon.com/dp/${asin}?tag=${tag}`,
-        features: featureValues.slice(0, MAX_FEATURE_COUNT).join("; "),
-        brand,
-        source: "pa-api-v5" as const
-      };
-    })
-    .filter((p) => p !== null) as AmazonProduct[];
-}
-
-/**
  * Top Seller Scout — real bestseller lookup by Amazon browse node.
  *
- * Same AWS SigV4-signed `POST /paapi5/searchitems` endpoint as
- * `fetchViaPaApi()` above and reuses its signing helpers
- * (`deriveSigningKey`/`hmacSha256`/`sha256Hex`) — the only difference is
- * the request payload: `BrowseNodeId` instead of `Keywords`, so results
- * come from a specific Amazon category (e.g. Pet Supplies > Cats > Toys)
- * rather than a text search.
+ * AWS SigV4-signed `POST /paapi5/searchitems`. The payload uses
+ * `BrowseNodeId` (not `Keywords`) so results come from a specific Amazon
+ * category (e.g. Pet Supplies > Cats > Toys) rather than a text search.
+ * This is not a fallback for Creators API product search.
  *
  * IMPORTANT CAVEAT, not resolvable in code: PA API 5.0's `SearchItems`
  * has no `SortBy` value that reproduces Amazon's public sales-rank-based
@@ -602,8 +418,8 @@ export async function fetchViaPaApi(
  * results before this is wired into the daily sweep tick.
  *
  * @param browseNodeId  Amazon browse node ID, e.g. "2975241011" (Cats).
- * @param accessKey     AWS Access Key ID (same credential as `fetchViaPaApi`).
- * @param secretKey     AWS Secret Access Key (same credential as `fetchViaPaApi`).
+ * @param accessKey     AWS Access Key ID (AMAZON_ACCESS_KEY).
+ * @param secretKey     AWS Secret Access Key (AMAZON_SECRET_KEY).
  * @param tag           Amazon Associates tracking tag appended to product URLs.
  * @param onWarn        Optional callback for non-fatal warnings; defaults to no-op.
  */
@@ -701,8 +517,8 @@ export async function fetchBestsellersByBrowseNode(
     .slice(0, PA_API_BROWSE_NODE_ITEM_COUNT)
     .map((item) => {
       const asin = String(item.ASIN || "").toUpperCase();
-      // Same anti-broken-link filter as fetchViaPaApi — see that function's
-      // comment for why a missing/malformed ASIN must drop the item.
+      // Drop a missing or malformed ASIN so the affiliate URL never
+      // becomes `/dp/undefined`.
       if (!isValidAsin(asin)) return null;
       const itemInfo = item.ItemInfo as Record<string, unknown> | undefined;
       const titleObj = itemInfo?.Title as Record<string, unknown> | undefined;
@@ -723,9 +539,8 @@ export async function fetchBestsellersByBrowseNode(
         | Record<string, unknown>[]
         | undefined;
       const price = listings?.[0]?.Price as Record<string, unknown> | undefined;
-      // Same price-suppression rule as fetchViaPaApi — see that function's
-      // comment. New partner-tag accounts don't get price data until they
-      // show sales.
+      // Suppress the price slot when the response has no dollar amount.
+      // New partner-tag accounts don't get price data until they show sales.
       const priceDisplay =
         price?.DisplayAmount &&
         typeof price.DisplayAmount === "string" &&
@@ -767,14 +582,15 @@ export async function fetchBestsellersByBrowseNode(
     .filter((p) => p !== null) as AmazonProduct[];
 }
 
-// ── Tier 3: Apify Amazon Scraper ────────────────────────────────────────────
+// ── Tier 2: Apify Amazon Scraper ────────────────────────────────────────────
 
 /**
- * Apify actor used for Tier 3 product search. The previous
+ * Apify actor used when Creators API returns nothing. The previous
  * `gajo-cz~amazon-product-scraper` was removed from the Apify store
  * (HTTP 404 record-not-found), which silently zeroed Top Picks for every
- * article once Creators + PA API failed. `junglee~amazon-crawler` is the
- * maintained public Amazon Product Scraper and accepts search-result URLs.
+ * article once the catalog search returned nothing. `junglee~amazon-crawler`
+ * is the maintained public Amazon Product Scraper and accepts search-result
+ * URLs.
  */
 const APIFY_AMAZON_ACTOR = "junglee~amazon-crawler";
 
@@ -782,14 +598,14 @@ const APIFY_AMAZON_ACTOR = "junglee~amazon-crawler";
 const APIFY_WAIT_FOR_FINISH_SECS = 90;
 
 /**
- * Tier 3 — Apify `junglee/Amazon-crawler` actor fallback.
+ * Tier 2 — Apify `junglee/Amazon-crawler` actor fallback.
  *
  * Starts an Apify actor run with `waitForFinish` (up to 90 s), then falls
  * back to short status polling if the run is still in progress. Returns up
  * to 5 products with title, ASIN, image, price, rating, and review count.
  *
- * Used when both Tier 1 (Creators API) and Tier 2 (PA API v5) are unavailable
- * or return no results. Requires the `APIFY_TOKEN` Worker secret.
+ * Used when Tier 1 (Creators API) returns no results. Requires the
+ * `APIFY_TOKEN` Worker secret. Does not call PA-API v5.
  *
  * Dog-only listings are filtered from results to avoid cross-species pollution.
  * Products without a valid 10-char ASIN are dropped so affiliate links never

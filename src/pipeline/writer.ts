@@ -31,7 +31,6 @@ import {
 } from "./keyword-utils";
 import {
   fetchViaCreatorsApi,
-  fetchViaPaApi,
   fetchViaApify,
   dedupeProducts,
   selectFeaturedProducts,
@@ -870,115 +869,13 @@ async function generateArticleUnsafe(
       if (products.length === 0 && credPairs.length > 0) {
         agent.log(
           "warning",
-          `Amazon (Creators API): 0 products after ${credPairs.length} credential pair${credPairs.length === 1 ? "" : "s"} for "${amazonSearchKeyword}" — falling through to PA API v5`
+          `Amazon (Creators API): 0 products after ${credPairs.length} credential pair${credPairs.length === 1 ? "" : "s"} for "${amazonSearchKeyword}"`
         );
       }
 
-      // Tier 2: Amazon Product Advertising API v5 (AWS SigV4). Uses the
-      // classic Associates program credentials independent of the
-      // Creators API. Tries the primary access/secret pair first, then the
-      // fallback pair (AMAZON_ACCESS_KEY_FALLBACK / AMAZON_SECRET_KEY_FALLBACK)
-      // before falling through to Apify (Tier 3). Useful when the primary
-      // access key gets throttled, deauthorized, or the Associates account
-      // is suspended — the fallback keeps Tier 2 alive.
-      if (products.length === 0) {
-        const paPrimaryKey =
-          getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY") ?? "";
-        const paPrimarySecret =
-          getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY") ?? "";
-        const paFallbackKey =
-          getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY_FALLBACK") ?? "";
-        const paFallbackSecret =
-          getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY_FALLBACK") ?? "";
-        agent.log(
-          "info",
-          `Amazon: PA API v5 primary ${paPrimaryKey && paPrimarySecret ? `available (${paPrimaryKey.slice(0, 8)}...)` : "NOT SET"}; fallback ${paFallbackKey && paFallbackSecret ? `(${paFallbackKey.slice(0, 8)}...)` : "NOT SET"}`
-        );
-        // Warn when only one of a credential pair is set — partial config would
-        // otherwise silently skip the tier with no operator-visible signal.
-        if (
-          (paPrimaryKey || paPrimarySecret) &&
-          !(paPrimaryKey && paPrimarySecret)
-        ) {
-          const missingPrimary = [
-            !paPrimaryKey ? "AMAZON_ACCESS_KEY" : null,
-            !paPrimarySecret ? "AMAZON_SECRET_KEY" : null
-          ]
-            .filter((v): v is string => Boolean(v))
-            .join(", ");
-          agent.log(
-            "warning",
-            `Amazon (PA API v5) primary skipped: missing ${missingPrimary}; set both AMAZON_ACCESS_KEY and AMAZON_SECRET_KEY to enable PA API v5 primary`
-          );
-        }
-        if (
-          (paFallbackKey || paFallbackSecret) &&
-          !(paFallbackKey && paFallbackSecret)
-        ) {
-          const missingFallback = [
-            !paFallbackKey ? "AMAZON_ACCESS_KEY_FALLBACK" : null,
-            !paFallbackSecret ? "AMAZON_SECRET_KEY_FALLBACK" : null
-          ]
-            .filter((v): v is string => Boolean(v))
-            .join(", ");
-          agent.log(
-            "warning",
-            `Amazon (PA API v5) fallback skipped: missing ${missingFallback}; set both AMAZON_ACCESS_KEY_FALLBACK and AMAZON_SECRET_KEY_FALLBACK to enable PA API v5 fallback`
-          );
-        }
-
-        const paPairs: Array<{ key: string; secret: string; label: string }> =
-          [];
-        if (paPrimaryKey && paPrimarySecret) {
-          paPairs.push({
-            key: paPrimaryKey,
-            secret: paPrimarySecret,
-            label: "primary"
-          });
-        }
-        if (paFallbackKey && paFallbackSecret) {
-          paPairs.push({
-            key: paFallbackKey,
-            secret: paFallbackSecret,
-            label: "fallback"
-          });
-        }
-        for (const { key, secret, label } of paPairs) {
-          if (products.length > 0) break;
-          try {
-            products = await fetchViaPaApi(
-              amazonSearchKeyword,
-              key,
-              secret,
-              tag,
-              (msg) =>
-                agent.log(
-                  "warning",
-                  `Amazon (PA API v5 ${label}): ${msg}`,
-                  "productManager"
-                )
-            );
-            if (products.length > 0) {
-              agent.log(
-                "info",
-                `Amazon (PA API v5 ${label}): ${products.length} products with ASINs for "${amazonSearchKeyword}"`
-              );
-            } else {
-              agent.log(
-                "warning",
-                `Amazon (PA API v5 ${label}): 0 products returned for "${amazonSearchKeyword}"`
-              );
-            }
-          } catch (err: unknown) {
-            agent.log(
-              "warning",
-              `Amazon (PA API v5 ${label}) error: ${errMsg(err)}`
-            );
-          }
-        }
-      }
-
-      // Tier 3: Apify Amazon scraper (real product data)
+      // Tier 2: Apify Amazon scraper. Creators API is the only Amazon
+      // catalog source — legacy PA-API v5 is not called, including when
+      // AMAZON_ACCESS_KEY / AMAZON_SECRET_KEY are still set on the Worker.
       if (products.length === 0) {
         const apifyToken = getEnvBinding(agent.envBindings, "APIFY_TOKEN");
         agent.log(
@@ -1028,7 +925,7 @@ async function generateArticleUnsafe(
           );
         }
 
-        // Strip any prices populated upstream by PA API / Creators API.
+        // Strip any prices populated upstream by Creators API / Apify.
         // Amazon Associates compliance: we never display prices on the page,
         // and seeing them upstream encourages Kimi to hallucinate dollar
         // amounts in prose. Live prices live on the affiliate link only.
@@ -1056,7 +953,7 @@ async function generateArticleUnsafe(
 
         // Product-image continuity: the same ASIN can arrive with or
         // without an imageUrl depending on which tier served it (Creators
-        // API includes images; some PA API/Apify responses don't). Cache
+        // API includes images; some Apify responses don't). Cache
         // the last-seen image per ASIN in KV and backfill a missing one,
         // so a product that has ever rendered with an image never
         // publishes imageless again. Single-product mode leaves exactly

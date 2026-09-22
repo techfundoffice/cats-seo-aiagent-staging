@@ -66,25 +66,24 @@ declare namespace Cloudflare {
 		 * Independent secondary Creators API credential pair. When the
 		 * primary `AMAZON_APP_ID`/`AMAZON_API_SECRET` returns 401
 		 * `InvalidToken`, Tier 1 retries with this pair before falling
-		 * through to PA API v5 / Apify. Has its own circuit breaker so a
+		 * through to Apify. Has its own circuit breaker so a
 		 * primary 401 doesn't poison the fallback attempt.
 		 */
 		AMAZON_APP_ID_FALLBACK?: string;
 		AMAZON_API_SECRET_FALLBACK?: string;
 		/**
-		 * Amazon Product Advertising API v5 credentials (AWS SigV4).
-		 * Used by Tier 2 of the product-data chain in `fetchViaPaApi()`.
-		 * Independent of the Creators API — works when that returns
-		 * InvalidToken.
+		 * Deprecated and unused by product search, Cat A–Z refill, and
+		 * article Amazon hydration. Those paths use the Creators API only.
+		 * The secret is left on the Worker so this change does not require
+		 * a Cloudflare secret delete. Top Seller Scout's browse-node sweep
+		 * still reads it via `fetchBestsellersByBrowseNode`.
 		 */
 		AMAZON_ACCESS_KEY?: string;
 		AMAZON_SECRET_KEY?: string;
 		/**
-		 * Independent secondary PA API v5 credential pair. When the primary
-		 * pair returns 0 products or a SigV4 error, Tier 2 retries with
-		 * this pair before falling through to Apify (Tier 3). Useful when
-		 * the primary access key gets throttled, deauthorized, or
-		 * Associates-account-suspended.
+		 * Deprecated secondary PA-API v5 pair. Product search does not read
+		 * these. Top Seller Scout still does, as a fallback credential for
+		 * browse-node lookups only.
 		 */
 		AMAZON_ACCESS_KEY_FALLBACK?: string;
 		AMAZON_SECRET_KEY_FALLBACK?: string;
