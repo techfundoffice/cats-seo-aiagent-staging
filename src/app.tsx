@@ -25,6 +25,7 @@ import {
   STAGING_IDENTITY_LABEL,
   deriveDependencyChips,
   deriveOperatorRunPresentation,
+  formatClaudeFailureBannerText,
   formatDashboardFreshness,
   formatSeoPillarRows,
   latestObserverNarrativeRaw,
@@ -2996,6 +2997,50 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 // failure pattern detected. Pure derivation — no new state, endpoint,
 // or scheduled tick. Computation tested in
 // src/__tests__/external-provider-health.test.ts.
+function copyTextToClipboard(text: string): Promise<void> {
+  const writeText = navigator.clipboard?.writeText;
+  const viaClipboard =
+    typeof writeText === "function"
+      ? writeText.call(navigator.clipboard, text)
+      : Promise.reject(new Error("Clipboard API missing"));
+  return viaClipboard.catch(() => copyTextWithExecCommand(text));
+}
+
+function copyTextWithExecCommand(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "0";
+    area.style.left = "-9999px";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      const ok = document.execCommand("copy");
+      document.body.removeChild(area);
+      if (!ok) {
+        reject(new Error("copy command was rejected"));
+        return;
+      }
+      resolve();
+    } catch (err: unknown) {
+      area.remove();
+      reject(err instanceof Error ? err : new Error("copy failed"));
+    }
+  });
+}
+
+const claudeBannerButtonStyle = {
+  background: "transparent",
+  color: "#fff",
+  border: "1px solid rgba(255,255,255,0.75)",
+  borderRadius: "0.375rem",
+  padding: "0.25rem 0.65rem",
+  cursor: "pointer",
+  flexShrink: 0
+} as const;
+
 function ClaudeChatFailureBanner({
   state,
   onDismiss
@@ -3004,7 +3049,40 @@ function ClaudeChatFailureBanner({
   onDismiss: () => void;
 }) {
   const failure = state.claudeChatFailure;
+  const [copyLabel, setCopyLabel] = useState("Copy all");
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined
+  );
+  useEffect(() => {
+    return () => {
+      clearTimeout(copyResetTimerRef.current);
+    };
+  }, []);
   if (!failure?.message) return null;
+  const bannerText = formatClaudeFailureBannerText({
+    message: failure.message,
+    howToFix: failure.howToFix
+  });
+  const onCopy = () => {
+    copyTextToClipboard(bannerText)
+      .then(() => {
+        setCopyLabel("Copied");
+        clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = setTimeout(() => {
+          setCopyLabel("Copy all");
+          copyResetTimerRef.current = undefined;
+        }, 1500);
+      })
+      .catch((err: unknown) => {
+        console.warn("Claude failure banner copy failed", err);
+        setCopyLabel("Copy failed");
+        clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = setTimeout(() => {
+          setCopyLabel("Copy all");
+          copyResetTimerRef.current = undefined;
+        }, 1500);
+      });
+  };
   return (
     <div
       role="alert"
@@ -3056,21 +3134,23 @@ function ClaudeChatFailureBanner({
             {failure.howToFix}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onDismiss}
-          style={{
-            background: "transparent",
-            color: "#fff",
-            border: "1px solid rgba(255,255,255,0.75)",
-            borderRadius: "0.375rem",
-            padding: "0.25rem 0.65rem",
-            cursor: "pointer",
-            flexShrink: 0
-          }}
-        >
-          Dismiss
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={onCopy}
+            aria-label="Copy all Claude failure banner text"
+            style={claudeBannerButtonStyle}
+          >
+            {copyLabel}
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            style={claudeBannerButtonStyle}
+          >
+            Dismiss
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -12,6 +12,33 @@
 export const PIPELINE_ABORT_HOW_TO_FIX =
   "Worker timed out during Claude writing — retry generate-one; if it keeps happening, shorten the article or raise limits.";
 
+/**
+ * Operator line when our own deadline aborts a Claude write.
+ * Replaces nested AbortSignal text such as
+ * "The operation was aborted due to timeout — cause: The operation was aborted due to timeout".
+ */
+export const WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE =
+  "Worker timed out while Claude was writing.";
+
+/**
+ * Wall-clock budget for `POST /api/generate-one`.
+ *
+ * Cloudflare does not cap Durable Object HTTP/RPC wall time while the
+ * caller stays connected. Alarm handlers are the 15-minute cap, so the
+ * autonomous loop keeps {@link AUTONOMOUS_PIPELINE_TIMEOUT_MS}. Thirty
+ * minutes covers research plus a multi-continuation Claude article
+ * without aborting a healthy write at the old 15-minute race.
+ */
+export const GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS = 30 * 60 * 1000;
+
+/**
+ * Autonomous-loop budget. That loop runs inside a Durable Object alarm,
+ * and alarm handlers are limited to 15 minutes of wall time. The race
+ * uses that ceiling so we pause with a banner before Cloudflare kills
+ * the invocation.
+ */
+export const AUTONOMOUS_PIPELINE_TIMEOUT_MS = 15 * 60 * 1000;
+
 /** SQL key in `pipeline_secrets` for the in-flight article run. */
 export const PIPELINE_RUN_SECRET_KEY = "article_pipeline_run";
 
@@ -47,9 +74,33 @@ export type PipelineRunRecord = {
   category: string;
   slug: string;
   startedAtMs: number;
+  /**
+   * Wall-clock budget for this run. Generate-one stores the longer HTTP
+   * budget; the autonomous loop stores the alarm ceiling. Absent on rows
+   * written before that split.
+   */
+  budgetMs?: number;
 };
 
-const DEFAULT_TIMEOUT_MESSAGE = "Worker timed out during Claude writing.";
+const DEFAULT_TIMEOUT_MESSAGE = WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE;
+
+/**
+ * Our AbortSignal / generate-one deadline, not an Anthropic HTTP error.
+ * The fetch layer nests the same timeout sentence as `error.cause`, which
+ * operators were reading as a Claude outage. Returns the clean line, or
+ * null when `detail` is some other failure.
+ */
+export function collapseOwnWorkerTimeoutDetail(detail: string): string | null {
+  const text = detail.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const ownAbortTimeout =
+    /operation was aborted due to timeout/.test(lower) ||
+    /request was aborted due to timeout/.test(lower);
+  if (!ownAbortTimeout) return null;
+  return WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE;
+}
+
 const DEFAULT_CANCEL_MESSAGE =
   "Article generation was cancelled before it finished.";
 const DEFAULT_RECYCLE_MESSAGE =
@@ -73,7 +124,9 @@ export function describePipelineAbort(
   switch (reason) {
     case "timeout":
       return {
-        message: raw || DEFAULT_TIMEOUT_MESSAGE,
+        message:
+          collapseOwnWorkerTimeoutDetail(raw) ??
+          (raw || DEFAULT_TIMEOUT_MESSAGE),
         howToFix: PIPELINE_ABORT_HOW_TO_FIX
       };
     case "cancel":
@@ -263,11 +316,18 @@ export function parsePipelineRunRecord(
     ) {
       return null;
     }
+    const budgetMs =
+      typeof parsed.budgetMs === "number" &&
+      Number.isFinite(parsed.budgetMs) &&
+      parsed.budgetMs > 0
+        ? parsed.budgetMs
+        : undefined;
     return {
       keyword: parsed.keyword,
       category: parsed.category,
       slug: parsed.slug,
-      startedAtMs: parsed.startedAtMs
+      startedAtMs: parsed.startedAtMs,
+      ...(budgetMs !== undefined ? { budgetMs } : {})
     };
   } catch {
     return null;

@@ -36,7 +36,9 @@ import {
 } from "./pipeline/escalate-to-claude";
 import {
   applyPipelineAbort,
+  AUTONOMOUS_PIPELINE_TIMEOUT_MS,
   classifyPipelineAbortReason,
+  GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS,
   generateOneAbortHttpBody,
   healInterruptedPipeline,
   parsePipelineRunRecord,
@@ -46,6 +48,7 @@ import {
   racePipelineWork,
   setPipelineAbortSignal,
   settleSuccessfulPipeline,
+  WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE,
   type PipelineAbortReason,
   type PipelineRunRecord
 } from "./pipeline/pipeline-run-guard";
@@ -318,24 +321,15 @@ export type ActivityLogEntry = {
 // /api/admin/retry.
 const MAX_KEYWORD_RETRIES = 3;
 
-// Wall-clock safety net around the whole generateArticle() call in
-// autonomousLoop. scheduleEvery(300, "autonomousLoop") can't re-enter while
-// this tick is still awaiting — a single unbounded await anywhere in the
-// 24-step pipeline (a fetch/generateText call with no per-call timeout)
-// wedges the DO's single-flight alarm loop forever, silently, since a hung
-// promise never reaches a catch block or the escalation system (see
-// #14123, which bounded the one known hang site but not the general case).
-// This is the last-resort net for the *next* one: past this budget we stop
-// awaiting and let the loop continue: the abandoned call may still resolve
-// in the background but its result is ignored.
-const ARTICLE_PIPELINE_TIMEOUT_MS = 15 * 60 * 1000;
-
-// Same wall-clock safety-net pattern as ARTICLE_PIPELINE_TIMEOUT_MS above,
-// applied to the Top Seller Scout's daily sweep tick. 10 minutes is
-// generous for 18 fast PA-API calls + KV/SQL bookkeeping — this tick does
-// NOT run the full article-generation pipeline itself (see
-// top-seller-scout.ts), it only fetches/diffs/enqueues, so it should
-// finish in well under a minute during normal operation.
+// Wall-clock safety net around generateArticle(). The autonomous loop runs
+// inside a Durable Object alarm (15-minute wall-time cap — see
+// AUTONOMOUS_PIPELINE_TIMEOUT_MS). generate-one is an HTTP request with the
+// dashboard still connected, so it uses GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS
+// (30 minutes). Past the budget we stop awaiting; the abandoned call may
+// still resolve in the background and its result is ignored.
+// Top Seller Scout sweep: 10 minutes is generous for 18 fast PA-API calls
+// plus KV/SQL bookkeeping. This tick does not run the article pipeline
+// (see top-seller-scout.ts); it only fetches, diffs, and enqueues.
 const TOP_SELLER_SCOUT_TIMEOUT_MS = 10 * 60 * 1000;
 
 const ACTIVITY_LOG_STATE_MAX_MSG_CHARS = 1000;
@@ -1524,6 +1518,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
   private bindClaudeChatFailureSink(): void {
     setClaudeChatFailureSink({
       report: (notice: ClaudeChatFailureNotice) => {
+        // A pipeline-deadline abort already wrote the clean banner. A late
+        // Claude fetch abort must not replace it with nested timeout text.
+        if (this._pipelineAbortSettled) return;
         this.stopAutonomousLoopForClaudeFailure();
         const running =
           this.state.status === "generating" ||
@@ -3195,12 +3192,18 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     }
   }
 
-  private armPipelineRunWatchdog(): void {
+  private pipelineRunBudgetMs(record: PipelineRunRecord | null): number {
+    const budget = record?.budgetMs;
+    if (typeof budget === "number" && budget > 0) return budget;
+    return AUTONOMOUS_PIPELINE_TIMEOUT_MS;
+  }
+
+  private armPipelineRunWatchdog(budgetMs: number): void {
     try {
       const existing = this.getSchedules();
       if (existing.some((s) => s.callback === "pipelineRunWatchdog")) return;
       this.schedule(
-        Math.max(1, Math.ceil(ARTICLE_PIPELINE_TIMEOUT_MS / 1000)),
+        Math.max(1, Math.ceil(budgetMs / 1000)),
         "pipelineRunWatchdog",
         undefined,
         { idempotent: true }
@@ -3234,21 +3237,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
    */
   async pipelineRunWatchdog(): Promise<void> {
     const record = this.readPipelineRunRecord();
+    const budgetMs = this.pipelineRunBudgetMs(record);
     const stuck =
       this._pipelineRunActive ||
       pipelineRunLooksInterrupted(this.state) ||
       record != null;
     if (!stuck) return;
-    if (
-      record &&
-      Date.now() - record.startedAtMs < ARTICLE_PIPELINE_TIMEOUT_MS - 1000
-    ) {
+    if (record && Date.now() - record.startedAtMs < budgetMs - 1000) {
       const remainingSec = Math.max(
         1,
-        Math.ceil(
-          (ARTICLE_PIPELINE_TIMEOUT_MS - (Date.now() - record.startedAtMs)) /
-            1000
-        )
+        Math.ceil((budgetMs - (Date.now() - record.startedAtMs)) / 1000)
       );
       try {
         this.schedule(remainingSec, "pipelineRunWatchdog", undefined, {
@@ -3263,7 +3261,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     this._pipelineAbort?.abort();
     this.surfacePipelineAbort(
       "timeout",
-      "Worker timed out during Claude writing.",
+      WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE,
       record?.keyword ?? this.state.currentKeyword ?? "",
       record?.category ?? this.state.currentCategory ?? "",
       record?.slug ?? this.state.currentArticleSlug ?? ""
@@ -3357,7 +3355,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       raced.status === "threw"
         ? errMsg(raced.error)
         : raced.status === "timeout"
-          ? "Worker timed out during Claude writing."
+          ? WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE
           : "Article generation was cancelled before it finished.";
     const errorText = this.surfacePipelineAbort(
       reason,
@@ -3411,7 +3409,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
     if (this._pipelineWritesSealed || this._pipelineRunActive) {
       return {
         success: false,
-        error: `Worker timed out during Claude writing. — ${PIPELINE_ABORT_HOW_TO_FIX}`
+        error: `${WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE} — ${PIPELINE_ABORT_HOW_TO_FIX}`
       } as ArticleResult;
     }
     const slug = keywordToSlug(keyword);
@@ -3425,9 +3423,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       keyword,
       category,
       slug,
-      startedAtMs: Date.now()
+      startedAtMs: Date.now(),
+      budgetMs: GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS
     });
-    this.armPipelineRunWatchdog();
+    this.armPipelineRunWatchdog(GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS);
     try {
       this.clearSheetStepColumnECache();
       this.setState({
@@ -3449,7 +3448,11 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       let raced: Awaited<ReturnType<typeof racePipelineWork<ArticleResult>>>;
       try {
         raced = await this.keepAliveWhile(() =>
-          racePipelineWork(work, ARTICLE_PIPELINE_TIMEOUT_MS, clientSignal)
+          racePipelineWork(
+            work,
+            GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS,
+            clientSignal
+          )
         );
       } catch (err: unknown) {
         raced = { status: "threw", error: err };
@@ -4478,23 +4481,27 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           keyword: kw.keyword,
           category: kw.category_slug,
           slug: kw.slug,
-          startedAtMs: Date.now()
+          startedAtMs: Date.now(),
+          budgetMs: AUTONOMOUS_PIPELINE_TIMEOUT_MS
         });
-        this.armPipelineRunWatchdog();
+        this.armPipelineRunWatchdog(AUTONOMOUS_PIPELINE_TIMEOUT_MS);
         const work = generateArticle(
           this,
           kw.keyword,
           kw.slug,
           kw.category_slug
         );
-        const raced = await racePipelineWork(work, ARTICLE_PIPELINE_TIMEOUT_MS);
+        const raced = await racePipelineWork(
+          work,
+          AUTONOMOUS_PIPELINE_TIMEOUT_MS
+        );
         if (raced.status !== "ok") {
           this._pipelineWritesSealed = true;
           articleAbort.abort();
           const errorMessage =
             raced.status === "threw"
               ? errMsg(raced.error)
-              : `Worker timed out during Claude writing (${ARTICLE_PIPELINE_TIMEOUT_MS / 60_000}min budget) for "${kw.keyword}".`;
+              : `${WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE} (${AUTONOMOUS_PIPELINE_TIMEOUT_MS / 60_000}min budget) for "${kw.keyword}".`;
           const reason: PipelineAbortReason =
             raced.status === "threw"
               ? classifyPipelineAbortReason(errorMessage)
@@ -4502,7 +4509,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           this.surfacePipelineAbort(
             reason,
             raced.status === "timeout"
-              ? "Worker timed out during Claude writing."
+              ? WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE
               : errorMessage,
             kw.keyword,
             kw.category_slug,

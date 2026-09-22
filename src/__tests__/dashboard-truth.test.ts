@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLAUDE_FAILURE_BANNER_TITLE,
   CLAUDE_FAILURE_NO_FALLBACK,
   assessObserverNarrativeTrust,
   deriveDependencyChips,
   deriveOperatorRunPresentation,
+  formatClaudeFailureBannerText,
   formatDashboardFreshness,
   formatSeoPillarRows,
   latestObserverNarrativeRaw,
   parseObserverNarrative,
   partitionEditorialReasonCounts
 } from "../dashboardTruth";
+import { describeClaudeChatFailure } from "../pipeline/claude-chat-failure";
 
 describe("deriveOperatorRunPresentation", () => {
   it("calls a quiet worker idle", () => {
@@ -61,6 +64,27 @@ describe("deriveOperatorRunPresentation", () => {
     });
     expect(failed.kind).toBe("failed");
     expect(failed.detail).toMatch(/No other chat model/);
+  });
+});
+
+describe("formatClaudeFailureBannerText", () => {
+  it("copies the full on-screen banner, including a collapsed timeout", () => {
+    const notice = describeClaudeChatFailure(
+      new Error(
+        "[claude-code] Anthropic call failed (Claude dashboard failed: The operation was aborted due to timeout — cause: The operation was aborted due to timeout); No other model was called. The pipeline stopped."
+      )
+    );
+    const text = formatClaudeFailureBannerText(notice);
+    expect(text).toBe(
+      [
+        CLAUDE_FAILURE_BANNER_TITLE,
+        "Worker timed out while Claude was writing.",
+        CLAUDE_FAILURE_NO_FALLBACK,
+        `How to fix: ${notice.howToFix}`
+      ].join("\n")
+    );
+    expect(text).not.toMatch(/— cause:/);
+    expect(text).toMatch(/retry generate-one/);
   });
 });
 
