@@ -15,12 +15,36 @@ export type CommercialGateReason =
   | "ok"
   | "empty"
   | "too-short"
+  | "blocked-junk"
   | "blocked-memorial"
   | "blocked-dog-only"
   | "blocked-asin"
   | "blocked-medical"
   | "non-commercial"
   | "blocked-category";
+
+/**
+ * Synthetic queue fillers. These are not Amazon catalog titles and must
+ * never be imported, claimed, or written.
+ */
+const JUNK_KEYWORD_RE =
+  /(?:\bdashboard[\s-]*refill\b|\be2e\b|\bclaude[\s-]*only\b)/i;
+
+/** Category slug for one letter of the Cat A–Z catalog walk (`cat-a` … `cat-z`). */
+export const CAT_AZ_CATEGORY_RE = /^cat-[a-z]$/;
+
+const QUESTION_KEYWORD_RE =
+  /^(?:how|why|what|when|where|does|do|is|are|can)\b/i;
+
+export function isJunkProductKeyword(keyword: string): boolean {
+  return JUNK_KEYWORD_RE.test(keyword || "");
+}
+
+export function isCatAzCategorySlug(
+  categorySlug: string | null | undefined
+): boolean {
+  return Boolean(categorySlug && CAT_AZ_CATEGORY_RE.test(categorySlug.trim()));
+}
 
 export interface CommercialGateResult {
   ok: boolean;
@@ -65,6 +89,9 @@ export function evaluateCommercialKeyword(
 ): CommercialGateResult {
   const k = (keyword || "").trim();
   if (!k) return { ok: false, reason: "empty", score: 0 };
+  if (isJunkProductKeyword(k)) {
+    return { ok: false, reason: "blocked-junk", score: 0 };
+  }
 
   const words = k.split(/\s+/).filter(Boolean);
   if (words.length < 2) return { ok: false, reason: "too-short", score: 0 };
@@ -87,6 +114,16 @@ export function evaluateCommercialKeyword(
 
   if (MEDICAL_RE.test(k)) {
     return { ok: false, reason: "blocked-medical", score: 0 };
+  }
+
+  // Cat A–Z rows are real catalog titles. They often omit "best" / "review"
+  // and still need to be claimable. Hard blocks above still apply.
+  if (
+    isCatAzCategorySlug(categorySlug) &&
+    words.length >= 2 &&
+    !QUESTION_KEYWORD_RE.test(k)
+  ) {
+    return { ok: true, reason: "ok", score: 60 };
   }
 
   if (!COMMERCIAL_RE.test(k)) {
@@ -119,6 +156,10 @@ export function isCommercialKeyword(
  */
 export function commercialGateLogReason(result: CommercialGateResult): string {
   switch (result.reason) {
+    case "ok":
+      return "ok";
+    case "blocked-junk":
+      return "synthetic test keyword (dashboard refill, e2e, claude only)";
     case "blocked-memorial":
       return "memorial/pet-loss (low EPC policy)";
     case "blocked-dog-only":
@@ -135,7 +176,9 @@ export function commercialGateLogReason(result: CommercialGateResult): string {
       return "too short";
     case "empty":
       return "empty";
-    default:
-      return result.reason;
+    default: {
+      const _exhaustive: never = result.reason;
+      return _exhaustive;
+    }
   }
 }

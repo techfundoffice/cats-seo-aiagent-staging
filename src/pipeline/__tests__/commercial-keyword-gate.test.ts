@@ -31,4 +31,25 @@ describe("commercial-keyword-gate", () => {
     expect(isCommercialKeyword("stainless steel cat fountain")).toBe(true);
     expect(isCommercialKeyword("cat dental care kit")).toBe(true);
   });
+
+  it("blocks synthetic test keywords", () => {
+    expect(
+      isCommercialKeyword("furhaven microvelvet cat bed e2e claude only review")
+    ).toBe(false);
+    expect(isCommercialKeyword("cat fountain dashboard refill")).toBe(false);
+    expect(isCommercialKeyword("cat fountain dashboard-refill")).toBe(false);
+    expect(isCommercialKeyword("claude-only cat toy review")).toBe(false);
+    expect(evaluateCommercialKeyword("dashboard refill").reason).toBe(
+      "blocked-junk"
+    );
+  });
+
+  it("accepts a real Cat A–Z product title and still blocks junk in that category", () => {
+    expect(isCommercialKeyword("Feliway Optimum Diffuser", "cat-f")).toBe(true);
+    expect(
+      isCommercialKeyword("Acme dashboard refill Cat Litter", "cat-a")
+    ).toBe(false);
+    expect(isCommercialKeyword("dog leash deluxe", "cat-d")).toBe(false);
+    expect(isCommercialKeyword("zeqingjw pendant")).toBe(false);
+  });
 });

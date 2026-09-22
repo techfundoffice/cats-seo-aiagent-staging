@@ -3049,6 +3049,8 @@ function ClaudeChatFailureBanner({
   onDismiss: () => void;
 }) {
   const failure = state.claudeChatFailure;
+  const bannerTitle = failure?.title?.trim() || CLAUDE_FAILURE_BANNER_TITLE;
+  const showClaudeFallback = bannerTitle === CLAUDE_FAILURE_BANNER_TITLE;
   const [copyLabel, setCopyLabel] = useState("Copy all");
   const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined
@@ -3061,7 +3063,8 @@ function ClaudeChatFailureBanner({
   if (!failure?.message) return null;
   const bannerText = formatClaudeFailureBannerText({
     message: failure.message,
-    howToFix: failure.howToFix
+    howToFix: failure.howToFix,
+    title: failure.title
   });
   const onCopy = () => {
     copyTextToClipboard(bannerText)
@@ -3108,21 +3111,23 @@ function ClaudeChatFailureBanner({
       >
         <div>
           <div style={{ fontWeight: 700, marginBottom: "0.35rem" }}>
-            {CLAUDE_FAILURE_BANNER_TITLE}
+            {bannerTitle}
           </div>
           <div style={{ fontSize: "0.875rem", lineHeight: 1.45 }}>
             {failure.message}
           </div>
-          <div
-            style={{
-              fontSize: "0.875rem",
-              lineHeight: 1.45,
-              marginTop: "0.35rem",
-              fontWeight: 600
-            }}
-          >
-            {CLAUDE_FAILURE_NO_FALLBACK}
-          </div>
+          {showClaudeFallback ? (
+            <div
+              style={{
+                fontSize: "0.875rem",
+                lineHeight: 1.45,
+                marginTop: "0.35rem",
+                fontWeight: 600
+              }}
+            >
+              {CLAUDE_FAILURE_NO_FALLBACK}
+            </div>
+          ) : null}
           <div
             style={{
               fontSize: "0.875rem",

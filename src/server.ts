@@ -63,6 +63,13 @@ import {
   summarizeScoutStuckSweep
 } from "./pipeline/scout-stuck-sweep";
 import { runTopSellerScoutSweep } from "./pipeline/top-seller-scout";
+import { refillCatAzKeywords } from "./pipeline/cat-az-catalog";
+import {
+  isNoAmazonProductsAbort,
+  NO_AMAZON_PRODUCTS_ABORT_MESSAGE,
+  NO_AMAZON_PRODUCTS_BANNER_TITLE,
+  NO_AMAZON_PRODUCTS_HOW_TO_FIX
+} from "./pipeline/product-write-gate";
 import { classifyUserAgent } from "./pipeline/prod-publish";
 import {
   isCodebaseSearchEnabled,
@@ -97,7 +104,8 @@ import {
 import { ensureArticleAnalytics } from "./pipeline/article-analytics";
 import {
   evaluateCommercialKeyword,
-  commercialGateLogReason
+  commercialGateLogReason,
+  isJunkProductKeyword
 } from "./pipeline/commercial-keyword-gate";
 import {
   getMissingBrowserRenderingBindings,
@@ -1416,6 +1424,8 @@ export type SEOAgentState = {
     message: string;
     howToFix: string;
     at: string;
+    /** Overrides the Claude banner title when the stop is not a Claude error. */
+    title?: string;
   } | null;
 };
 
@@ -3606,6 +3616,14 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           }
         );
       } else {
+        if (isNoAmazonProductsAbort(result.error)) {
+          this.pauseForNoAmazonProducts();
+          try {
+            this.sql`UPDATE keywords SET status='failed' WHERE id=${kwId}`;
+          } catch {
+            /* manual keywords may not have a runtime row */
+          }
+        }
         this.setState({
           ...this.state,
           articlesFailed: this.state.articlesFailed + 1
@@ -4001,6 +4019,21 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
    * the specific failure site; callers that bypass that (e.g. a wall-clock
    * timeout) must escalate themselves with the right errorCategory.
    */
+  /** Red banner + paused loop when Amazon returned no ASIN. Does not count the failure. */
+  private pauseForNoAmazonProducts(): void {
+    this.stopAutonomousLoopForClaudeFailure();
+    this.setState({
+      ...this.state,
+      status: "paused",
+      claudeChatFailure: {
+        message: NO_AMAZON_PRODUCTS_ABORT_MESSAGE,
+        howToFix: NO_AMAZON_PRODUCTS_HOW_TO_FIX,
+        title: NO_AMAZON_PRODUCTS_BANNER_TITLE,
+        at: new Date().toISOString()
+      }
+    });
+  }
+
   private recordKeywordFailure(
     kw: {
       id: string;
@@ -4036,6 +4069,9 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         "orchestrator",
         { kanbanStage: "debug", categorySlug: kw.category_slug }
       );
+    }
+    if (isNoAmazonProductsAbort(errorMessage)) {
+      this.pauseForNoAmazonProducts();
     }
     this.setState({
       ...this.state,
@@ -4333,6 +4369,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           this.log(
             "info",
             `Scout stuck-keyword sweep threw: ${errMsg(sweepErr)}`,
+            "analyst"
+          );
+        }
+
+        try {
+          await refillCatAzKeywords(this);
+        } catch (refillErr: unknown) {
+          this.log(
+            "warning",
+            `Cat A–Z refill failed: ${errMsg(refillErr)}`,
             "analyst"
           );
         }
@@ -5335,7 +5381,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           const kw = typeof r.keyword === "string" ? r.keyword.trim() : "";
           const cat =
             typeof r.categorySlug === "string" ? r.categorySlug.trim() : "";
-          if (!kw || !cat) {
+          if (!kw || !cat || isJunkProductKeyword(kw)) {
             skippedInvalid++;
             continue;
           }
@@ -7771,9 +7817,18 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       const MAX_PENDING_SCAN = 10;
 
       if (!reqKeyword) {
+        try {
+          await refillCatAzKeywords(this);
+        } catch (refillErr: unknown) {
+          this.log(
+            "warning",
+            `Cat A–Z refill failed: ${errMsg(refillErr)}`,
+            "analyst"
+          );
+        }
         let attempts = 0;
-        while (attempts < MAX_PENDING_SCAN) {
-          attempts++;
+        let junkSkips = 0;
+        while (attempts < MAX_PENDING_SCAN && junkSkips < 25) {
           let rows = this
             .sql<PendingRow>`SELECT keyword, slug, category_slug FROM keywords WHERE status='pending' ORDER BY ROWID LIMIT 1`;
           if (rows.length === 0) {
@@ -7804,6 +7859,23 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
             );
           }
           const candidate = rows[0];
+          const gate = evaluateCommercialKeyword(
+            candidate.keyword,
+            candidate.category_slug
+          );
+          if (!gate.ok) {
+            junkSkips++;
+            this
+              .sql`UPDATE keywords SET status='skipped' WHERE keyword=${candidate.keyword} AND category_slug=${candidate.category_slug}`;
+            this.log(
+              "info",
+              `Commercial gate: skipped "${candidate.keyword}" (${candidate.category_slug}) — ${commercialGateLogReason(gate)}`,
+              "orchestrator",
+              { categorySlug: candidate.category_slug, kanbanStage: "queue" }
+            );
+            continue;
+          }
+          attempts++;
           reqKeyword = candidate.keyword;
           reqCategory = candidate.category_slug;
           const kvKey = `${candidate.category_slug}:${candidate.slug}`;
