@@ -6447,8 +6447,8 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
       }
 
       // POST /api/admin/promote-backlog — next batch of sitemap articles
-      // that already meet PROD_PUBLISH_MIN_SCORE (ledger score, or a
-      // rescore when the ledger has no usable score). Does not lower the
+      // whose live HTML scores at or above PROD_PUBLISH_MIN_SCORE. A stored
+      // ledger score does not override that rescore. Does not lower the
       // bar. Body `{ dryRun?: boolean, limit?: number, cursor?: string,
       // minScore?: number, allowUnscoredCompleted?: boolean }`.
       // dryRun defaults to true. minScore below the configured bar is

@@ -224,29 +224,39 @@ describe("decideProdPromotion", () => {
     allowUnscoredCompleted: false
   };
 
-  it("promotes a ledger score on the bar and ignores a lower rescore", async () => {
+  it("lets a live rescore decide, including over a stored ledger score", async () => {
     const { decideProdPromotion } = await import("../prod-publish");
-    const decision = decideProdPromotion({
-      ...base,
-      ledgerScore: 90,
-      rescored: 10
-    });
-    expect(decision).toMatchObject({
-      promote: true,
-      score: 90,
-      scoreSource: "ledger"
+    expect(
+      decideProdPromotion({ ...base, ledgerScore: 89, rescored: 94 })
+    ).toMatchObject({ promote: true, score: 94, scoreSource: "rescore" });
+    expect(
+      decideProdPromotion({
+        ...base,
+        ledgerScore: 99,
+        rescored: 10,
+        allowUnscoredCompleted: true
+      })
+    ).toMatchObject({
+      promote: false,
+      reason: "below-bar",
+      score: 10,
+      scoreSource: "rescore"
     });
   });
 
-  it("keeps a below-bar ledger score in staging even if unscored shipping is allowed", async () => {
+  it("falls back to the ledger score when the HTML could not be rescored", async () => {
     const { decideProdPromotion } = await import("../prod-publish");
-    const decision = decideProdPromotion({
-      ...base,
-      ledgerScore: 89,
-      rescored: 100,
-      allowUnscoredCompleted: true
-    });
-    expect(decision).toMatchObject({
+    expect(
+      decideProdPromotion({ ...base, ledgerScore: 90, rescored: null })
+    ).toMatchObject({ promote: true, score: 90, scoreSource: "ledger" });
+    expect(
+      decideProdPromotion({
+        ...base,
+        ledgerScore: 89,
+        rescored: null,
+        allowUnscoredCompleted: true
+      })
+    ).toMatchObject({
       promote: false,
       reason: "below-bar",
       score: 89,
@@ -336,7 +346,7 @@ describe("sitemap promotion summary", () => {
     });
   });
 
-  it("keeps a stored ledger score when HTML would rescore differently", async () => {
+  it("scores the HTML being copied instead of shipping a stale ledger pass", async () => {
     const { assessStagingArticleForPromotion } =
       await import("../prod-publish");
     const decision = assessStagingArticleForPromotion({
@@ -348,11 +358,24 @@ describe("sitemap promotion summary", () => {
       hasRedirectTombstone: false,
       allowUnscoredCompleted: true
     });
-    expect(decision).toMatchObject({
-      promote: true,
-      score: 93,
-      scoreSource: "ledger"
+    expect(decision.promote).toBe(false);
+    expect(decision.reason).toBe("below-bar");
+    expect(decision.scoreSource).toBe("rescore");
+  });
+
+  it("rewrites a completed article onto the /reviews production URL", async () => {
+    const { prepareProductionArticle } = await import("../prod-publish");
+    const prepared = prepareProductionArticle({
+      kvKey: "cat-toys:best-toy",
+      html: `<link rel="canonical" href="https://${STAGING}/cat-toys/best-toy">`,
+      fromHost: STAGING,
+      toHost: PROD
     });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.prodUrl).toBe(`https://${PROD}/reviews/cat-toys/best-toy`);
+    expect(prepared.rewritten).toContain(prepared.prodUrl);
+    expect(prepared.rewritten).not.toContain(STAGING);
   });
 
   it("derives a rescore keyword from the category slug", async () => {

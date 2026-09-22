@@ -51,15 +51,17 @@ npx vitest run -t "rejects degenerate keywords"     # by test name
 npx vitest src/pipeline/__tests__/traffic-sources.test.ts   # watch mode
 ```
 
-Bulk-promote staging articles that already meet `PROD_PUBLISH_MIN_SCORE`
-(default 90) into production `ARTICLES_KV`, rewriting hosts onto
-`/reviews/{category}/{slug}`. Requires the worker this commit deploys, plus
-`ADMIN_API_TOKEN`. Does not lower the score bar.
+Bulk-promote staging-completed articles that score at or above
+`PROD_PUBLISH_MIN_SCORE` (default 90) into production `ARTICLES_KV`, rewriting
+hosts onto `/reviews/{category}/{slug}`. The dry run reads the public staging
+sitemap and scores each live page. `--apply` needs `CLOUDFLARE_API_TOKEN` and
+does not wait for a worker deploy. `--via-worker` uses the admin route after
+deploy and needs `ADMIN_API_TOKEN`.
 
 ```bash
-export ADMIN_API_TOKEN="$(doppler secrets get ADMIN_API_TOKEN --plain --no-read-env \
-  --project replit-n8n-catsluvus --config prd)"
 npm run promote:prod -- --dry-run
+export CLOUDFLARE_API_TOKEN="$(doppler secrets get CLOUDFLARE_API_TOKEN --plain --no-read-env \
+  --project replit-n8n-catsluvus --config prd)"
 npm run promote:prod -- --apply
 ```
 

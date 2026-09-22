@@ -21,7 +21,7 @@
     "bench": "vitest bench --run",
     "check": "oxfmt --check . && oxlint src/ && tsc && vitest run",
     "debug:pull-ndjson": "node ./scripts/pull-debug-ndjson.mjs",
-    "promote:prod": "node ./scripts/promote-prod-backlog.mjs"
+    "promote:prod": "tsx scripts/promote-prod-backlog.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.107",
@@ -51,6 +51,7 @@
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "tailwindcss": "^4.2.2",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
     "vitest": "^4.1.7",
