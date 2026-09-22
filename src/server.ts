@@ -70,7 +70,17 @@ import {
   NO_AMAZON_PRODUCTS_BANNER_TITLE,
   NO_AMAZON_PRODUCTS_HOW_TO_FIX
 } from "./pipeline/product-write-gate";
-import { classifyUserAgent } from "./pipeline/prod-publish";
+import {
+  assessStagingArticleForPromotion,
+  clampProdPublishMinScore,
+  clampPromoteBatchLimit,
+  classifyUserAgent,
+  loadPromotionCatalog,
+  publishArticleToProduction,
+  resolveProdPublishMinScore,
+  runPromotionBacklogBatch,
+  summarizePromotionCandidates
+} from "./pipeline/prod-publish";
 import {
   isCodebaseSearchEnabled,
   searchCodebase,
@@ -6299,6 +6309,201 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         return Response.json({ ok: true, dryRun, ...result });
       }
 
+      // GET /api/admin/promotion-candidates — sitemap articles vs the
+      // production score bar. Does not rescore and does not write.
+      // `unscored` rows still need POST /api/admin/promote-backlog, which
+      // runs calculateSEOScore before publishing.
+      if (
+        url.pathname === "/api/admin/promotion-candidates" &&
+        request.method === "GET"
+      ) {
+        const configured = resolveProdPublishMinScore(
+          getEnvBinding(this.envBindings, "PROD_PUBLISH_MIN_SCORE")
+        );
+        const requested = Number(url.searchParams.get("minScore"));
+        const minScore = clampProdPublishMinScore(
+          configured,
+          Number.isFinite(requested) ? requested : undefined
+        );
+        try {
+          const catalog = await loadPromotionCatalog(
+            this.envBindings.ARTICLES_KV,
+            this.envBindings.KEYWORDS_DB
+          );
+          return Response.json({
+            ok: true,
+            configuredMinScore: configured,
+            ...summarizePromotionCandidates({
+              kvKeys: catalog.kvKeys,
+              tombstones: catalog.tombstones,
+              ledger: catalog.ledger,
+              minScore
+            })
+          });
+        } catch (err: unknown) {
+          return Response.json(
+            { ok: false, error: `promotion candidates failed: ${errMsg(err)}` },
+            { status: 500 }
+          );
+        }
+      }
+
+      // POST /api/admin/promote — publish one staging article that already
+      // clears PROD_PUBLISH_MIN_SCORE. Body `{ kvKey, dryRun?: boolean }`.
+      // dryRun defaults to false. A score under the bar returns 409.
+      if (url.pathname === "/api/admin/promote" && request.method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as {
+          kvKey?: string;
+          dryRun?: boolean;
+        };
+        const kvKey = typeof body.kvKey === "string" ? body.kvKey.trim() : "";
+        if (!kvKey) {
+          return Response.json(
+            { ok: false, error: "kvKey required" },
+            { status: 400 }
+          );
+        }
+        const configured = resolveProdPublishMinScore(
+          getEnvBinding(this.envBindings, "PROD_PUBLISH_MIN_SCORE")
+        );
+        const dryRun = body.dryRun === true;
+        try {
+          const ledgerRow = this.envBindings.KEYWORDS_DB
+            ? await this.envBindings.KEYWORDS_DB.prepare(
+                `SELECT seo_score, keyword, promotion_status
+                   FROM article_ledger
+                  WHERE kv_key = ?1`
+              )
+                .bind(kvKey)
+                .first<{
+                  seo_score: number | null;
+                  keyword: string | null;
+                  promotion_status: string | null;
+                }>()
+            : null;
+          const html = await this.envBindings.ARTICLES_KV.get(kvKey);
+          const tombstone = await this.envBindings.ARTICLES_KV.get(
+            `redirect:${kvKey}`
+          );
+          const decision = assessStagingArticleForPromotion({
+            kvKey,
+            html,
+            minScore: configured,
+            ledgerScore:
+              typeof ledgerRow?.seo_score === "number"
+                ? ledgerRow.seo_score
+                : null,
+            ledgerKeyword:
+              typeof ledgerRow?.keyword === "string" ? ledgerRow.keyword : null,
+            hasRedirectTombstone: tombstone != null,
+            allowUnscoredCompleted: false
+          });
+          if (!decision.promote) {
+            return Response.json(
+              {
+                ok: false,
+                error: decision.reason,
+                kvKey,
+                minScore: configured,
+                score: decision.score,
+                scoreSource: decision.scoreSource
+              },
+              { status: 409 }
+            );
+          }
+          const result = await publishArticleToProduction(
+            this.envBindings,
+            this.envBindings.ARTICLES_KV,
+            this.envBindings.KEYWORDS_DB,
+            kvKey,
+            dryRun,
+            { skipStagingCleanupWrite: dryRun }
+          );
+          if (!result.ok) {
+            return Response.json(
+              { ...result, minScore: configured, decision },
+              { status: 502 }
+            );
+          }
+          if (!dryRun) {
+            this.log(
+              "info",
+              `Production promote: ${result.prodUrl ?? kvKey} (score ${decision.score ?? "unscored"} ${decision.scoreSource ?? ""})`,
+              "marketing"
+            );
+          }
+          return Response.json({
+            ...result,
+            dryRun,
+            minScore: configured,
+            decision
+          });
+        } catch (err: unknown) {
+          return Response.json(
+            { ok: false, error: `promote failed: ${errMsg(err)}` },
+            { status: 500 }
+          );
+        }
+      }
+
+      // POST /api/admin/promote-backlog — next batch of sitemap articles
+      // that already meet PROD_PUBLISH_MIN_SCORE (ledger score, or a
+      // rescore when the ledger has no usable score). Does not lower the
+      // bar. Body `{ dryRun?: boolean, limit?: number, cursor?: string,
+      // minScore?: number, allowUnscoredCompleted?: boolean }`.
+      // dryRun defaults to true. minScore below the configured bar is
+      // raised to the bar. After a real run, POST /api/admin/sitemap/prune
+      // once so promoted URLs leave the staging sitemap.
+      if (
+        url.pathname === "/api/admin/promote-backlog" &&
+        request.method === "POST"
+      ) {
+        const body = (await request.json().catch(() => ({}))) as {
+          dryRun?: boolean;
+          limit?: number;
+          cursor?: string;
+          minScore?: number;
+          allowUnscoredCompleted?: boolean;
+        };
+        const configured = resolveProdPublishMinScore(
+          getEnvBinding(this.envBindings, "PROD_PUBLISH_MIN_SCORE")
+        );
+        const minScore = clampProdPublishMinScore(configured, body.minScore);
+        const dryRun = body.dryRun !== false;
+        const limit = clampPromoteBatchLimit(body.limit);
+        const cursor = typeof body.cursor === "string" ? body.cursor : "";
+        try {
+          const result = await runPromotionBacklogBatch(
+            this.envBindings,
+            this.envBindings.ARTICLES_KV,
+            this.envBindings.KEYWORDS_DB,
+            {
+              dryRun,
+              limit,
+              cursor,
+              minScore,
+              allowUnscoredCompleted: body.allowUnscoredCompleted === true
+            }
+          );
+          if (!dryRun && result.promoted.length > 0) {
+            this.log(
+              "info",
+              `Production backlog promote: ${result.promoted.length} article(s) at score ≥ ${minScore}`,
+              "marketing"
+            );
+          }
+          return Response.json(
+            { ...result, configuredMinScore: configured },
+            { status: result.ok ? 200 : 500 }
+          );
+        } catch (err: unknown) {
+          return Response.json(
+            { ok: false, error: `promote backlog failed: ${errMsg(err)}` },
+            { status: 500 }
+          );
+        }
+      }
+
       // GET /api/admin/traffic-source/:sourceId/:kvKey — the ready-to-post
       // artifact generated for one channel of one article.
       if (
@@ -10015,9 +10220,9 @@ export default {
     }
 
     // Real robots.txt (the SPA shell used to swallow this path). The
-    // staging domain is DELIBERATELY indexable — the incubation strategy
-    // lets Google crawl staging articles and vote with impressions before
-    // winners are promoted to production via /api/admin/promote.
+    // staging domain is indexable. Articles that clear
+    // PROD_PUBLISH_MIN_SCORE are copied to production KV by the pipeline
+    // and by POST /api/admin/promote-backlog.
     if (url.pathname === "/robots.txt") {
       return new Response(
         `User-agent: *\nAllow: /\n\nSitemap: https://${env.DOMAIN}/sitemap.xml\n`,

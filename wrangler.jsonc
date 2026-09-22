@@ -93,9 +93,9 @@
     "DOMAIN": "cats-seo-aiagent-staging.webmaster-bc8.workers.dev",
     "CLOUDFLARE_ZONE_ID": "646da2c86dbbe1dff196c155381b0704",
     "CLOUDFLARE_ACCOUNT_ID": "bc8e15f958dc350e00c0e39d80ca6941",
-    // Staging → production promotion pipeline (POST /api/admin/promote):
-    // where promoted articles are written and which host replaces the
-    // staging host in their HTML.
+    // Staging → production promotion (pipeline final step and
+    // POST /api/admin/promote / promote-backlog): host that replaces the
+    // staging host in article HTML, with /reviews inserted on article paths.
     "PROMOTION_TARGET_DOMAIN": "catsluvus.com",
     // Managed public domain of the seo-images-staging R2 bucket — hero
     // images are referenced from here so URLs survive the staging →

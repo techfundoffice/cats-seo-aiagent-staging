@@ -51,6 +51,18 @@ npx vitest run -t "rejects degenerate keywords"     # by test name
 npx vitest src/pipeline/__tests__/traffic-sources.test.ts   # watch mode
 ```
 
+Bulk-promote staging articles that already meet `PROD_PUBLISH_MIN_SCORE`
+(default 90) into production `ARTICLES_KV`, rewriting hosts onto
+`/reviews/{category}/{slug}`. Requires the worker this commit deploys, plus
+`ADMIN_API_TOKEN`. Does not lower the score bar.
+
+```bash
+export ADMIN_API_TOKEN="$(doppler secrets get ADMIN_API_TOKEN --plain --no-read-env \
+  --project replit-n8n-catsluvus --config prd)"
+npm run promote:prod -- --dry-run
+npm run promote:prod -- --apply
+```
+
 Vitest is `environment: "node"`, `include: ["src/**/*.test.ts"]` — no jsdom, no
 `@cloudflare/vitest-pool-workers`. Tests target **pure helpers only**; anything
 that needs the Workers runtime or a DO is not unit-testable here, so extract the
