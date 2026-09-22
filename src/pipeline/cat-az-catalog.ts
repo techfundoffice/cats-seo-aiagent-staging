@@ -1,9 +1,14 @@
 /**
  * Cat A–Z catalog refill.
  *
- * Pending keywords come from real Amazon cat products. Each tick searches
- * the current letter (A, then B, …), enqueues product-title keywords with
- * their ASINs, and advances the letter when that page has nothing new left.
+ * Pending keywords come from real Amazon cat products. Each tick tries
+ * several queries for the current letter (A, then B, …) until a title or
+ * brand starts with that letter, enqueues those product keywords with
+ * their ASINs, and advances when the letter is exhausted. Exhausted means
+ * the catalog page was empty, every matching product was already seen or
+ * rejected, or the pending cap filled and no enqueueable match remains.
+ * Hits that do not match the letter do not move the cursor. A partial
+ * enqueue that still has buffer room also leaves the cursor in place.
  * The pending buffer stays small so Generate 1 claims one real product.
  */
 
@@ -82,8 +87,19 @@ export function catAzCategorySlug(letter: string): string {
   return `cat-${normalizeCursorLetter(letter).toLowerCase()}`;
 }
 
+/** Queries tried, in order, until a letter-matching product appears. */
+export function catCatalogSearchQueries(letter: string): readonly string[] {
+  const normalized = normalizeCursorLetter(letter);
+  return [
+    `cat ${normalized}`,
+    `${normalized} for cats`,
+    `${normalized} cat toy`,
+    `${normalized} cat tree`
+  ];
+}
+
 export function catCatalogSearchKeyword(letter: string): string {
-  return `cat ${normalizeCursorLetter(letter)}`;
+  return catCatalogSearchQueries(letter)[0];
 }
 
 export function leadingCatalogLetter(value: string): string {
@@ -133,20 +149,27 @@ export function planCatAzRefill(input: {
   const enqueue: CatAzEnqueueRow[] = [];
   const skipAsins: string[] = [];
   let stoppedForCap = false;
+  let letterMatches = 0;
+  let resolvedMatches = 0;
   const categorySlug = catAzCategorySlug(letter);
   const categoryTitle = `Cat ${letter}`;
 
   for (const product of input.products) {
     const asin = product.asin.trim().toUpperCase();
     if (!ASIN_RE.test(asin)) continue;
-    if (input.doneAsins.has(asin)) continue;
     if (!matchesCatalogLetter(product, letter)) continue;
+    letterMatches++;
+    if (input.doneAsins.has(asin)) {
+      resolvedMatches++;
+      continue;
+    }
     const keyword = keywordFromCatalogTitle(product.title);
     const gate = keyword
       ? evaluateCommercialKeyword(keyword, categorySlug)
       : null;
     if (!keyword || !gate?.ok) {
       skipAsins.push(asin);
+      resolvedMatches++;
       continue;
     }
     if (enqueue.length >= slots) {
@@ -162,7 +185,19 @@ export function planCatAzRefill(input: {
     });
   }
 
-  const advanced = !stoppedForCap;
+  // Hold the letter when this search returned products but none match it.
+  // Advance when the page was empty, when every letter match was already
+  // seen or rejected, or when the pending cap is full and every remaining
+  // match was skipped. A partial enqueue that still has buffer room stays
+  // put so the next tick can try another query for this letter.
+  const everyMatchSeenOrRejected =
+    letterMatches > 0 && resolvedMatches === letterMatches && !stoppedForCap;
+  const capFilledAndPageDone =
+    enqueue.length > 0 && enqueue.length >= slots && !stoppedForCap;
+  const advanced =
+    input.products.length === 0 ||
+    everyMatchSeenOrRejected ||
+    capFilledAndPageDone;
   return {
     enqueue,
     skipAsins,
@@ -171,23 +206,35 @@ export function planCatAzRefill(input: {
   };
 }
 
-export async function searchCatCatalogLetter(
-  letter: string,
+interface CatalogQueryPage {
+  ok: boolean;
+  products: AmazonProduct[];
+  matched: AmazonProduct[];
+}
+
+function isFreshCatalogAsin(
+  asin: string | undefined,
+  doneAsins: ReadonlySet<string>
+): boolean {
+  const normalized = (asin ?? "").trim().toUpperCase();
+  return ASIN_RE.test(normalized) && !doneAsins.has(normalized);
+}
+
+async function searchCatalogQuery(
+  keyword: string,
   creds: { creators: CredentialPair[]; pa: PaPair[] },
   tag: string,
+  letter: string,
   onWarn: (msg: string) => void
-): Promise<{ ok: boolean; products: AmazonProduct[] }> {
-  const keyword = catCatalogSearchKeyword(letter);
-  if (creds.creators.length === 0 && creds.pa.length === 0) {
-    return { ok: false, products: [] };
-  }
-
+): Promise<CatalogQueryPage> {
   let anySuccess = false;
+  let lastHits: AmazonProduct[] = [];
   const consider = (
     found: AmazonProduct[],
     warned: boolean
   ): AmazonProduct[] | null => {
     if (!warned || found.length > 0) anySuccess = true;
+    if (found.length > 0) lastHits = found;
     const matched = found.filter((product) =>
       matchesCatalogLetter(
         { title: product.name || "", brand: product.brand },
@@ -211,7 +258,7 @@ export async function searchCatCatalogLetter(
         }
       );
       const matched = consider(found, warned);
-      if (matched) return { ok: true, products: matched };
+      if (matched) return { ok: true, products: found, matched };
     } catch (err: unknown) {
       onWarn(`Creators ${pair.label}: ${errMsg(err)}`);
     }
@@ -231,10 +278,59 @@ export async function searchCatCatalogLetter(
         }
       );
       const matched = consider(found, warned);
-      if (matched) return { ok: true, products: matched };
+      if (matched) return { ok: true, products: found, matched };
     } catch (err: unknown) {
       onWarn(`PA API ${pair.label}: ${errMsg(err)}`);
     }
+  }
+
+  return { ok: anySuccess, products: lastHits, matched: [] };
+}
+
+export async function searchCatCatalogLetter(
+  letter: string,
+  creds: { creators: CredentialPair[]; pa: PaPair[] },
+  tag: string,
+  onWarn: (msg: string) => void,
+  doneAsins: ReadonlySet<string> = new Set()
+): Promise<{ ok: boolean; products: AmazonProduct[] }> {
+  if (creds.creators.length === 0 && creds.pa.length === 0) {
+    return { ok: false, products: [] };
+  }
+
+  const queries = catCatalogSearchQueries(letter);
+  const normalized = normalizeCursorLetter(letter);
+  let anySuccess = false;
+  let unmatchedHits = 0;
+  let unmatched: AmazonProduct[] = [];
+  const exhausted: AmazonProduct[] = [];
+
+  for (const keyword of queries) {
+    const page = await searchCatalogQuery(keyword, creds, tag, letter, onWarn);
+    if (page.ok) anySuccess = true;
+    if (page.matched.length === 0) {
+      if (page.products.length > 0) {
+        unmatched = page.products;
+        unmatchedHits += page.products.length;
+      }
+      continue;
+    }
+    const fresh = page.matched.filter((product) =>
+      isFreshCatalogAsin(product.asin, doneAsins)
+    );
+    if (fresh.length > 0) return { ok: true, products: page.matched };
+    exhausted.push(...page.matched);
+  }
+
+  if (exhausted.length > 0) {
+    return { ok: anySuccess, products: exhausted };
+  }
+
+  if (anySuccess && unmatched.length > 0) {
+    onWarn(
+      `letter ${normalized} searches returned ${unmatchedHits} catalog hit(s) but no title or brand starts with ${normalized} (tried: ${queries.join(", ")}) — not advancing`
+    );
+    return { ok: true, products: unmatched };
   }
 
   return { ok: anySuccess, products: [] };
@@ -435,18 +531,18 @@ export async function refillCatAzKeywords(
     return { ...empty, skippedJunk, letter, nextLetter: letter, pending };
   }
 
-  const search = await searchCatCatalogLetter(
-    letter,
-    { creators, pa },
-    affiliateTag(agent),
-    (msg) => agent.log("warning", `Cat A–Z: ${msg}`, "productManager")
-  );
-
   const seenRes = await db
     .prepare(`SELECT asin FROM cat_az_seen_asin`)
     .all<{ asin: string }>();
   const doneAsins = new Set(
     (seenRes.results ?? []).map((row) => row.asin.toUpperCase())
+  );
+  const search = await searchCatCatalogLetter(
+    letter,
+    { creators, pa },
+    affiliateTag(agent),
+    (msg) => agent.log("warning", `Cat A–Z: ${msg}`, "productManager"),
+    doneAsins
   );
   const plan = planCatAzRefill({
     letter,
