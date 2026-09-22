@@ -310,6 +310,74 @@ describe("decideProdPromotion", () => {
   });
 });
 
+describe("selectBacklogKvKeys", () => {
+  it("keeps present article keys whose ledger score clears the bar", async () => {
+    const { selectBacklogKvKeys } = await import("../prod-publish");
+    const result = selectBacklogKvKeys({
+      kvKeys: [
+        "redirect:cat-toys:old",
+        "feed:rss",
+        "cat-toys:best",
+        "cat-beds:heated",
+        "cat-trees:tall",
+        "cat-food:unscored",
+        "sitemap:flat-sitemap"
+      ],
+      tombstones: new Set(["cat-beds:heated"]),
+      ledger: new Map([
+        ["cat-toys:best", { seoScore: 96 }],
+        ["cat-beds:heated", { seoScore: 99 }],
+        ["cat-trees:tall", { seoScore: 40 }],
+        ["cat-food:unscored", { seoScore: 0 }],
+        ["feed:rss", { seoScore: 100 }]
+      ]),
+      minScore: 90,
+      cursor: "",
+      limit: 10
+    });
+    expect(result.selected).toEqual(["cat-toys:best"]);
+    expect(result.skipped).toEqual({
+      alreadyPromoted: 1,
+      belowBar: 1,
+      unscored: 1,
+      invalidKey: 3
+    });
+    expect(result.done).toBe(true);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("pages after the cursor and stops at the limit", async () => {
+    const { selectBacklogKvKeys } = await import("../prod-publish");
+    const ledger = new Map([
+      ["a:one", { seoScore: 90 }],
+      ["b:two", { seoScore: 91 }],
+      ["c:three", { seoScore: 92 }]
+    ]);
+    const first = selectBacklogKvKeys({
+      kvKeys: ["a:one", "b:two", "c:three"],
+      tombstones: new Set(),
+      ledger,
+      minScore: 90,
+      cursor: "",
+      limit: 2
+    });
+    expect(first.selected).toEqual(["a:one", "b:two"]);
+    expect(first.done).toBe(false);
+    expect(first.nextCursor).toBe("b:two");
+    const second = selectBacklogKvKeys({
+      kvKeys: ["a:one", "b:two", "c:three"],
+      tombstones: new Set(),
+      ledger,
+      minScore: 90,
+      cursor: first.nextCursor ?? "",
+      limit: 2
+    });
+    expect(second.selected).toEqual(["c:three"]);
+    expect(second.done).toBe(true);
+    expect(second.nextCursor).toBeNull();
+  });
+});
+
 describe("sitemap promotion summary", () => {
   it("counts ledger-eligible, below-bar, unscored, and tombstoned keys", async () => {
     const { summarizePromotionCandidates, articleKvKeysFromSitemap } =

@@ -251,6 +251,108 @@ export function mergeGlobalIndex(
 
 const ARTICLE_KV_KEY_RE = /^[^:]+:[^:]+$/;
 
+/**
+ * One-colon KV keys that are not `{category}:{slug}` articles.
+ * Sidecars such as `redirect:cat:slug` already fail ARTICLE_KV_KEY_RE
+ * because they contain two colons.
+ */
+const NON_ARTICLE_KV_PREFIXES = new Set([
+  "affiliate-clicks",
+  "articles-index",
+  "ctr-rewrite",
+  "defect-findings",
+  "editorial-report",
+  "escalation-dedup",
+  "feed",
+  "idle-tick",
+  "kimi-raw",
+  "kimi-raw-prompt",
+  "qa",
+  "qa-index",
+  "redirect",
+  "sitemap",
+  "traffic-source",
+  "traffic-sources"
+]);
+
+/** True for a staging article body key (`category:slug`), not a sidecar. */
+export function isStagingArticleKvKey(key: string): boolean {
+  if (!ARTICLE_KV_KEY_RE.test(key)) return false;
+  const prefix = key.slice(0, key.indexOf(":"));
+  return !NON_ARTICLE_KV_PREFIXES.has(prefix);
+}
+
+export interface BacklogKeySelection {
+  selected: string[];
+  skipped: {
+    alreadyPromoted: number;
+    belowBar: number;
+    unscored: number;
+    invalidKey: number;
+  };
+  /** Last key examined. Pass back as `cursor` to continue. */
+  nextCursor: string | null;
+  done: boolean;
+}
+
+/**
+ * Staging article keys that are still eligible for production:
+ * present in the KV key list, not tombstoned, ledger score >= minScore.
+ * Keys at or below `cursor` are skipped so callers can page with `limit`.
+ */
+export function selectBacklogKvKeys(input: {
+  kvKeys: readonly string[];
+  tombstones: ReadonlySet<string>;
+  ledger: ReadonlyMap<string, { seoScore: number | null }>;
+  minScore: number;
+  cursor: string;
+  limit: number;
+}): BacklogKeySelection {
+  const skipped = {
+    alreadyPromoted: 0,
+    belowBar: 0,
+    unscored: 0,
+    invalidKey: 0
+  };
+  const selected: string[] = [];
+  let lastExamined = input.cursor;
+  let index = 0;
+  const keys = [...input.kvKeys].sort();
+  if (input.cursor) {
+    while (index < keys.length && keys[index]! <= input.cursor) index++;
+  }
+  while (index < keys.length && selected.length < input.limit) {
+    const kvKey = keys[index]!;
+    lastExamined = kvKey;
+    index++;
+    if (!isStagingArticleKvKey(kvKey)) {
+      skipped.invalidKey++;
+      continue;
+    }
+    if (input.tombstones.has(kvKey)) {
+      skipped.alreadyPromoted++;
+      continue;
+    }
+    const score = usableLedgerScore(input.ledger.get(kvKey)?.seoScore);
+    if (score == null) {
+      skipped.unscored++;
+      continue;
+    }
+    if (score < input.minScore) {
+      skipped.belowBar++;
+      continue;
+    }
+    selected.push(kvKey);
+  }
+  const done = index >= keys.length;
+  return {
+    selected,
+    skipped,
+    nextCursor: done ? null : lastExamined,
+    done
+  };
+}
+
 /** Ledger `seo_score` of 0 is the column default, not a measured failure. */
 export function usableLedgerScore(
   score: number | null | undefined
@@ -299,7 +401,7 @@ export function decideProdPromotion(input: {
   rescored: number | null;
   allowUnscoredCompleted: boolean;
 }): ProdPromoteDecision {
-  if (!ARTICLE_KV_KEY_RE.test(input.kvKey)) {
+  if (!isStagingArticleKvKey(input.kvKey)) {
     return {
       promote: false,
       reason: "invalid-key",
@@ -469,20 +571,23 @@ export interface LedgerPromotionRow {
 
 export interface PromotionCandidateSummary {
   minScore: number;
+  /** Staging article keys examined (KV bodies still present). */
+  listedArticles: number;
+  /** Same count as `listedArticles`. Kept for callers that read the old name. */
   sitemapArticles: number;
   alreadyPromoted: number;
   eligibleByLedger: number;
   belowBar: number;
-  /** In the sitemap, not tombstoned, and no usable ledger score. */
+  /** Present, not tombstoned, and no usable ledger score. Not promoted. */
   unscored: number;
   sampleEligible: string[];
   sampleUnscored: string[];
 }
 
 /**
- * Counts from the sitemap, redirect tombstones, and ledger scores.
- * Does not fetch HTML or rescore — `unscored` still needs a rescore
- * pass before it can be promoted.
+ * Counts staging article keys against redirect tombstones and ledger
+ * scores. Does not rescore HTML. Only `eligibleByLedger` may be copied
+ * to production.
  */
 export function summarizePromotionCandidates(input: {
   kvKeys: readonly string[];
@@ -492,6 +597,7 @@ export function summarizePromotionCandidates(input: {
 }): PromotionCandidateSummary {
   const summary: PromotionCandidateSummary = {
     minScore: input.minScore,
+    listedArticles: input.kvKeys.length,
     sitemapArticles: input.kvKeys.length,
     alreadyPromoted: 0,
     eligibleByLedger: 0,
@@ -794,6 +900,28 @@ export async function listRedirectTombstones(
   return out;
 }
 
+/** Article body keys still stored in staging KV (`category:slug`). */
+export async function listStagingArticleKvKeys(
+  articlesKv: KVNamespace
+): Promise<string[]> {
+  const out: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10_000; page++) {
+    const listed = await articlesKv.list({
+      limit: 1000,
+      ...(cursor ? { cursor } : {})
+    });
+    for (const key of listed.keys) {
+      if (isStagingArticleKvKey(key.name)) out.push(key.name);
+    }
+    if (listed.list_complete) break;
+    if (!listed.cursor || listed.cursor === cursor) break;
+    cursor = listed.cursor;
+  }
+  out.sort();
+  return out;
+}
+
 export async function loadPromotionCatalog(
   articlesKv: KVNamespace,
   keywordsDb: D1Database | undefined
@@ -802,12 +930,8 @@ export async function loadPromotionCatalog(
   tombstones: Set<string>;
   ledger: Map<string, LedgerPromotionRow>;
 }> {
-  // Dynamic import: see publishArticleToProduction. The sitemap key must
-  // stay the one indexing.ts writes.
-  const { SITEMAP_KV_KEY } = await import("./indexing");
-  const xml = (await articlesKv.get(SITEMAP_KV_KEY)) ?? "";
   const [kvKeys, tombstones, ledger] = await Promise.all([
-    Promise.resolve(articleKvKeysFromSitemap(xml)),
+    listStagingArticleKvKeys(articlesKv),
     listRedirectTombstones(articlesKv),
     keywordsDb
       ? loadLedgerPromotionRows(keywordsDb)
@@ -859,41 +983,14 @@ function emptySkipCounts(): PromotionBacklogBatchResult["skipped"] {
   };
 }
 
-function bumpSkip(
-  skipped: PromotionBacklogBatchResult["skipped"],
-  reason: ProdPromoteSkipReason
-): void {
-  switch (reason) {
-    case "already-promoted":
-      skipped.alreadyPromoted++;
-      break;
-    case "below-bar":
-      skipped.belowBar++;
-      break;
-    case "unscored":
-      skipped.unscored++;
-      break;
-    case "missing-html":
-      skipped.missingHtml++;
-      break;
-    case "invalid-key":
-      skipped.invalidKey++;
-      break;
-    default: {
-      const _exhaustive: never = reason;
-      void _exhaustive;
-    }
-  }
-}
-
 /**
- * Promote the next slice of sitemap articles that clear the production bar.
+ * Promote the next slice of staging KV articles whose ledger score is
+ * already at or above `minScore`.
  *
- * Walks sitemap kvKeys after `cursor`. Ledger scores at or above `minScore`
- * publish immediately. Rows with no usable score are rescored with the
- * same `calculateSEOScore` the pipeline uses. Below-bar articles stay in
- * staging. One failed production write stops the batch so the cursor
- * retries that key instead of skipping it.
+ * Lists article keys still present, skips redirect tombstones, and
+ * ignores unscored or below-bar rows. Each selected key goes through
+ * `publishArticleToProduction` (host rewrite + `/reviews`). One failed
+ * production write stops the batch so the cursor retries that key.
  */
 export async function runPromotionBacklogBatch(
   env: unknown,
@@ -904,7 +1001,6 @@ export async function runPromotionBacklogBatch(
     limit: number;
     cursor: string;
     minScore: number;
-    allowUnscoredCompleted: boolean;
   }
 ): Promise<PromotionBacklogBatchResult> {
   const limit = clampPromoteBatchLimit(request.limit);
@@ -912,7 +1008,7 @@ export async function runPromotionBacklogBatch(
     ok: true,
     dryRun: request.dryRun,
     minScore: request.minScore,
-    allowUnscoredCompleted: request.allowUnscoredCompleted,
+    allowUnscoredCompleted: false,
     cursor: request.cursor,
     nextCursor: null,
     done: false,
@@ -931,47 +1027,23 @@ export async function runPromotionBacklogBatch(
     };
   }
 
-  let index = 0;
-  if (request.cursor) {
-    while (
-      index < catalog.kvKeys.length &&
-      catalog.kvKeys[index]! <= request.cursor
-    ) {
-      index++;
-    }
-  }
+  const selection = selectBacklogKvKeys({
+    kvKeys: catalog.kvKeys,
+    tombstones: catalog.tombstones,
+    ledger: catalog.ledger,
+    minScore: request.minScore,
+    cursor: request.cursor,
+    limit
+  });
+  base.skipped.alreadyPromoted = selection.skipped.alreadyPromoted;
+  base.skipped.belowBar = selection.skipped.belowBar;
+  base.skipped.unscored = selection.skipped.unscored;
+  base.skipped.invalidKey = selection.skipped.invalidKey;
 
   let lastCommitted = request.cursor;
   let stoppedOn: { kvKey: string; error: string } | undefined;
-  while (index < catalog.kvKeys.length && base.fetched < limit) {
-    const kvKey = catalog.kvKeys[index]!;
-    const row = catalog.ledger.get(kvKey);
-    const tombstone = catalog.tombstones.has(kvKey);
-    if (tombstone) {
-      bumpSkip(base.skipped, "already-promoted");
-      lastCommitted = kvKey;
-      index++;
-      continue;
-    }
-
+  for (const kvKey of selection.selected) {
     base.fetched++;
-    const html = await articlesKv.get(kvKey);
-    const decision = assessStagingArticleForPromotion({
-      kvKey,
-      html,
-      minScore: request.minScore,
-      ledgerScore: row?.seoScore ?? null,
-      ledgerKeyword: row?.keyword ?? null,
-      hasRedirectTombstone: tombstone,
-      allowUnscoredCompleted: request.allowUnscoredCompleted
-    });
-    if (!decision.promote) {
-      bumpSkip(base.skipped, decision.reason);
-      lastCommitted = kvKey;
-      index++;
-      continue;
-    }
-
     const published = await publishArticleToProduction(
       env,
       articlesKv,
@@ -994,22 +1066,25 @@ export async function runPromotionBacklogBatch(
     base.promoted.push({
       kvKey,
       prodUrl: published.prodUrl,
-      score: decision.score,
-      scoreSource: decision.scoreSource,
+      score: usableLedgerScore(catalog.ledger.get(kvKey)?.seoScore),
+      scoreSource: "ledger",
       dryRun: request.dryRun,
       ok: true,
       ...(published.error ? { error: published.error } : {})
     });
-    if (!request.dryRun) catalog.tombstones.add(kvKey);
     lastCommitted = kvKey;
-    index++;
   }
 
-  const done = stoppedOn == null && index >= catalog.kvKeys.length;
+  const finishedSelection = stoppedOn == null;
+  const done = finishedSelection && selection.done;
   return {
     ...base,
     done,
-    nextCursor: done ? null : lastCommitted,
+    nextCursor: done
+      ? null
+      : finishedSelection
+        ? selection.nextCursor
+        : lastCommitted,
     ...(stoppedOn ? { stoppedOn } : {})
   };
 }

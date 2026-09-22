@@ -21,7 +21,8 @@
     "bench": "vitest bench --run",
     "check": "oxfmt --check . && oxlint src/ && tsc && vitest run",
     "debug:pull-ndjson": "node ./scripts/pull-debug-ndjson.mjs",
-    "promote:prod": "tsx scripts/promote-prod-backlog.ts"
+    "promote:backlog": "tsx scripts/promote-backlog.ts",
+    "promote:prod": "tsx scripts/promote-backlog.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.107",

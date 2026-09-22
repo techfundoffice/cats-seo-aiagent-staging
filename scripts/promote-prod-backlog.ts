@@ -5,14 +5,13 @@
  * sitemap, scores each live HTML page with calculateSEOScore, and counts
  * how many already clear PROD_PUBLISH_MIN_SCORE (default 90).
  *
- * `--apply` writes those pages to production KV (host rewrite + `/reviews`),
- * tombstones the staging key, and updates the production indexes. It needs
- * CLOUDFLARE_API_TOKEN. This runs from a checkout of this branch; it does
- * not wait for the worker admin route to be deployed.
+ * Local `--apply` is disabled. It rescored live HTML and wrote production
+ * KV without the ledger bar or `publishArticleToProduction`. Ship the
+ * backlog with `npm run promote:backlog -- --apply` after this revision
+ * is deployed.
  *
- * `--via-worker` calls the deployed POST /api/admin/promote-backlog instead.
- * That path needs ADMIN_API_TOKEN and a worker that already contains this
- * revision.
+ * `--via-worker` still calls POST /api/admin/promote-backlog. That route
+ * now requires a ledger score >= PROD_PUBLISH_MIN_SCORE.
  *
  *   npm run promote:prod -- --dry-run
  *   npm run promote:prod -- --apply
@@ -70,7 +69,13 @@ if (args.includes("--help") || args.includes("-h")) {
 
 const apply = args.includes("--apply");
 const viaWorker = args.includes("--via-worker");
-const allowUnscoredCompleted = args.includes("--allow-unscored-completed");
+if (apply && !viaWorker) {
+  console.error(
+    "Local --apply is disabled. It would copy HTML that merely rescored >= 90, including rows with no ledger score. Use npm run promote:backlog -- --apply after the worker deploy. That path calls publishArticleToProduction for staging KV keys whose ledger seo_score is >= PROD_PUBLISH_MIN_SCORE."
+  );
+  process.exit(1);
+}
+const allowUnscoredCompleted = false;
 const limitRaw = Number(
   argValue("--limit") ?? process.env.PROMOTE_BATCH_LIMIT ?? "0"
 );
@@ -156,7 +161,6 @@ async function runViaWorker(): Promise<void> {
       dryRun: !apply,
       cursor,
       minScore,
-      allowUnscoredCompleted,
       ...(limit > 0 ? { limit: Math.min(limit, 15) } : {})
     });
     const rows = Array.isArray(batch.promoted) ? batch.promoted.length : 0;
@@ -368,7 +372,7 @@ async function runLocal(): Promise<void> {
   );
   if (!apply) {
     console.log(
-      "Dry run only. Re-run with --apply and CLOUDFLARE_API_TOKEN to write production KV. URLs will be https://catsluvus.com/reviews/{category}/{slug}."
+      "Informational rescore only. It does not write production KV. Ship ledger-eligible staging keys with: npm run promote:backlog -- --apply"
     );
   }
 }
