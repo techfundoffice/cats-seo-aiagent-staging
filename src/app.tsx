@@ -2394,7 +2394,7 @@ export default function Dashboard() {
         {/* Traffic Sources — per-article distribution ledger; fills in while the next article generates (src/pipeline/traffic-sources.ts) */}
         <TrafficSourcesPanel />
 
-        {/* Improvement Agent — autonomous self-improvement loop (src/pipeline/improvement-agent.ts) */}
+        {/* Improvement Agent — success path hard-disabled (src/pipeline/improvement-agent.ts) */}
         <ImprovementAgentPanel state={state} />
 
         {/* API Activity Log — every outbound fetch the Worker makes (src/pipeline/api-logger.ts) */}
@@ -5066,12 +5066,10 @@ function TextEditorAgentPanel({ state }: { state: SEOAgentState }) {
   );
 }
 
-// Improvement Agent panel — autonomous self-improvement loop.
-// Fires once per successful article publish (src/pipeline/improvement-agent.ts).
-// Opens a GitHub issue + assigns Copilot Coding Agent, which picks one
-// codebase improvement, reads the relevant `.claude/skills/<slug>/SKILL.md`,
-// and opens a PR titled `improve(auto): …`. The existing
-// `auto-merge-copilot.yml` squash-merges once `check (ubuntu-24.04)` passes.
+// Improvement Agent panel. The success-path loop is hard-disabled in
+// src/pipeline/improvement-agent.ts: a publish logs "Improvement Agent:
+// disabled" and does not open a GitHub issue or assign Copilot. Historical
+// "opened issue #N" rows still parse if they are already in the log.
 //
 // Filters activity log entries by role=improvementAgent and parses the
 // "opened issue #N for "<keyword>" — <html_url>" structured line into a
@@ -5143,9 +5141,9 @@ function ImprovementAgentPanel({ state }: { state: SEOAgentState }) {
               color: "#6b7280"
             }}
           >
-            Fires once per published article. Copilot Coding Agent picks one
-            codebase improvement, reads the relevant skill docs, and opens an{" "}
-            <code>improve(auto):</code> PR. 24h KV dedup per kvKey.
+            Disabled. A successful publish does not open a GitHub issue or
+            assign Copilot. Entries here are the disabled notice or older issue
+            rows.
           </p>
         </div>
         <div
@@ -5187,8 +5185,7 @@ function ImprovementAgentPanel({ state }: { state: SEOAgentState }) {
               textAlign: "center"
             }}
           >
-            Improvement Agent is idle — no articles have published since the
-            loop went live.
+            Improvement Agent is disabled. Publishes do not open GitHub issues.
           </div>
         ) : (
           <div

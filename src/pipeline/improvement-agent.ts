@@ -1,17 +1,22 @@
 /**
  * improvement-agent.ts — fire-and-forget self-improvement loop.
  *
- * Fires once per successful article publish (from `finalizeArticle()`).
- * Opens a GitHub issue labeled `improvement` + `auto`, then assigns
- * GitHub Copilot Coding Agent to it. Copilot reads the issue body,
- * picks ONE high-leverage `src/` improvement, reads any relevant
- * `.claude/skills/<slug>/SKILL.md`, runs `npm run check`, and opens a
- * PR titled `improve(auto): [one-line]`. Existing
- * `.github/workflows/auto-merge-copilot.yml` squash-merges the PR once
- * `check (ubuntu-24.04)` passes.
+ * HARD-DISABLED. `triggerCodebaseImprovement()` still runs from
+ * `finalizeArticle()` after a successful publish, but
+ * `improvementAgentEnabled()` returns false, so the function logs
+ * "Improvement Agent: disabled" and returns before KV, GitHub issue
+ * creation, or Copilot assignment. A set `GITHUB_TOKEN_SECRET` does
+ * not turn it back on. Failure escalation (`escalate-to-claude.ts`)
+ * is a separate entry point and is unchanged.
  *
- * Mirrors the failure-escalation flow (`escalate-to-claude.ts`); the
- * only behavioural differences are: (1) fires on success, not failure;
+ * Re-enable: make `improvementAgentEnabled()` return true. The dispatch
+ * below that guard is the previous success-path behavior: open a GitHub
+ * issue labeled `improvement` + `auto`, assign Copilot, and let
+ * `.github/workflows/auto-merge-copilot.yml` squash-merge the
+ * `improve(auto):` PR once `check (ubuntu-24.04)` passes.
+ *
+ * When enabled, this mirrors the failure-escalation flow; the
+ * behavioural differences are: (1) fires on success, not failure;
  * (2) issue label is `improvement` not `claude-fix`; (3) 24h KV dedup
  * window per kvKey (vs 1h per category) — a republish via the editorial
  * agent must NOT re-trigger improvement on the same article.
@@ -116,15 +121,31 @@ type UrlLikeInput = {
 const IMPROVEMENT_DEDUP_TTL_SECONDS = 60 * 60 * 24;
 
 /**
- * Fire-and-forget self-improvement trigger. Logs to the activity feed
- * under role `improvementAgent`, dedups via KV, opens a GitHub issue
- * + assigns Copilot on dedup miss. Swallows every error — caller must
- * never branch on the outcome.
+ * Success-path switch. Return true to open `improvement` issues and
+ * assign Copilot after publish. Keep this a function (not `const false`)
+ * so the dispatch below stays type-reachable for a one-line re-enable.
+ */
+function improvementAgentEnabled(): boolean {
+  return false;
+}
+
+/**
+ * Fire-and-forget self-improvement trigger. While
+ * `improvementAgentEnabled()` is false this logs one activity line and
+ * returns — no KV read, no GitHub issue, no Copilot assignment, even
+ * when `GITHUB_TOKEN_SECRET` is set. When re-enabled it logs under role
+ * `improvementAgent`, dedups via KV, and opens an issue on dedup miss.
+ * Swallows every error — caller must never branch on the outcome.
  */
 export async function triggerCodebaseImprovement(
   agent: SEOArticleAgent,
   input: ImprovementInput
 ): Promise<void> {
+  if (!improvementAgentEnabled()) {
+    agent.log("info", "Improvement Agent: disabled", "improvementAgent");
+    return;
+  }
+
   const keyword = normalizeInputField(agent, "keyword", input.keyword);
   const kvKey = normalizeInputField(agent, "kvKey", input.kvKey);
   const categorySlug = normalizeInputField(
