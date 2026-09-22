@@ -536,10 +536,11 @@ async function finalizeArticle(
   // to articles.dataforseo_score; logs result to the activity feed.
   scheduleDataForSeoAudit(agent, url, slug);
 
-  // Self-improvement loop — fire-and-forget. Opens a GitHub issue + assigns
-  // Copilot Coding Agent to ship one small `src/` improvement informed by
-  // the locally installed `.claude/skills/`. 24h KV dedup per kvKey so an
-  // editorial-agent republish doesn't re-trigger.
+  // Success-path self-improvement hook. Hard-disabled inside
+  // triggerCodebaseImprovement (logs "Improvement Agent: disabled" and
+  // returns before GitHub). The call stays so re-enabling is the
+  // improvementAgentEnabled() switch, not a new call site. Failure
+  // escalation is escalateToCodingAgent and is not this path.
   agent.waitUntil(
     triggerCodebaseImprovement(agent, {
       kvKey,
