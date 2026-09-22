@@ -74,6 +74,10 @@ import { hydrateKeywordMetrics } from "./keyword-metrics";
 import { runQASyndication } from "./qa-syndication";
 import { backfillTrafficSourcesInBackground } from "./traffic-sources";
 import { calculateSEOScore } from "./seo-score";
+import {
+  publishArticleToProduction,
+  resolveProdPublishMinScore
+} from "./prod-publish";
 import { generateSeoScorecardQcPromptCells } from "./seo-scorecard-qc-prompts";
 import { captureCompetitor, type CompetitorData } from "./competitor";
 import { rankSerpUrlsForEditorialCompetitor } from "./competitorPick";
@@ -3958,13 +3962,9 @@ async function generateArticleUnsafe(
         /* best-effort — the ledger is reporting, not control flow */
       }
     }
-    const prodPublishMinScoreRaw = getEnvBinding(
-      agent.envBindings,
-      "PROD_PUBLISH_MIN_SCORE"
+    const prodPublishMinScore = resolveProdPublishMinScore(
+      getEnvBinding(agent.envBindings, "PROD_PUBLISH_MIN_SCORE")
     );
-    const prodPublishMinScore = Number.isFinite(Number(prodPublishMinScoreRaw))
-      ? Number(prodPublishMinScoreRaw ?? 90)
-      : 90;
     // Captured for the ArticleResult so the dashboard can link readers at
     // the URL that actually serves the article. `url` is the staging host;
     // after a successful promotion it only 301s to `prodUrl`, and when the
@@ -3973,7 +3973,6 @@ async function generateArticleUnsafe(
     let promotionStatus: "published-prod" | "staging-only" = "staging-only";
     if (seoResult.score >= prodPublishMinScore) {
       try {
-        const { publishArticleToProduction } = await import("./prod-publish");
         const prodPublish = await publishArticleToProduction(
           agent.envBindings,
           agent.envBindings.ARTICLES_KV,

@@ -191,3 +191,175 @@ describe("prodKvRestApi", () => {
     expect(prodKvRestApi({ CLOUDFLARE_ACCOUNT_ID: "acct123" })).toBeNull();
   });
 });
+
+describe("prod publish score bar", () => {
+  it("defaults a blank or non-positive binding to 90", async () => {
+    const { resolveProdPublishMinScore, DEFAULT_PROD_PUBLISH_MIN_SCORE } =
+      await import("../prod-publish");
+    expect(resolveProdPublishMinScore(undefined)).toBe(
+      DEFAULT_PROD_PUBLISH_MIN_SCORE
+    );
+    expect(resolveProdPublishMinScore("")).toBe(90);
+    expect(resolveProdPublishMinScore("0")).toBe(90);
+    expect(resolveProdPublishMinScore("nope")).toBe(90);
+    expect(resolveProdPublishMinScore("95")).toBe(95);
+  });
+
+  it("refuses to lower the configured bar", async () => {
+    const { clampProdPublishMinScore } = await import("../prod-publish");
+    expect(clampProdPublishMinScore(90, 50)).toBe(90);
+    expect(clampProdPublishMinScore(90, undefined)).toBe(90);
+    expect(clampProdPublishMinScore(90, 97)).toBe(97);
+  });
+});
+
+describe("decideProdPromotion", () => {
+  const base = {
+    kvKey: "cat-toys:best-toy",
+    minScore: 90,
+    ledgerScore: null as number | null,
+    hasStagingHtml: true,
+    hasRedirectTombstone: false,
+    rescored: null as number | null,
+    allowUnscoredCompleted: false
+  };
+
+  it("promotes a ledger score on the bar and ignores a lower rescore", async () => {
+    const { decideProdPromotion } = await import("../prod-publish");
+    const decision = decideProdPromotion({
+      ...base,
+      ledgerScore: 90,
+      rescored: 10
+    });
+    expect(decision).toMatchObject({
+      promote: true,
+      score: 90,
+      scoreSource: "ledger"
+    });
+  });
+
+  it("keeps a below-bar ledger score in staging even if unscored shipping is allowed", async () => {
+    const { decideProdPromotion } = await import("../prod-publish");
+    const decision = decideProdPromotion({
+      ...base,
+      ledgerScore: 89,
+      rescored: 100,
+      allowUnscoredCompleted: true
+    });
+    expect(decision).toMatchObject({
+      promote: false,
+      reason: "below-bar",
+      score: 89,
+      scoreSource: "ledger"
+    });
+  });
+
+  it("treats ledger score 0 as unscored and uses the rescore", async () => {
+    const { decideProdPromotion } = await import("../prod-publish");
+    expect(
+      decideProdPromotion({ ...base, ledgerScore: 0, rescored: 94 })
+    ).toMatchObject({ promote: true, score: 94, scoreSource: "rescore" });
+    expect(
+      decideProdPromotion({ ...base, ledgerScore: 0, rescored: 70 })
+    ).toMatchObject({ promote: false, reason: "below-bar", score: 70 });
+  });
+
+  it("ships completed HTML with no computable score only when explicitly allowed", async () => {
+    const { decideProdPromotion } = await import("../prod-publish");
+    expect(decideProdPromotion(base)).toMatchObject({
+      promote: false,
+      reason: "unscored"
+    });
+    expect(
+      decideProdPromotion({ ...base, allowUnscoredCompleted: true })
+    ).toMatchObject({
+      promote: true,
+      scoreSource: "unscored-completed"
+    });
+  });
+
+  it("skips tombstones and missing HTML", async () => {
+    const { decideProdPromotion } = await import("../prod-publish");
+    expect(
+      decideProdPromotion({
+        ...base,
+        ledgerScore: 99,
+        hasRedirectTombstone: true
+      }).reason
+    ).toBe("already-promoted");
+    expect(
+      decideProdPromotion({
+        ...base,
+        ledgerScore: 99,
+        hasStagingHtml: false
+      }).reason
+    ).toBe("missing-html");
+    expect(decideProdPromotion({ ...base, kvKey: "not-a-key" }).reason).toBe(
+      "invalid-key"
+    );
+  });
+});
+
+describe("sitemap promotion summary", () => {
+  it("counts ledger-eligible, below-bar, unscored, and tombstoned keys", async () => {
+    const { summarizePromotionCandidates, articleKvKeysFromSitemap } =
+      await import("../prod-publish");
+    const xml = `<?xml version="1.0"?>
+<urlset>
+  <url><loc>https://staging.example/cat-toys/best-toy</loc></url>
+  <url><loc>https://staging.example/reviews/cat-beds/heated</loc></url>
+  <url><loc>https://staging.example/about</loc></url>
+  <url><loc>https://staging.example/cat-trees/tall-tree</loc></url>
+</urlset>`;
+    const kvKeys = articleKvKeysFromSitemap(xml);
+    expect(kvKeys).toEqual([
+      "cat-beds:heated",
+      "cat-toys:best-toy",
+      "cat-trees:tall-tree"
+    ]);
+    const summary = summarizePromotionCandidates({
+      kvKeys,
+      tombstones: new Set(["cat-beds:heated"]),
+      ledger: new Map([
+        ["cat-toys:best-toy", { seoScore: 96 }],
+        ["cat-trees:tall-tree", { seoScore: 40 }]
+      ]),
+      minScore: 90
+    });
+    expect(summary).toMatchObject({
+      sitemapArticles: 3,
+      alreadyPromoted: 1,
+      eligibleByLedger: 1,
+      belowBar: 1,
+      unscored: 0,
+      sampleEligible: ["cat-toys:best-toy"]
+    });
+  });
+
+  it("keeps a stored ledger score when HTML would rescore differently", async () => {
+    const { assessStagingArticleForPromotion } =
+      await import("../prod-publish");
+    const decision = assessStagingArticleForPromotion({
+      kvKey: "cat-toys:best-toy",
+      html: "<html><title>x</title><h1>x</h1><p>short</p></html>",
+      minScore: 90,
+      ledgerScore: 93,
+      ledgerKeyword: "cat toys",
+      hasRedirectTombstone: false,
+      allowUnscoredCompleted: true
+    });
+    expect(decision).toMatchObject({
+      promote: true,
+      score: 93,
+      scoreSource: "ledger"
+    });
+  });
+
+  it("derives a rescore keyword from the category slug", async () => {
+    const { keywordForProdRescore } = await import("../prod-publish");
+    expect(keywordForProdRescore("cat-trees", "  best cat trees  ")).toBe(
+      "best cat trees"
+    );
+    expect(keywordForProdRescore("cat-trees", "")).toBe("cat trees");
+  });
+});
