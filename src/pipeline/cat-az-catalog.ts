@@ -14,7 +14,7 @@
 
 import type { SEOArticleAgent } from "../server";
 import type { AmazonProduct } from "./amazon";
-import { fetchViaCreatorsApi, fetchViaPaApi } from "./amazon";
+import { fetchViaCreatorsApi } from "./amazon";
 import {
   evaluateCommercialKeyword,
   isJunkProductKeyword
@@ -59,12 +59,6 @@ export interface CatAzRefillReport {
 
 interface CredentialPair {
   id: string;
-  secret: string;
-  label: string;
-}
-
-interface PaPair {
-  key: string;
   secret: string;
   label: string;
 }
@@ -222,7 +216,7 @@ function isFreshCatalogAsin(
 
 async function searchCatalogQuery(
   keyword: string,
-  creds: { creators: CredentialPair[]; pa: PaPair[] },
+  creds: { creators: CredentialPair[] },
   tag: string,
   letter: string,
   onWarn: (msg: string) => void
@@ -264,37 +258,17 @@ async function searchCatalogQuery(
     }
   }
 
-  for (const pair of creds.pa) {
-    let warned = false;
-    try {
-      const found = await fetchViaPaApi(
-        keyword,
-        pair.key,
-        pair.secret,
-        tag,
-        (msg) => {
-          warned = true;
-          onWarn(`PA API ${pair.label}: ${msg}`);
-        }
-      );
-      const matched = consider(found, warned);
-      if (matched) return { ok: true, products: found, matched };
-    } catch (err: unknown) {
-      onWarn(`PA API ${pair.label}: ${errMsg(err)}`);
-    }
-  }
-
   return { ok: anySuccess, products: lastHits, matched: [] };
 }
 
 export async function searchCatCatalogLetter(
   letter: string,
-  creds: { creators: CredentialPair[]; pa: PaPair[] },
+  creds: { creators: CredentialPair[] },
   tag: string,
   onWarn: (msg: string) => void,
   doneAsins: ReadonlySet<string> = new Set()
 ): Promise<{ ok: boolean; products: AmazonProduct[] }> {
-  if (creds.creators.length === 0 && creds.pa.length === 0) {
+  if (creds.creators.length === 0) {
     return { ok: false, products: [] };
   }
 
@@ -356,31 +330,6 @@ function creatorsPairs(agent: SEOArticleAgent): CredentialPair[] {
   );
   if (fallbackId && fallbackSecret) {
     pairs.push({ id: fallbackId, secret: fallbackSecret, label: "fallback" });
-  }
-  return pairs;
-}
-
-function paPairs(agent: SEOArticleAgent): PaPair[] {
-  const pairs: PaPair[] = [];
-  const primaryKey = getEnvBinding(agent.envBindings, "AMAZON_ACCESS_KEY");
-  const primarySecret = getEnvBinding(agent.envBindings, "AMAZON_SECRET_KEY");
-  if (primaryKey && primarySecret) {
-    pairs.push({ key: primaryKey, secret: primarySecret, label: "primary" });
-  }
-  const fallbackKey = getEnvBinding(
-    agent.envBindings,
-    "AMAZON_ACCESS_KEY_FALLBACK"
-  );
-  const fallbackSecret = getEnvBinding(
-    agent.envBindings,
-    "AMAZON_SECRET_KEY_FALLBACK"
-  );
-  if (fallbackKey && fallbackSecret) {
-    pairs.push({
-      key: fallbackKey,
-      secret: fallbackSecret,
-      label: "fallback"
-    });
   }
   return pairs;
 }
@@ -521,11 +470,10 @@ export async function refillCatAzKeywords(
   }
 
   const creators = creatorsPairs(agent);
-  const pa = paPairs(agent);
-  if (creators.length === 0 && pa.length === 0) {
+  if (creators.length === 0) {
     agent.log(
       "warning",
-      "Cat A–Z: no Amazon Creators or PA API credentials — letter cursor unchanged",
+      "Cat A–Z: no Amazon Creators API credentials — letter cursor unchanged",
       "analyst"
     );
     return { ...empty, skippedJunk, letter, nextLetter: letter, pending };
@@ -539,7 +487,7 @@ export async function refillCatAzKeywords(
   );
   const search = await searchCatCatalogLetter(
     letter,
-    { creators, pa },
+    { creators },
     affiliateTag(agent),
     (msg) => agent.log("warning", `Cat A–Z: ${msg}`, "productManager"),
     doneAsins

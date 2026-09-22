@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchViaPaApi } from "../amazon";
+import { fetchViaCreatorsApi } from "../amazon";
 import {
   CAT_AZ_PENDING_CAP,
   catCatalogSearchKeyword,
@@ -11,8 +11,7 @@ import {
 } from "../cat-az-catalog";
 
 vi.mock("../amazon", () => ({
-  fetchViaCreatorsApi: vi.fn(async () => []),
-  fetchViaPaApi: vi.fn(async () => [])
+  fetchViaCreatorsApi: vi.fn(async () => [])
 }));
 
 const ARM: CatAzCatalogHit = {
@@ -27,18 +26,17 @@ const PETSAFE: CatAzCatalogHit = {
   brand: "PetSafe"
 };
 
-const PA_CREDS = {
-  creators: [],
-  pa: [{ key: "key", secret: "secret", label: "primary" }]
+const CREATORS_CREDS = {
+  creators: [{ id: "app", secret: "secret", label: "primary" }]
 };
 
-function paHit(hit: CatAzCatalogHit) {
+function creatorsHit(hit: CatAzCatalogHit) {
   return {
     name: hit.title,
     displayName: hit.title,
     asin: hit.asin,
     brand: hit.brand,
-    source: "pa-api-v5" as const
+    source: "creators-api" as const
   };
 }
 
@@ -207,39 +205,42 @@ describe("Cat A–Z planner", () => {
 
 describe("searchCatCatalogLetter", () => {
   beforeEach(() => {
-    vi.mocked(fetchViaPaApi).mockReset();
+    vi.mocked(fetchViaCreatorsApi).mockReset();
+    vi.mocked(fetchViaCreatorsApi).mockResolvedValue([]);
   });
 
-  it("queries PA API for cat products at the current letter and keeps letter matches", async () => {
-    vi.mocked(fetchViaPaApi).mockImplementation(async (keyword: string) => {
-      expect(keyword).toBe("cat A");
-      return [
-        {
-          name: ARM.title,
-          displayName: ARM.title,
-          asin: ARM.asin,
-          brand: ARM.brand,
-          source: "pa-api-v5"
-        },
-        {
-          name: PETSAFE.title,
-          displayName: PETSAFE.title,
-          asin: PETSAFE.asin,
-          brand: PETSAFE.brand,
-          source: "pa-api-v5"
-        }
-      ];
-    });
+  it("queries Creators API for cat products at the current letter and keeps letter matches", async () => {
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(
+      async (keyword: string) => {
+        expect(keyword).toBe("cat A");
+        return [
+          {
+            name: ARM.title,
+            displayName: ARM.title,
+            asin: ARM.asin,
+            brand: ARM.brand,
+            source: "creators-api" as const
+          },
+          {
+            name: PETSAFE.title,
+            displayName: PETSAFE.title,
+            asin: PETSAFE.asin,
+            brand: PETSAFE.brand,
+            source: "creators-api" as const
+          }
+        ];
+      }
+    );
 
+    const warnings: string[] = [];
     const found = await searchCatCatalogLetter(
       "A",
-      {
-        creators: [],
-        pa: [{ key: "key", secret: "secret", label: "primary" }]
-      },
+      CREATORS_CREDS,
       "catsluvus03-20",
-      () => undefined
+      (msg) => warnings.push(msg)
     );
+    expect(fetchViaCreatorsApi).toHaveBeenCalledTimes(1);
+    expect(warnings.join("\n")).not.toMatch(/PA API|paapi5/);
     expect(found.ok).toBe(true);
     expect(found.products.map((product) => product.asin)).toEqual([ARM.asin]);
 
@@ -264,16 +265,18 @@ describe("searchCatCatalogLetter", () => {
 
   it("tries later queries until a letter-matching product appears", async () => {
     const queries: string[] = [];
-    vi.mocked(fetchViaPaApi).mockImplementation(async (keyword: string) => {
-      queries.push(keyword);
-      if (keyword === "A for cats") return [paHit(ARM)];
-      return [paHit(PETSAFE)];
-    });
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(
+      async (keyword: string) => {
+        queries.push(keyword);
+        if (keyword === "A for cats") return [creatorsHit(ARM)];
+        return [creatorsHit(PETSAFE)];
+      }
+    );
 
     const warnings: string[] = [];
     const found = await searchCatCatalogLetter(
       "A",
-      PA_CREDS,
+      CREATORS_CREDS,
       "catsluvus03-20",
       (msg) => warnings.push(msg)
     );
@@ -284,11 +287,13 @@ describe("searchCatCatalogLetter", () => {
   });
 
   it("warns and holds the letter when every query misses it", async () => {
-    vi.mocked(fetchViaPaApi).mockImplementation(async () => [paHit(PETSAFE)]);
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(async () => [
+      creatorsHit(PETSAFE)
+    ]);
     const warnings: string[] = [];
     const found = await searchCatCatalogLetter(
       "A",
-      PA_CREDS,
+      CREATORS_CREDS,
       "catsluvus03-20",
       (msg) => warnings.push(msg)
     );
@@ -296,9 +301,11 @@ describe("searchCatCatalogLetter", () => {
     expect(found.products.map((product) => product.asin)).toEqual([
       PETSAFE.asin
     ]);
+    expect(fetchViaCreatorsApi).toHaveBeenCalledTimes(4);
     expect(warnings).toEqual([
       "letter A searches returned 4 catalog hit(s) but no title or brand starts with A (tried: cat A, A for cats, A cat toy, A cat tree) — not advancing"
     ]);
+    expect(warnings.join("\n")).not.toMatch(/PA API|paapi5/);
 
     const plan = planCatAzRefill({
       letter: "A",
@@ -317,11 +324,11 @@ describe("searchCatCatalogLetter", () => {
   });
 
   it("treats an empty catalog page as letter exhaustion", async () => {
-    vi.mocked(fetchViaPaApi).mockImplementation(async () => []);
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(async () => []);
     const warnings: string[] = [];
     const found = await searchCatCatalogLetter(
       "Q",
-      PA_CREDS,
+      CREATORS_CREDS,
       "catsluvus03-20",
       (msg) => warnings.push(msg)
     );
@@ -347,16 +354,18 @@ describe("searchCatCatalogLetter", () => {
       title: "Andover Cat Tunnel",
       brand: "Andover"
     };
-    vi.mocked(fetchViaPaApi).mockImplementation(async (keyword: string) => {
-      queries.push(keyword);
-      if (keyword === "cat A") return [paHit(ARM)];
-      if (keyword === "A cat toy") return [paHit(andover)];
-      return [];
-    });
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(
+      async (keyword: string) => {
+        queries.push(keyword);
+        if (keyword === "cat A") return [creatorsHit(ARM)];
+        if (keyword === "A cat toy") return [creatorsHit(andover)];
+        return [];
+      }
+    );
 
     const found = await searchCatCatalogLetter(
       "A",
-      PA_CREDS,
+      CREATORS_CREDS,
       "catsluvus03-20",
       () => undefined,
       new Set([ARM.asin])
@@ -365,5 +374,38 @@ describe("searchCatCatalogLetter", () => {
     expect(found.products.map((product) => product.asin)).toEqual([
       andover.asin
     ]);
+  });
+
+  it("logs a Creators failure and does not fall through to PA-API", async () => {
+    vi.mocked(fetchViaCreatorsApi).mockImplementation(
+      async (_keyword, _id, _secret, _tag, onWarn) => {
+        onWarn?.("Creators API 401 InvalidToken");
+        return [];
+      }
+    );
+    const warnings: string[] = [];
+    const found = await searchCatCatalogLetter(
+      "A",
+      CREATORS_CREDS,
+      "catsluvus03-20",
+      (msg) => warnings.push(msg)
+    );
+    expect(fetchViaCreatorsApi).toHaveBeenCalledTimes(4);
+    expect(found.ok).toBe(false);
+    expect(found.products).toEqual([]);
+    expect(warnings.every((msg) => msg.startsWith("Creators primary:"))).toBe(
+      true
+    );
+    expect(warnings.join("\n")).toMatch(/InvalidToken/);
+    expect(warnings.join("\n")).not.toMatch(/PA API/);
+    const plan = planCatAzRefill({
+      letter: "A",
+      doneAsins: new Set(),
+      pendingCount: 0,
+      searchOk: found.ok,
+      products: []
+    });
+    expect(plan.advanced).toBe(false);
+    expect(plan.nextLetter).toBe("A");
   });
 });
