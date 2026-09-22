@@ -71,10 +71,10 @@ import {
   NO_AMAZON_PRODUCTS_HOW_TO_FIX
 } from "./pipeline/product-write-gate";
 import {
-  assessStagingArticleForPromotion,
   clampProdPublishMinScore,
   clampPromoteBatchLimit,
   classifyUserAgent,
+  decideProdPromotion,
   loadPromotionCatalog,
   publishArticleToProduction,
   resolveProdPublishMinScore,
@@ -6309,10 +6309,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         return Response.json({ ok: true, dryRun, ...result });
       }
 
-      // GET /api/admin/promotion-candidates — sitemap articles vs the
-      // production score bar. Does not rescore and does not write.
-      // `unscored` rows still need POST /api/admin/promote-backlog, which
-      // runs calculateSEOScore before publishing.
+      // GET /api/admin/promotion-candidates — staging KV article keys
+      // still present, counted against the ledger score bar. Does not
+      // rescore and does not write. Unscored and below-bar keys stay
+      // staging-only.
       if (
         url.pathname === "/api/admin/promotion-candidates" &&
         request.method === "GET"
@@ -6348,9 +6348,10 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
       }
 
-      // POST /api/admin/promote — publish one staging article that already
-      // clears PROD_PUBLISH_MIN_SCORE. Body `{ kvKey, dryRun?: boolean }`.
-      // dryRun defaults to false. A score under the bar returns 409.
+      // POST /api/admin/promote — publish one staging article whose ledger
+      // seo_score already clears PROD_PUBLISH_MIN_SCORE. Does not rescore.
+      // Body `{ kvKey, dryRun?: boolean }`. dryRun defaults to false. A
+      // missing, unscored, or below-bar key returns 409.
       if (url.pathname === "/api/admin/promote" && request.method === "POST") {
         const body = (await request.json().catch(() => ({}))) as {
           kvKey?: string;
@@ -6385,17 +6386,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           const tombstone = await this.envBindings.ARTICLES_KV.get(
             `redirect:${kvKey}`
           );
-          const decision = assessStagingArticleForPromotion({
+          const decision = decideProdPromotion({
             kvKey,
-            html,
             minScore: configured,
             ledgerScore:
               typeof ledgerRow?.seo_score === "number"
                 ? ledgerRow.seo_score
                 : null,
-            ledgerKeyword:
-              typeof ledgerRow?.keyword === "string" ? ledgerRow.keyword : null,
+            hasStagingHtml: html != null,
             hasRedirectTombstone: tombstone != null,
+            rescored: null,
             allowUnscoredCompleted: false
           });
           if (!decision.promote) {
@@ -6446,14 +6446,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
         }
       }
 
-      // POST /api/admin/promote-backlog — next batch of sitemap articles
-      // that already meet PROD_PUBLISH_MIN_SCORE (ledger score, or a
-      // rescore when the ledger has no usable score). Does not lower the
-      // bar. Body `{ dryRun?: boolean, limit?: number, cursor?: string,
-      // minScore?: number, allowUnscoredCompleted?: boolean }`.
-      // dryRun defaults to true. minScore below the configured bar is
-      // raised to the bar. After a real run, POST /api/admin/sitemap/prune
-      // once so promoted URLs leave the staging sitemap.
+      // POST /api/admin/promote-backlog — next batch of staging KV
+      // article keys that are still present, not tombstoned, and whose
+      // ledger seo_score is >= PROD_PUBLISH_MIN_SCORE. Each key is passed
+      // to publishArticleToProduction. Does not rescore and does not
+      // accept a lower bar. Body `{ dryRun?: boolean, limit?: number,
+      // cursor?: string, minScore?: number }`. dryRun defaults to true.
+      // minScore below the configured bar is raised to the bar.
+      // `allowUnscoredCompleted` is rejected. After a real run, POST
+      // /api/admin/sitemap/prune once so promoted URLs leave the staging
+      // sitemap.
       if (
         url.pathname === "/api/admin/promote-backlog" &&
         request.method === "POST"
@@ -6465,6 +6467,16 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
           minScore?: number;
           allowUnscoredCompleted?: boolean;
         };
+        if (body.allowUnscoredCompleted === true) {
+          return Response.json(
+            {
+              ok: false,
+              error:
+                "allowUnscoredCompleted is not accepted; ledger seo_score must be >= PROD_PUBLISH_MIN_SCORE"
+            },
+            { status: 400 }
+          );
+        }
         const configured = resolveProdPublishMinScore(
           getEnvBinding(this.envBindings, "PROD_PUBLISH_MIN_SCORE")
         );
@@ -6481,8 +6493,7 @@ export class SEOArticleAgent extends Agent<Env, SEOAgentState> {
               dryRun,
               limit,
               cursor,
-              minScore,
-              allowUnscoredCompleted: body.allowUnscoredCompleted === true
+              minScore
             }
           );
           if (!dryRun && result.promoted.length > 0) {

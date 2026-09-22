@@ -51,17 +51,34 @@ npx vitest run -t "rejects degenerate keywords"     # by test name
 npx vitest src/pipeline/__tests__/traffic-sources.test.ts   # watch mode
 ```
 
-Bulk-promote staging articles that already meet `PROD_PUBLISH_MIN_SCORE`
-(default 90) into production `ARTICLES_KV`, rewriting hosts onto
-`/reviews/{category}/{slug}`. Requires the worker this commit deploys, plus
-`ADMIN_API_TOKEN`. Does not lower the score bar.
+Bulk-promote staging KV articles whose **ledger** `seo_score` is at or above
+`PROD_PUBLISH_MIN_SCORE` (default 90). `POST /api/admin/promote-backlog` lists
+article keys still present, skips `redirect:` tombstones, and calls
+`publishArticleToProduction` (host rewrite + `/reviews/{category}/{slug}`).
+It does not rescore HTML and it rejects `allowUnscoredCompleted`. Omitting
+`dryRun` is a dry run. A requested `minScore` below the worker bar is raised
+to the bar. `limit` is clamped to 15 per request; repeat with `nextCursor`
+until `done` is true. Wrangler does not invoke this route — after the
+`main` deploy, call it with curl. `npx wrangler deployments status` only
+confirms the worker version.
 
 ```bash
 export ADMIN_API_TOKEN="$(doppler secrets get ADMIN_API_TOKEN --plain --no-read-env \
   --project replit-n8n-catsluvus --config prd)"
-npm run promote:prod -- --dry-run
-npm run promote:prod -- --apply
+
+# one dry-run batch
+curl -sS -X POST \
+  "https://cats-seo-aiagent-staging.webmaster-bc8.workers.dev/api/admin/promote-backlog" \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun":true,"limit":10}'
+
+# write every eligible key (loops cursor; then prunes the staging sitemap)
+npm run promote:backlog -- --apply
 ```
+
+One article: `POST /api/admin/promote` with `{"kvKey":"category:slug","dryRun":true}`.
+`GET /api/admin/promotion-candidates` counts the same ledger gate and writes nothing.
 
 Vitest is `environment: "node"`, `include: ["src/**/*.test.ts"]` — no jsdom, no
 `@cloudflare/vitest-pool-workers`. Tests target **pure helpers only**; anything

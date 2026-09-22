@@ -251,6 +251,108 @@ export function mergeGlobalIndex(
 
 const ARTICLE_KV_KEY_RE = /^[^:]+:[^:]+$/;
 
+/**
+ * One-colon KV keys that are not `{category}:{slug}` articles.
+ * Sidecars such as `redirect:cat:slug` already fail ARTICLE_KV_KEY_RE
+ * because they contain two colons.
+ */
+const NON_ARTICLE_KV_PREFIXES = new Set([
+  "affiliate-clicks",
+  "articles-index",
+  "ctr-rewrite",
+  "defect-findings",
+  "editorial-report",
+  "escalation-dedup",
+  "feed",
+  "idle-tick",
+  "kimi-raw",
+  "kimi-raw-prompt",
+  "qa",
+  "qa-index",
+  "redirect",
+  "sitemap",
+  "traffic-source",
+  "traffic-sources"
+]);
+
+/** True for a staging article body key (`category:slug`), not a sidecar. */
+export function isStagingArticleKvKey(key: string): boolean {
+  if (!ARTICLE_KV_KEY_RE.test(key)) return false;
+  const prefix = key.slice(0, key.indexOf(":"));
+  return !NON_ARTICLE_KV_PREFIXES.has(prefix);
+}
+
+export interface BacklogKeySelection {
+  selected: string[];
+  skipped: {
+    alreadyPromoted: number;
+    belowBar: number;
+    unscored: number;
+    invalidKey: number;
+  };
+  /** Last key examined. Pass back as `cursor` to continue. */
+  nextCursor: string | null;
+  done: boolean;
+}
+
+/**
+ * Staging article keys that are still eligible for production:
+ * present in the KV key list, not tombstoned, ledger score >= minScore.
+ * Keys at or below `cursor` are skipped so callers can page with `limit`.
+ */
+export function selectBacklogKvKeys(input: {
+  kvKeys: readonly string[];
+  tombstones: ReadonlySet<string>;
+  ledger: ReadonlyMap<string, { seoScore: number | null }>;
+  minScore: number;
+  cursor: string;
+  limit: number;
+}): BacklogKeySelection {
+  const skipped = {
+    alreadyPromoted: 0,
+    belowBar: 0,
+    unscored: 0,
+    invalidKey: 0
+  };
+  const selected: string[] = [];
+  let lastExamined = input.cursor;
+  let index = 0;
+  const keys = [...input.kvKeys].sort();
+  if (input.cursor) {
+    while (index < keys.length && keys[index]! <= input.cursor) index++;
+  }
+  while (index < keys.length && selected.length < input.limit) {
+    const kvKey = keys[index]!;
+    lastExamined = kvKey;
+    index++;
+    if (!isStagingArticleKvKey(kvKey)) {
+      skipped.invalidKey++;
+      continue;
+    }
+    if (input.tombstones.has(kvKey)) {
+      skipped.alreadyPromoted++;
+      continue;
+    }
+    const score = usableLedgerScore(input.ledger.get(kvKey)?.seoScore);
+    if (score == null) {
+      skipped.unscored++;
+      continue;
+    }
+    if (score < input.minScore) {
+      skipped.belowBar++;
+      continue;
+    }
+    selected.push(kvKey);
+  }
+  const done = index >= keys.length;
+  return {
+    selected,
+    skipped,
+    nextCursor: done ? null : lastExamined,
+    done
+  };
+}
+
 /** Ledger `seo_score` of 0 is the column default, not a measured failure. */
 export function usableLedgerScore(
   score: number | null | undefined
@@ -284,12 +386,11 @@ export type ProdPromoteDecision = {
 /**
  * Whether one staging article may be written to production KV.
  *
- * A usable ledger score is authoritative and is never replaced by a
- * rescore — that is the same bar `generateArticle` applies. Articles
- * with no usable score are rescored with `calculateSEOScore` when HTML
- * is available (`rescored`). `allowUnscoredCompleted` ships completed
- * staging HTML only when a score cannot be computed at all; it does
- * not publish articles that scored under the bar.
+ * When `rescored` is set it is the score of the HTML about to be
+ * copied and it decides eligibility. A ledger score is the fallback
+ * when that rescore could not be computed. `allowUnscoredCompleted`
+ * ships completed staging HTML only when no score can be computed; it
+ * does not publish articles that scored under the bar.
  */
 export function decideProdPromotion(input: {
   kvKey: string;
@@ -300,7 +401,7 @@ export function decideProdPromotion(input: {
   rescored: number | null;
   allowUnscoredCompleted: boolean;
 }): ProdPromoteDecision {
-  if (!ARTICLE_KV_KEY_RE.test(input.kvKey)) {
+  if (!isStagingArticleKvKey(input.kvKey)) {
     return {
       promote: false,
       reason: "invalid-key",
@@ -325,22 +426,11 @@ export function decideProdPromotion(input: {
       scoreSource: ledger == null ? null : "ledger"
     };
   }
-  if (ledger != null) {
-    if (ledger >= input.minScore) {
-      return {
-        promote: true,
-        reason: "promote",
-        score: ledger,
-        scoreSource: "ledger"
-      };
-    }
-    return {
-      promote: false,
-      reason: "below-bar",
-      score: ledger,
-      scoreSource: "ledger"
-    };
-  }
+  // A live rescore of the HTML about to be copied is the same bar the
+  // pipeline applies (`calculateSEOScore` >= PROD_PUBLISH_MIN_SCORE).
+  // It wins over a stored ledger score so a stale below-bar row cannot
+  // block a completed article that now clears the bar, and a stale
+  // above-bar row cannot ship HTML that no longer does.
   if (input.rescored != null && Number.isFinite(input.rescored)) {
     if (input.rescored >= input.minScore) {
       return {
@@ -355,6 +445,22 @@ export function decideProdPromotion(input: {
       reason: "below-bar",
       score: input.rescored,
       scoreSource: "rescore"
+    };
+  }
+  if (ledger != null) {
+    if (ledger >= input.minScore) {
+      return {
+        promote: true,
+        reason: "promote",
+        score: ledger,
+        scoreSource: "ledger"
+      };
+    }
+    return {
+      promote: false,
+      reason: "below-bar",
+      score: ledger,
+      scoreSource: "ledger"
     };
   }
   if (input.allowUnscoredCompleted) {
@@ -402,10 +508,7 @@ export function assessStagingArticleForPromotion(input: {
   const categorySlug = parts[0] ?? "";
   let rescored: number | null = null;
   let rescoreFailed = false;
-  const needsRescore =
-    input.html != null &&
-    !input.hasRedirectTombstone &&
-    usableLedgerScore(input.ledgerScore) == null;
+  const needsRescore = input.html != null && !input.hasRedirectTombstone;
   if (needsRescore && input.html != null) {
     try {
       rescored = rescoreStagingArticle(
@@ -428,9 +531,14 @@ export function assessStagingArticleForPromotion(input: {
   });
 }
 
-/** Article kvKeys (`category:slug`) advertised in a sitemap document. */
-export function articleKvKeysFromSitemap(xml: string): string[] {
-  const keys = new Set<string>();
+export interface SitemapArticleRef {
+  kvKey: string;
+  url: string;
+}
+
+/** Article URLs in a sitemap, deduped by kvKey and sorted by that key. */
+export function articleEntriesFromSitemap(xml: string): SitemapArticleRef[] {
+  const byKey = new Map<string, string>();
   const re = /<loc>([\s\S]*?)<\/loc>/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(xml))) {
@@ -443,9 +551,16 @@ export function articleKvKeysFromSitemap(xml: string): string[] {
       continue;
     }
     const kvKey = articlePathToKvKey(pathname);
-    if (kvKey) keys.add(kvKey);
+    if (kvKey && !byKey.has(kvKey)) byKey.set(kvKey, raw);
   }
-  return [...keys].sort();
+  return [...byKey.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([kvKey, url]) => ({ kvKey, url }));
+}
+
+/** Article kvKeys (`category:slug`) advertised in a sitemap document. */
+export function articleKvKeysFromSitemap(xml: string): string[] {
+  return articleEntriesFromSitemap(xml).map((entry) => entry.kvKey);
 }
 
 export interface LedgerPromotionRow {
@@ -456,20 +571,23 @@ export interface LedgerPromotionRow {
 
 export interface PromotionCandidateSummary {
   minScore: number;
+  /** Staging article keys examined (KV bodies still present). */
+  listedArticles: number;
+  /** Same count as `listedArticles`. Kept for callers that read the old name. */
   sitemapArticles: number;
   alreadyPromoted: number;
   eligibleByLedger: number;
   belowBar: number;
-  /** In the sitemap, not tombstoned, and no usable ledger score. */
+  /** Present, not tombstoned, and no usable ledger score. Not promoted. */
   unscored: number;
   sampleEligible: string[];
   sampleUnscored: string[];
 }
 
 /**
- * Counts from the sitemap, redirect tombstones, and ledger scores.
- * Does not fetch HTML or rescore — `unscored` still needs a rescore
- * pass before it can be promoted.
+ * Counts staging article keys against redirect tombstones and ledger
+ * scores. Does not rescore HTML. Only `eligibleByLedger` may be copied
+ * to production.
  */
 export function summarizePromotionCandidates(input: {
   kvKeys: readonly string[];
@@ -479,6 +597,7 @@ export function summarizePromotionCandidates(input: {
 }): PromotionCandidateSummary {
   const summary: PromotionCandidateSummary = {
     minScore: input.minScore,
+    listedArticles: input.kvKeys.length,
     sitemapArticles: input.kvKeys.length,
     alreadyPromoted: 0,
     eligibleByLedger: 0,
@@ -538,21 +657,10 @@ export async function publishArticleToProduction(
     skipStagingCleanupWrite?: boolean;
   }
 ): Promise<ProdPublishResult> {
-  const m = kvKey.match(/^([^:]+):([^:]+)$/);
-  if (!m) {
-    return { ok: false, kvKey, error: "kvKey must be categorySlug:slug" };
-  }
-  const [, categorySlug, slug] = m;
-
   const stagingHost = getEnvBinding(env, "DOMAIN") ?? "";
   const targetHost =
     getEnvBinding(env, "PROMOTION_TARGET_DOMAIN") ??
     DEFAULT_PROMOTION_TARGET_DOMAIN;
-  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
-  const prodNamespaceId =
-    getEnvBinding(env, "PROD_ARTICLES_KV_NAMESPACE_ID") ??
-    DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID;
 
   const stagingHtml = await articlesKv.get(kvKey);
   if (stagingHtml === null) {
@@ -560,38 +668,25 @@ export async function publishArticleToProduction(
   }
 
   // Last line of defense before the public site. Every article that
-  // reaches catsluvus.com passes through this function, whichever
-  // pipeline step last wrote staging KV — so the FTC check belongs
-  // here as well as at the individual write sites. Step 14.7 gates the
-  // builder's output, but steps 17-20 hand the whole document to a
-  // model afterwards; on 2026-07-29 a Polish-stage rewrite injected
-  // "insights from Dr. Elena Voss, DVM" into the template's own
-  // `<p class="date-info">` element and published it to production 44
-  // minutes after the fabricated-expert detector went live.
-  const ftc = enforceNoFabricatedTestingClaims(stagingHtml);
-  // The "Why You Should Trust Us" block is no longer rendered by
-  // html-builder, so nothing should produce one — but the QC and Polish
-  // stages hand the whole document to a model, and those rewrites have
-  // reshaped template markup before. Catching a hallucinated block here
-  // costs one regex and keeps the guarantee absolute.
-  const trust = removeTrustBox(ftc.html);
-  const html = trust.html;
-  if (
-    (trust.removed > 0 || ftc.removed > 0 || ftc.headingsChanged > 0) &&
-    options?.skipStagingCleanupWrite !== true
-  ) {
+  // reaches catsluvus.com passes through prepareProductionArticle,
+  // whichever pipeline step last wrote staging KV. On 2026-07-29 a
+  // Polish-stage rewrite injected a fabricated expert into the
+  // template after Step 14.7 had already passed.
+  const prepared = prepareProductionArticle({
+    kvKey,
+    html: stagingHtml,
+    fromHost: stagingHost,
+    toHost: targetHost
+  });
+  if (!prepared.ok) return prepared;
+
+  const { categorySlug, slug, rewritten, replacements, prodUrl } = prepared;
+  if (prepared.changed && options?.skipStagingCleanupWrite !== true) {
     // Write the cleaned copy back to staging too, so the two
     // namespaces do not diverge and a later re-publish cannot
     // resurrect the excised text.
-    await articlesKv.put(kvKey, html).catch(() => {});
+    await articlesKv.put(kvKey, prepared.cleanedHtml).catch(() => {});
   }
-
-  const { html: rewritten, replacements } = rewriteHtmlForDomain(
-    html,
-    stagingHost,
-    targetHost
-  );
-  const prodUrl = prodArticleUrl(targetHost, categorySlug, slug);
 
   if (dryRun) {
     return {
@@ -600,11 +695,15 @@ export async function publishArticleToProduction(
       prodUrl,
       replacements,
       bytes: rewritten.length,
-      dryRun: true
+      dryRun: true,
+      ftcRemoved: prepared.ftcRemoved,
+      ftcSample: prepared.ftcSample,
+      trustBoxRemoved: prepared.trustBoxRemoved
     };
   }
 
-  if (!accountId || !apiToken) {
+  const auth = prodKvAuthFromEnv(env);
+  if (!auth) {
     return {
       ok: false,
       kvKey,
@@ -615,69 +714,32 @@ export async function publishArticleToProduction(
 
   // 3. Write to the production namespace via REST (cross-namespace writes
   // are not possible through bindings — staging only binds its own KV).
-  const putRes = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${prodNamespaceId}/values/${encodeURIComponent(kvKey)}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        "Content-Type": "text/plain; charset=UTF-8"
-      },
-      body: rewritten
-    }
+  const putRes = await putProdKvValue(
+    auth,
+    kvKey,
+    rewritten,
+    "text/plain; charset=UTF-8"
   );
   if (!putRes.ok) {
-    const detail = await putRes.text().catch(() => "");
-    return {
-      ok: false,
-      kvKey,
-      error: `prod KV write failed: HTTP ${putRes.status} ${detail.slice(0, 200)}`
-    };
+    return { ok: false, kvKey, error: putRes.error };
   }
 
   // 3b. Register the article in the production indexes so catsluvus.com
   // links to it from category pages and includes it in the category
   // sitemap (petinsurance builds both from `articles-index:<category>`,
   // and site-wide listings from `v2_articles_index`). Without this a
-  // promoted article is an orphan page. Best-effort read-modify-write:
-  // a concurrent index write from the production generator could race,
-  // but prod-publishes are low-frequency and the loser self-heals on the
-  // next prod publish.
-  const kvApiBase = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${prodNamespaceId}/values`;
-  const authHeaders = { Authorization: `Bearer ${apiToken}` };
+  // promoted article is an orphan page. Best-effort read-modify-write.
   const indexes = { category: false, global: false };
   try {
-    const catKey = `${kvApiBase}/${encodeURIComponent(`articles-index:${categorySlug}`)}`;
-    const catRes = await fetch(catKey, { headers: authHeaders });
-    const catJson = catRes.ok ? await catRes.text() : null;
-    const catMerge = mergeCategoryIndex(catJson, slug);
-    if (catMerge.changed) {
-      const putCat = await fetch(catKey, {
-        method: "PUT",
-        headers: { ...authHeaders, "Content-Type": "application/json" },
-        body: catMerge.json
-      });
-      indexes.category = putCat.ok;
-    }
-
-    const globalKey = `${kvApiBase}/${encodeURIComponent("v2_articles_index")}`;
-    const globalRes = await fetch(globalKey, { headers: authHeaders });
-    const globalJson = globalRes.ok ? await globalRes.text() : null;
-    const globalMerge = mergeGlobalIndex(globalJson, {
-      slug,
-      url: prodArticlePath(categorySlug, slug),
-      title: extractArticleTitleForIndex(rewritten, slug),
-      category: categorySlug,
-      image: null
-    });
-    if (globalMerge.changed) {
-      const putGlobal = await fetch(globalKey, {
-        method: "PUT",
-        headers: { ...authHeaders, "Content-Type": "application/json" },
-        body: globalMerge.json
-      });
-      indexes.global = putGlobal.ok;
-    }
+    const registered = await registerProdIndexBatch(env, [
+      {
+        categorySlug,
+        slug,
+        title: extractArticleTitleForIndex(rewritten, slug)
+      }
+    ]);
+    indexes.category = registered.categoriesUpdated > 0;
+    indexes.global = registered.globalUpdated;
   } catch {
     // Index registration is best-effort — the article itself is already
     // live; a failed index write only delays internal-link discovery.
@@ -737,9 +799,9 @@ export async function publishArticleToProduction(
     replacements,
     bytes: rewritten.length,
     indexes,
-    ftcRemoved: ftc.removed,
-    ftcSample: ftc.findings[0]?.sentence.slice(0, 200),
-    trustBoxRemoved: trust.removed
+    ftcRemoved: prepared.ftcRemoved,
+    ftcSample: prepared.ftcSample,
+    trustBoxRemoved: prepared.trustBoxRemoved
   };
 }
 
@@ -838,6 +900,28 @@ export async function listRedirectTombstones(
   return out;
 }
 
+/** Article body keys still stored in staging KV (`category:slug`). */
+export async function listStagingArticleKvKeys(
+  articlesKv: KVNamespace
+): Promise<string[]> {
+  const out: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10_000; page++) {
+    const listed = await articlesKv.list({
+      limit: 1000,
+      ...(cursor ? { cursor } : {})
+    });
+    for (const key of listed.keys) {
+      if (isStagingArticleKvKey(key.name)) out.push(key.name);
+    }
+    if (listed.list_complete) break;
+    if (!listed.cursor || listed.cursor === cursor) break;
+    cursor = listed.cursor;
+  }
+  out.sort();
+  return out;
+}
+
 export async function loadPromotionCatalog(
   articlesKv: KVNamespace,
   keywordsDb: D1Database | undefined
@@ -846,12 +930,8 @@ export async function loadPromotionCatalog(
   tombstones: Set<string>;
   ledger: Map<string, LedgerPromotionRow>;
 }> {
-  // Dynamic import: see publishArticleToProduction. The sitemap key must
-  // stay the one indexing.ts writes.
-  const { SITEMAP_KV_KEY } = await import("./indexing");
-  const xml = (await articlesKv.get(SITEMAP_KV_KEY)) ?? "";
   const [kvKeys, tombstones, ledger] = await Promise.all([
-    Promise.resolve(articleKvKeysFromSitemap(xml)),
+    listStagingArticleKvKeys(articlesKv),
     listRedirectTombstones(articlesKv),
     keywordsDb
       ? loadLedgerPromotionRows(keywordsDb)
@@ -903,41 +983,14 @@ function emptySkipCounts(): PromotionBacklogBatchResult["skipped"] {
   };
 }
 
-function bumpSkip(
-  skipped: PromotionBacklogBatchResult["skipped"],
-  reason: ProdPromoteSkipReason
-): void {
-  switch (reason) {
-    case "already-promoted":
-      skipped.alreadyPromoted++;
-      break;
-    case "below-bar":
-      skipped.belowBar++;
-      break;
-    case "unscored":
-      skipped.unscored++;
-      break;
-    case "missing-html":
-      skipped.missingHtml++;
-      break;
-    case "invalid-key":
-      skipped.invalidKey++;
-      break;
-    default: {
-      const _exhaustive: never = reason;
-      void _exhaustive;
-    }
-  }
-}
-
 /**
- * Promote the next slice of sitemap articles that clear the production bar.
+ * Promote the next slice of staging KV articles whose ledger score is
+ * already at or above `minScore`.
  *
- * Walks sitemap kvKeys after `cursor`. Ledger scores at or above `minScore`
- * publish immediately. Rows with no usable score are rescored with the
- * same `calculateSEOScore` the pipeline uses. Below-bar articles stay in
- * staging. One failed production write stops the batch so the cursor
- * retries that key instead of skipping it.
+ * Lists article keys still present, skips redirect tombstones, and
+ * ignores unscored or below-bar rows. Each selected key goes through
+ * `publishArticleToProduction` (host rewrite + `/reviews`). One failed
+ * production write stops the batch so the cursor retries that key.
  */
 export async function runPromotionBacklogBatch(
   env: unknown,
@@ -948,7 +1001,6 @@ export async function runPromotionBacklogBatch(
     limit: number;
     cursor: string;
     minScore: number;
-    allowUnscoredCompleted: boolean;
   }
 ): Promise<PromotionBacklogBatchResult> {
   const limit = clampPromoteBatchLimit(request.limit);
@@ -956,7 +1008,7 @@ export async function runPromotionBacklogBatch(
     ok: true,
     dryRun: request.dryRun,
     minScore: request.minScore,
-    allowUnscoredCompleted: request.allowUnscoredCompleted,
+    allowUnscoredCompleted: false,
     cursor: request.cursor,
     nextCursor: null,
     done: false,
@@ -975,50 +1027,23 @@ export async function runPromotionBacklogBatch(
     };
   }
 
-  let index = 0;
-  if (request.cursor) {
-    while (
-      index < catalog.kvKeys.length &&
-      catalog.kvKeys[index]! <= request.cursor
-    ) {
-      index++;
-    }
-  }
+  const selection = selectBacklogKvKeys({
+    kvKeys: catalog.kvKeys,
+    tombstones: catalog.tombstones,
+    ledger: catalog.ledger,
+    minScore: request.minScore,
+    cursor: request.cursor,
+    limit
+  });
+  base.skipped.alreadyPromoted = selection.skipped.alreadyPromoted;
+  base.skipped.belowBar = selection.skipped.belowBar;
+  base.skipped.unscored = selection.skipped.unscored;
+  base.skipped.invalidKey = selection.skipped.invalidKey;
 
   let lastCommitted = request.cursor;
   let stoppedOn: { kvKey: string; error: string } | undefined;
-  while (index < catalog.kvKeys.length && base.fetched < limit) {
-    const kvKey = catalog.kvKeys[index]!;
-    const row = catalog.ledger.get(kvKey);
-    const tombstone = catalog.tombstones.has(kvKey);
-    const usable = usableLedgerScore(row?.seoScore);
-    const needsHtml =
-      !tombstone && (usable == null || usable >= request.minScore);
-    if (!needsHtml) {
-      bumpSkip(base.skipped, tombstone ? "already-promoted" : "below-bar");
-      lastCommitted = kvKey;
-      index++;
-      continue;
-    }
-
+  for (const kvKey of selection.selected) {
     base.fetched++;
-    const html = await articlesKv.get(kvKey);
-    const decision = assessStagingArticleForPromotion({
-      kvKey,
-      html,
-      minScore: request.minScore,
-      ledgerScore: row?.seoScore ?? null,
-      ledgerKeyword: row?.keyword ?? null,
-      hasRedirectTombstone: tombstone,
-      allowUnscoredCompleted: request.allowUnscoredCompleted
-    });
-    if (!decision.promote) {
-      bumpSkip(base.skipped, decision.reason);
-      lastCommitted = kvKey;
-      index++;
-      continue;
-    }
-
     const published = await publishArticleToProduction(
       env,
       articlesKv,
@@ -1041,22 +1066,231 @@ export async function runPromotionBacklogBatch(
     base.promoted.push({
       kvKey,
       prodUrl: published.prodUrl,
-      score: decision.score,
-      scoreSource: decision.scoreSource,
+      score: usableLedgerScore(catalog.ledger.get(kvKey)?.seoScore),
+      scoreSource: "ledger",
       dryRun: request.dryRun,
       ok: true,
       ...(published.error ? { error: published.error } : {})
     });
-    if (!request.dryRun) catalog.tombstones.add(kvKey);
     lastCommitted = kvKey;
-    index++;
   }
 
-  const done = stoppedOn == null && index >= catalog.kvKeys.length;
+  const finishedSelection = stoppedOn == null;
+  const done = finishedSelection && selection.done;
   return {
     ...base,
     done,
-    nextCursor: done ? null : lastCommitted,
+    nextCursor: done
+      ? null
+      : finishedSelection
+        ? selection.nextCursor
+        : lastCommitted,
     ...(stoppedOn ? { stoppedOn } : {})
   };
+}
+
+export interface PreparedProductionArticle {
+  ok: true;
+  kvKey: string;
+  categorySlug: string;
+  slug: string;
+  cleanedHtml: string;
+  rewritten: string;
+  replacements: number;
+  prodUrl: string;
+  ftcRemoved: number;
+  ftcSample?: string;
+  trustBoxRemoved: number;
+  changed: boolean;
+}
+
+/**
+ * FTC cleanup, trust-box removal, and host + `/reviews` rewrite.
+ * Does not write KV. Shared by the worker publish path and the local
+ * backlog script so both ship the same bytes.
+ */
+export function prepareProductionArticle(input: {
+  kvKey: string;
+  html: string;
+  fromHost: string;
+  toHost: string;
+}): PreparedProductionArticle | { ok: false; kvKey: string; error: string } {
+  const m = input.kvKey.match(/^([^:]+):([^:]+)$/);
+  if (!m) {
+    return {
+      ok: false,
+      kvKey: input.kvKey,
+      error: "kvKey must be categorySlug:slug"
+    };
+  }
+  const categorySlug = m[1] ?? "";
+  const slug = m[2] ?? "";
+  const ftc = enforceNoFabricatedTestingClaims(input.html);
+  const trust = removeTrustBox(ftc.html);
+  const { html: rewritten, replacements } = rewriteHtmlForDomain(
+    trust.html,
+    input.fromHost,
+    input.toHost
+  );
+  return {
+    ok: true,
+    kvKey: input.kvKey,
+    categorySlug,
+    slug,
+    cleanedHtml: trust.html,
+    rewritten,
+    replacements,
+    prodUrl: prodArticleUrl(input.toHost, categorySlug, slug),
+    ftcRemoved: ftc.removed,
+    ftcSample: ftc.findings[0]?.sentence.slice(0, 200),
+    trustBoxRemoved: trust.removed,
+    changed: trust.removed > 0 || ftc.removed > 0 || ftc.headingsChanged > 0
+  };
+}
+
+export interface ProdKvAuth {
+  accountId: string;
+  apiToken: string;
+  namespaceId: string;
+}
+
+export function prodKvAuthFromEnv(env: unknown): ProdKvAuth | null {
+  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
+  if (!accountId || !apiToken) return null;
+  return {
+    accountId,
+    apiToken,
+    namespaceId:
+      getEnvBinding(env, "PROD_ARTICLES_KV_NAMESPACE_ID") ??
+      DEFAULT_PROD_ARTICLES_KV_NAMESPACE_ID
+  };
+}
+
+function kvValueUrl(auth: ProdKvAuth, key: string): string {
+  return `https://api.cloudflare.com/client/v4/accounts/${auth.accountId}/storage/kv/namespaces/${auth.namespaceId}/values/${encodeURIComponent(key)}`;
+}
+
+export async function putProdKvValue(
+  auth: ProdKvAuth,
+  key: string,
+  body: string,
+  contentType: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await fetch(kvValueUrl(auth, key), {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${auth.apiToken}`,
+      "Content-Type": contentType
+    },
+    body
+  });
+  if (res.ok) return { ok: true };
+  const detail = await res.text().catch(() => "");
+  return {
+    ok: false,
+    error: `prod KV write failed: HTTP ${res.status} ${detail.slice(0, 200)}`
+  };
+}
+
+export async function getProdKvValue(
+  auth: ProdKvAuth,
+  key: string
+): Promise<string | null> {
+  const res = await fetch(kvValueUrl(auth, key), {
+    headers: { Authorization: `Bearer ${auth.apiToken}` }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) return null;
+  return await res.text();
+}
+
+export async function deleteProdKvValue(
+  auth: ProdKvAuth,
+  key: string
+): Promise<boolean> {
+  const res = await fetch(kvValueUrl(auth, key), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${auth.apiToken}` }
+  });
+  return res.ok || res.status === 404;
+}
+
+export interface ProdIndexWrite {
+  categorySlug: string;
+  slug: string;
+  title: string;
+}
+
+/**
+ * Merge many articles into production `articles-index:<category>` and
+ * `v2_articles_index` with one read/write per category plus one global
+ * write. Used by single-article publish and by the local backlog script.
+ */
+export async function registerProdIndexBatch(
+  env: unknown,
+  entries: readonly ProdIndexWrite[]
+): Promise<{
+  categoriesUpdated: number;
+  globalUpdated: boolean;
+  error?: string;
+}> {
+  if (entries.length === 0) {
+    return { categoriesUpdated: 0, globalUpdated: false };
+  }
+  const auth = prodKvAuthFromEnv(env);
+  if (!auth) {
+    return {
+      categoriesUpdated: 0,
+      globalUpdated: false,
+      error: "CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN not configured"
+    };
+  }
+  const byCategory = new Map<string, string[]>();
+  for (const entry of entries) {
+    const slugs = byCategory.get(entry.categorySlug) ?? [];
+    slugs.push(entry.slug);
+    byCategory.set(entry.categorySlug, slugs);
+  }
+  let categoriesUpdated = 0;
+  for (const [categorySlug, slugs] of byCategory) {
+    const key = `articles-index:${categorySlug}`;
+    const existing = await getProdKvValue(auth, key);
+    let merged = existing;
+    let changed = false;
+    for (const slug of slugs) {
+      const next = mergeCategoryIndex(merged, slug);
+      merged = next.json;
+      changed = changed || next.changed;
+    }
+    if (changed && merged != null) {
+      const put = await putProdKvValue(auth, key, merged, "application/json");
+      if (put.ok) categoriesUpdated++;
+    }
+  }
+  const globalExisting = await getProdKvValue(auth, "v2_articles_index");
+  let globalJson = globalExisting;
+  let globalChanged = false;
+  for (const entry of entries) {
+    const next = mergeGlobalIndex(globalJson, {
+      slug: entry.slug,
+      url: prodArticlePath(entry.categorySlug, entry.slug),
+      title: entry.title,
+      category: entry.categorySlug,
+      image: null
+    });
+    globalJson = next.json;
+    globalChanged = globalChanged || next.changed;
+  }
+  let globalUpdated = false;
+  if (globalChanged && globalJson != null) {
+    const put = await putProdKvValue(
+      auth,
+      "v2_articles_index",
+      globalJson,
+      "application/json"
+    );
+    globalUpdated = put.ok;
+  }
+  return { categoriesUpdated, globalUpdated };
 }

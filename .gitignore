@@ -175,8 +175,8 @@ scripts/*.mjs
 !scripts/index-codebase.mjs
 # Hand-written source, not a tsc artifact: sweeps published URLs for noindex
 !scripts/verify-indexable.mjs
-# Hand-written source: bulk-promote staging articles that clear the prod bar
-!scripts/promote-prod-backlog.mjs
+# Resume file for npm run promote:prod -- --apply
+.promote-prod-cursor
 vite.config.js
 
 # CodeGraph local index (codegraph init)
