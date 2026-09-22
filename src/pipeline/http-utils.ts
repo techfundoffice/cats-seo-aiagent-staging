@@ -196,7 +196,10 @@ export function errMsg(e: unknown): string {
   const cause = (e as { cause?: unknown }).cause;
   if (cause != null) {
     const causeMsg = errMsgBase(cause);
-    if (causeMsg && causeMsg !== base) {
+    // Skip a cause that repeats text already in the message. AbortSignal
+    // timeouts otherwise become "aborted due to timeout — cause: aborted
+    // due to timeout" after one wrap.
+    if (causeMsg && causeMsg !== base && !base.includes(causeMsg)) {
       return `${base} — cause: ${causeMsg}`;
     }
   }

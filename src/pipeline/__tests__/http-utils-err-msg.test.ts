@@ -19,6 +19,17 @@ describe("errMsg", () => {
     expect(errMsg(e)).toBe("fetch failed — cause: connection refused");
   });
 
+  it("omits a cause that only repeats text already in the message", () => {
+    const cause = new Error("The operation was aborted due to timeout");
+    const e = new Error(
+      "Claude dashboard failed: The operation was aborted due to timeout",
+      { cause }
+    );
+    expect(errMsg(e)).toBe(
+      "Claude dashboard failed: The operation was aborted due to timeout"
+    );
+  });
+
   it("omits cause suffix when cause message equals the base message", () => {
     const cause = new Error("same message");
     const e = new Error("same message", { cause });

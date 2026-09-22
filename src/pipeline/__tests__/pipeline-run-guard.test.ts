@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   applyPipelineAbort,
+  AUTONOMOUS_PIPELINE_TIMEOUT_MS,
   classifyPipelineAbortReason,
+  collapseOwnWorkerTimeoutDetail,
   describePipelineAbort,
+  GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS,
   generateOneAbortHttpBody,
   healInterruptedPipeline,
   linkAbortSignals,
@@ -10,6 +13,7 @@ import {
   PIPELINE_ABORT_HOW_TO_FIX,
   racePipelineWork,
   settleSuccessfulPipeline,
+  WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE,
   type PipelineRunSnapshot
 } from "../pipeline-run-guard";
 
@@ -43,6 +47,29 @@ describe("describePipelineAbort", () => {
     expect(notice.howToFix).toBe(PIPELINE_ABORT_HOW_TO_FIX);
     expect(notice.howToFix).toMatch(/retry generate-one/);
     expect(notice.howToFix).toMatch(/shorten the article or raise limits/);
+  });
+
+  it("collapses a nested AbortSignal timeout and defaults to the clean line", () => {
+    const nested = describePipelineAbort(
+      "timeout",
+      "[claude-code] Anthropic call failed (Claude dashboard failed: The operation was aborted due to timeout — cause: The operation was aborted due to timeout)"
+    );
+    expect(nested.message).toBe(WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE);
+    expect(nested.howToFix).toBe(PIPELINE_ABORT_HOW_TO_FIX);
+    expect(describePipelineAbort("timeout").message).toBe(
+      WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE
+    );
+    expect(
+      collapseOwnWorkerTimeoutDetail("Claude overloaded status=529")
+    ).toBeNull();
+  });
+
+  it("gives generate-one a longer Claude write budget than the alarm loop", () => {
+    expect(GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS).toBe(30 * 60 * 1000);
+    expect(AUTONOMOUS_PIPELINE_TIMEOUT_MS).toBe(15 * 60 * 1000);
+    expect(GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS).toBeGreaterThan(
+      AUTONOMOUS_PIPELINE_TIMEOUT_MS
+    );
   });
 });
 
@@ -86,6 +113,9 @@ describe("applyPipelineAbort", () => {
       { incrementFailed: false }
     );
     expect(next.articlesFailed).toBe(4);
+    expect(next.claudeChatFailure?.message).toBe(
+      WORKER_CLAUDE_WRITE_TIMEOUT_MESSAGE
+    );
     expect(next.claudeChatFailure?.howToFix).toBe(PIPELINE_ABORT_HOW_TO_FIX);
     expect(next.status).toBe("paused");
   });
@@ -316,6 +346,17 @@ describe("parsePipelineRunRecord", () => {
         })
       )?.keyword
     ).toBe("bed");
+    expect(
+      parsePipelineRunRecord(
+        JSON.stringify({
+          keyword: "bed",
+          category: "cat-beds",
+          slug: "bed",
+          startedAtMs: 1,
+          budgetMs: GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS
+        })
+      )?.budgetMs
+    ).toBe(GENERATE_ONE_CLAUDE_WRITE_BUDGET_MS);
   });
 });
 

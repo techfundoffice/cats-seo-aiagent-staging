@@ -50,6 +50,18 @@ describe("describeClaudeChatFailure", () => {
     expect(notice.howToFix).toMatch(/shorten the article or raise limits/);
   });
 
+  it("collapses a nested AbortSignal timeout into one operator line", () => {
+    const notice = describeClaudeChatFailure(
+      new Error(
+        "[claude-code] Anthropic call failed (Claude dashboard failed: The operation was aborted due to timeout — cause: The operation was aborted due to timeout); No other model was called. The pipeline stopped."
+      )
+    );
+    expect(notice.message).toBe("Worker timed out while Claude was writing.");
+    expect(notice.message).not.toMatch(/— cause:/);
+    expect(notice.howToFix).toMatch(/retry generate-one/);
+    expect(notice.howToFix).toMatch(/shorten the article or raise limits/);
+  });
+
   it("marks the thrown error so callers can stop the pipeline", () => {
     const notice = describeClaudeChatFailure(new Error("claude down"));
     const err = new ClaudeChatStoppedError(notice);

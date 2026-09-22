@@ -428,14 +428,18 @@ describe("per-call abort budget", () => {
         { syncTimeoutMs: 250 },
         agent as never
       )
-    ).rejects.toThrow(/No other model was called/);
+    ).rejects.toThrow(/Worker timed out while Claude was writing/);
     // Aborted at the caller's 250ms budget on the Claude leg, not the 120s
-    // default.
+    // default. The thrown banner is the clean operator line; the log still
+    // records that no other model ran.
     expect(Date.now() - started).toBeLessThan(2000);
 
     expect(
       logged.some((m) => m.includes("[claude-code]") && /abort/i.test(m))
     ).toBe(true);
+    expect(logged.some((m) => m.includes("No other model was called"))).toBe(
+      true
+    );
     expect(logged.some((m) => m.includes("syncTimeoutMs=250"))).toBe(false);
   });
 });

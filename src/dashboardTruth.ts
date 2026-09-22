@@ -16,6 +16,22 @@ export const CLAUDE_FAILURE_BANNER_TITLE = "Claude stopped the pipeline";
 export const CLAUDE_FAILURE_NO_FALLBACK =
   "Chat and vision stay on Claude. Nothing switches to OpenRouter, Workers AI, Kimi, or Qwen.";
 
+/**
+ * Full operator text of the red Claude banner, in on-screen order.
+ * The Copy all button writes this string.
+ */
+export function formatClaudeFailureBannerText(input: {
+  message: string;
+  howToFix: string;
+}): string {
+  return [
+    CLAUDE_FAILURE_BANNER_TITLE,
+    input.message.trim(),
+    CLAUDE_FAILURE_NO_FALLBACK,
+    `How to fix: ${input.howToFix.trim()}`
+  ].join("\n");
+}
+
 /** A dashboard that has not received a state push in this long looks frozen. */
 export const DASHBOARD_STATE_STALE_MS = 20 * 60 * 1000;
 
