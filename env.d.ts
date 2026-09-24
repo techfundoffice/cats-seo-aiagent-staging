@@ -16,6 +16,9 @@ declare namespace Cloudflare {
 		 */
 		KEYWORDS_DB: D1Database;
 		SKILL_FETCH_QUEUE: Queue;
+		// Workers AI binding removed. Do not declare an Ai binding here, and
+		// do not restore one by re-running `npm run types` after adding it
+		// to wrangler.jsonc. See docs/workers-ai-removal.md.
 		ASSETS: Fetcher;
 		/**
 		 * Service binding to the petinsurance Worker. Post-publish URL probes use

@@ -287,6 +287,9 @@ export default {
 
 ## Pattern 5: AI-Enhanced Scraping
 
+Do not copy this pattern into `cats-seo-aiagent-staging`. This worker has no
+Workers AI binding (`docs/workers-ai-removal.md`). Vision uses Claude.
+
 Combine Browser Rendering with Workers AI to extract structured data from dynamic content.
 
 **Use Case**: Complex product catalogs, unstructured content, adaptive scraping
@@ -296,7 +299,6 @@ import puppeteer from "@cloudflare/puppeteer";
 
 interface Env {
   MYBROWSER: Fetcher;
-  AI: Ai;
 }
 
 export default {
@@ -312,25 +314,14 @@ export default {
     const bodyContent = await page.$eval("body", (el) => el.innerHTML);
     await browser.close();
 
-    // Extract structured data with AI
-    const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [
-        {
-          role: "user",
-          content: `Extract product information as JSON from this HTML. Include: name, price, description, availability.\n\nHTML:\n${bodyContent.slice(0, 4000)}`
-        }
-      ]
+    // This repository has no Workers AI binding. Extract with Claude
+    // (getKimiModel) instead of a platform model. See
+    // docs/workers-ai-removal.md.
+    return Response.json({
+      url,
+      htmlLength: bodyContent.length,
+      error: "Workers AI extraction was removed. Use Claude."
     });
-
-    // Parse AI response
-    let productData;
-    try {
-      productData = JSON.parse(response.response);
-    } catch {
-      productData = { raw: response.response };
-    }
-
-    return Response.json({ url, product: productData });
   }
 };
 ```

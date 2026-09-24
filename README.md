@@ -171,7 +171,7 @@ See [MCP Client API](https://developers.cloudflare.com/agents/api-reference/mcp-
 
 ## Use a different AI model provider
 
-The starter uses [Workers AI](https://developers.cloudflare.com/workers-ai/) by default (no API key needed). To use a different provider:
+This worker does not use Workers AI. Writer, scout, and vision use the Claude Code subscription. Do not add an `ai` binding. See `docs/workers-ai-removal.md`. The starter examples below are not wired into this worker.
 
 ### OpenAI
 
@@ -230,7 +230,7 @@ Your agent is live on Cloudflare's global network. Messages persist in SQLite, s
 - [Agents SDK documentation](https://developers.cloudflare.com/agents/)
 - [Build a chat agent tutorial](https://developers.cloudflare.com/agents/getting-started/build-a-chat-agent/)
 - [Chat agents API reference](https://developers.cloudflare.com/agents/api-reference/chat-agents/)
-- [Workers AI models](https://developers.cloudflare.com/workers-ai/models/)
+- [Claude on this worker](docs/workers-ai-removal.md)
 
 ## License
 

@@ -34,10 +34,8 @@
     }
   ],
 
-  // Optional: AI binding for AI-enhanced scraping
-  "ai": {
-    "binding": "AI"
-  },
+  // Do not add a Workers AI binding. This repository's worker has none
+  // (docs/workers-ai-removal.md). Vision uses Claude.
 
   // Optional: D1 for storing scraping results
   // Create with: npx wrangler d1 create browser-db
@@ -92,10 +90,9 @@
  *    - Cheaper than KV for large files
  *    - Use presigned URLs for downloads
  *
- * 6. AI binding
- *    - Optional: for AI-enhanced scraping
- *    - Requires Workers Paid plan
- *    - See cloudflare-workers-ai skill
+ * 6. Workers AI
+ *    - Not used by cats-seo-aiagent-staging
+ *    - Do not add an AI binding to this repo's wrangler config
  *
  * 7. D1 database
  *    - Optional: store scraping metadata

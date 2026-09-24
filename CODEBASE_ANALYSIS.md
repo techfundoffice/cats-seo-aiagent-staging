@@ -97,21 +97,21 @@ scripts/
 
 - **Cloudflare Workers**: Edge compute platform
 - **Durable Objects**: Stateful objects with SQLite
-- **Workers AI**: On-platform AI inference
+- **Claude**: article, scout, and vision models (no Workers AI binding)
 - **KV**: Key-value storage for metadata
 - **R2**: Object storage for images
 
 ### Frameworks & SDKs
 
 - **`agents`** (Cloudflare Agents SDK): Base Agent class, callable methods
-- **`ai`** v6 (Vercel AI SDK): `streamText`, `generateText` with Workers AI provider
+- **`ai`** v6 (Vercel AI SDK): `generateText` / `generateObject` via Claude
 - **React 19**: UI framework
 - **Vite**: Build tool
 - **TailwindCSS**: Styling
 
 ### AI & Content
 
-- **Workers AI Models**: `@cf/meta/llama-3.1-70b-instruct` (fast), Sonnet 4.5 (quality)
+- **Models**: Claude Code subscription (`getKimiModel` / `runKimiWithPoll`). No Workers AI models.
 - **Composio**: Google Sheets API integration (SEARCH, VALUES_GET, BATCH_UPDATE)
 - **Amazon Product API**: Creators API + Apify fallback
 - **SERP APIs**: Search result scraping

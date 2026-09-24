@@ -10,6 +10,11 @@ description: |
   about agent "state management", "scheduled tasks", or "tool calling".
 ---
 
+> **This repo:** `cats-seo-aiagent-staging` has no Workers AI binding. Do not
+> add one to `wrangler.jsonc` or `env.d.ts`, and do not call it from `src/`.
+> Model calls use Claude. See `docs/workers-ai-removal.md`. The samples below
+> stop before a model call on purpose.
+
 # --- agentskill.sh ---
 
 # slug: majiayu000/building-ai-agent-on-cloudflare
@@ -91,7 +96,7 @@ Client disconnects → State persists → Client reconnects → State restored
 import { Agent, Connection } from "agents";
 
 interface Env {
-  AI: Ai; // Workers AI binding
+  // No Workers AI binding in this repository.
 }
 
 interface State {
@@ -147,22 +152,22 @@ export class MyAgent extends Agent<Env, State> {
       { role: "user", content: userMessage }
     ];
 
-    // Call AI
-    const response = await this.env.AI.run("@cf/meta/llama-3-8b-instruct", {
-      messages
-    });
+    // This repository has no Workers AI binding. Call Claude via
+    // getKimiModel / runKimiWithPoll instead of a platform model.
+    const responseText =
+      "Model call removed: use Claude (docs/workers-ai-removal.md).";
 
     // Update state (persists and syncs to all clients)
     this.setState({
       ...this.state,
-      messages: [...messages, { role: "assistant", content: response.response }]
+      messages: [...messages, { role: "assistant", content: responseText }]
     });
 
     // Send response
     connection.send(
       JSON.stringify({
         type: "response",
-        content: response.response
+        content: responseText
       })
     );
   }
@@ -321,17 +326,11 @@ import { AIChatAgent } from "agents/ai-chat-agent";
 export class ChatBot extends AIChatAgent<Env> {
   // Called for each user message
   async onChatMessage(message: string) {
-    const response = await this.env.AI.run("@cf/meta/llama-3-8b-instruct", {
-      messages: [
-        { role: "system", content: "You are a helpful assistant." },
-        ...this.messages, // Automatic history management
-        { role: "user", content: message }
-      ],
-      stream: true
+    // This repository has no Workers AI binding. Stream Claude via
+    // getKimiModel (src/pipeline/kimi-model.ts) instead.
+    return new Response(message, {
+      headers: { "content-type": "text/plain; charset=utf-8" }
     });
-
-    // Stream response back to client
-    return response;
   }
 }
 ```

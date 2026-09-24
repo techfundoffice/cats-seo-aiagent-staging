@@ -11,6 +11,10 @@
   "compatibility_date": "2026-04-13",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // No Workers AI binding. It bills Regular Twitch Neurons. Scout, writer,
+  // and vision use Claude. Image generation stays off (Claude cannot
+  // generate images). Do not add the binding back. See
+  // docs/workers-ai-removal.md.
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
