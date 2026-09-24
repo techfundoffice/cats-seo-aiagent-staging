@@ -155,11 +155,9 @@ Indexes: `idx_kw_cat` on `keywords(category_slug, status)`, `idx_art_cat` on
 | 13   | Polish agent          | `pipeline/polish-agent.ts`               | Claude Code subscription (`getKimiModel`)         |
 | 15   | Live SEO optimizer    | `pipeline/live-seo-content-optimizer.ts` | Claude Code subscription (`getKimiModel`)         |
 
-**Image generation** (within step 6/9 path):
-
-- Blog/hero: `@cf/black-forest-labs/flux-2-klein-4b`
-- Product: `@cf/black-forest-labs/flux-2-dev`
-- Fallback: `@cf/black-forest-labs/flux-1-schnell`
+**Image generation** is off. Workers AI Flux (`@cf/black-forest-labs/*`) was
+removed with the `ai` binding. `generateAndStoreHeroImage` returns null and
+articles publish without a generated hero.
 
 **Scout + Keywords** (pre-pipeline, when queue empty):
 
@@ -196,11 +194,13 @@ relevant one before working on that step.
 
 ```ts
 // ❌ NEVER — env is protected in Durable Objects
-agent.env.AI;
+agent.env.ARTICLES_KV;
 
 // ✅ ALWAYS — use the public getter
-agent.envBindings.AI;
+agent.envBindings.ARTICLES_KV;
 ```
+
+Do not read `agent.envBindings.AI`. The Workers AI binding was removed.
 
 ### 8.2 AI SDK v6 API (breaking differences from v5)
 
@@ -212,12 +212,11 @@ generateText({ maxTokens: 1200, maxSteps: 3 });
 generateText({ maxOutputTokens: 1200, stopWhen: stepCountIs(3) });
 ```
 
-### 8.3 Workers AI Instantiation
+### 8.3 Workers AI is removed
 
-```ts
-// ✅ Only valid pattern — always from agent.envBindings
-const workersai = createWorkersAI({ binding: agent.envBindings.AI });
-```
+Do not instantiate Workers AI or add an `ai` binding. Chat, vision, and
+the scout use the Claude Code subscription. Image generation has no
+replacement provider.
 
 ### 8.4 Activity Log Schema
 
@@ -304,7 +303,6 @@ HTTP endpoints (no auth): `GET /api/status`, `GET /api/logs`
 
 | Binding                 | Value                              |
 | ----------------------- | ---------------------------------- |
-| `AI`                    | Workers AI remote binding          |
 | `ARTICLES_KV`           | KV namespace                       |
 | `IMAGES_R2`             | R2 bucket `seo-images`             |
 | `SEOArticleAgent`       | Durable Object class               |

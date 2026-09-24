@@ -1077,9 +1077,9 @@ export function buildArticleHtml(opts: BuildHtmlOpts): string {
 
   // ── Image Hero ─────────────────────────────────────────────────────────────
   // Injected mid-article (after the middle section — see sectionsHtml).
-  // The video hero owns the top of the page by design. Square source
-  // (Workers AI flux) is displayed as a wide editorial crop via
-  // object-fit.
+  // The video hero owns the top of the page by design. A supplied hero
+  // URL is displayed as a wide editorial crop via object-fit. Generated
+  // Flux heroes are no longer produced.
 
   let imageHeroHtml = "";
   if (trimmedHeroImageUrl) {

@@ -67,10 +67,9 @@ Indexes:
 
 ## AI and External Integrations
 
-- **Workers AI (primary LLM/runtime):**
-  - Category scouting and article generation.
-  - SEO/QC/polish agent passes.
-  - Image generation models (Flux variants).
+- **Claude Code subscription** is the only model path (scout, article
+  generation, SEO/QC/polish). Workers AI is not bound. Image generation
+  has no replacement provider.
 - **Composio (optional tool bridge):**
   - Lazy-initialized session from `COMPOSIO_API_KEY`.
   - Used for tool-augmented operations (`useComposioTool`) and some data acquisition paths.
@@ -134,8 +133,8 @@ Indexes:
 
 Defined in `wrangler.jsonc`:
 
-- AI binding: `AI` (remote Workers AI).
 - Durable Object binding: `SEOArticleAgent`.
+- No Workers AI `ai` binding (removed; it billed Regular Twitch Neurons).
 - KV namespace: `ARTICLES_KV`.
 - R2 bucket: `IMAGES_R2`.
 - Runtime vars: `AMAZON_AFFILIATE_TAG`, `DOMAIN`, `CLOUDFLARE_ZONE_ID`.

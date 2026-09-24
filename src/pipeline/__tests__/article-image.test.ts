@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { SEOArticleAgent } from "../../server";
 import {
+  WORKERS_AI_IMAGES_REMOVED_ERROR,
   buildHeroPrompt,
   buildProductPrompt,
   detectTopic,
+  generateAndStoreHeroImage,
+  generateArticleImages,
+  generateHeroImage,
   heroImageR2Key,
   productImageR2Key
 } from "../article-image";
@@ -65,5 +70,43 @@ describe("R2 key scheme", () => {
     expect(productImageR2Key("cat-food", "best-cat-food", 2)).toBe(
       "articles/cat-food/best-cat-food-product-2.jpg"
     );
+  });
+});
+
+describe("Workers AI image generation removed", () => {
+  const agent = {
+    log: () => undefined
+  } as unknown as SEOArticleAgent;
+
+  it("publishes without a hero instead of calling a model", async () => {
+    await expect(
+      generateAndStoreHeroImage(
+        agent,
+        "best cat litter",
+        "Cat Litter",
+        "cat-litter",
+        "best-cat-litter"
+      )
+    ).resolves.toBeNull();
+  });
+
+  it("throws from the direct generate paths", async () => {
+    await expect(
+      generateHeroImage(
+        agent,
+        "best cat litter",
+        "cat-litter",
+        "best-cat-litter"
+      )
+    ).rejects.toThrow(WORKERS_AI_IMAGES_REMOVED_ERROR);
+    await expect(
+      generateArticleImages(
+        agent,
+        "best cat litter",
+        "cat-litter",
+        "best-cat-litter",
+        []
+      )
+    ).rejects.toThrow(WORKERS_AI_IMAGES_REMOVED_ERROR);
   });
 });

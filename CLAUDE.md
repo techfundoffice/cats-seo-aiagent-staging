@@ -172,7 +172,8 @@ Queue (skill-fetch) ─────┘     • serves /feed.rss, /sitemap.xml fr
 ```
 
 Bindings: `ARTICLES_KV`, `SKILLS_DB` + `KEYWORDS_DB` (D1), `IMAGES_R2`,
-`SKILL_FETCH_QUEUE`, `AI` (Workers AI), `ASSETS`.
+`SKILL_FETCH_QUEUE`, `ASSETS`. There is no Workers AI `ai` binding — do not
+add one. It bills Regular Twitch Neurons.
 
 ### Request routing (`src/server.ts`, default export ~line 9342)
 
@@ -202,7 +203,8 @@ generation; that's manual via `POST /api/generate-one`.
 
 1–6 research (KV existence check, DataForSEO volume, competitor capture, SERP
 intent gap, PAA/autocomplete, internal links) → 7 AI generation of structured
-JSON → 9–11 enhancement, text editor, hero image (Workers AI flux → R2),
+JSON → 9–11 enhancement, text editor, hero image (skipped; Workers AI flux
+removed),
 YouTube, HTML assembly (`html-builder.ts`) → 12 SEO score (`seo-score.ts`) →
 13 **KV deploy** → 14 live-URL verification → 14.5–14.8 post-write detectors
 (JSON-LD validity, unsourced YMYL claims, fabricated testing claims,
@@ -243,8 +245,9 @@ Chat does not call OpenRouter, Workers AI Qwen/Kimi, LLaVA, or Doppler
 OpenRouter key rotation. `src/pipeline/ai-poll.ts`, `@openrouter/ai-sdk-provider`,
 and `workers-ai-provider` are gone. There is no `AI_CHAT_FALLBACK` hatch.
 Vision uses Claude only (`analyzeScreenshotWithVision`). Flux image generation
-(`env.AI` flux models in `article-image.ts`) and OpenAI embeddings stay,
-because they cannot use the Claude subscription token. Historical activity-log
+was removed with the Workers AI binding (`article-image.ts` returns null);
+there is no replacement image provider. OpenAI embeddings stay, because they
+cannot use the Claude subscription token. Historical activity-log
 classifiers (`kimiProviderHealth`, failure-breakdown OpenRouter categories)
 still match old log lines; they do not call a model.
 
