@@ -85,7 +85,7 @@ export interface DesignAuditReport {
  *
  * @param agent  The `SEOArticleAgent` Durable Object instance providing env
  *               bindings (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN_SECRET`,
- *               `IMAGES_R2`, `AI`) and the activity-log sink.
+ *               `IMAGES_R2`) and the activity-log sink.
  * @param url    Fully-qualified public URL of the article to audit (e.g.
  *               `https://catsluvus.com/cat-beds/best-cat-beds`).
  * @param slug   Article slug used to build deterministic R2 keys for the

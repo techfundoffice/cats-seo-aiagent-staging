@@ -2038,9 +2038,9 @@ async function generateArticleUnsafe(
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Step 10.5/24: Hero image — Workers AI flux → R2 public bucket.
-    // Scene-based prompt (never product packaging: diffusion text comes
-    // out as gibberish). Non-fatal: null just means no hero on the page.
+    // Step 10.5/24: Hero image. Workers AI flux was removed (Regular
+    // Twitch Neurons). generateAndStoreHeroImage returns null; the article
+    // publishes without a generated hero.
     // ═══════════════════════════════════════════════════════════════════════════
     agent.updateStep("10.5/24: Hero Image");
     const heroImageUrl = await generateAndStoreHeroImage(

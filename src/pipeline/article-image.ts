@@ -1,38 +1,18 @@
 import type { SEOArticleAgent } from "../server";
-import { errMsg, getEnvBinding } from "./http-utils";
 
 /**
- * article-image.ts — Cloudflare-native article image generation.
+ * article-image.ts — prompt helpers retained from the old Flux pipeline.
  *
- * Ported from the production repo's `src/pipeline/images.ts` (deleted
- * 2026-05-14 as "dead code" after its `pub.catsluvus.com` R2 custom
- * domain broke; recovered from history at commit a5b52955^). The prompt
- * system — topic detection, breed/interaction/angle/lighting
- * randomization with deterministic seeds — is production's; the serving
- * scheme is staging's working one: the IMAGES_R2 bucket's managed
- * public r2.dev domain, a host the staging → production HTML rewrite
- * never touches, so image URLs survive prod publishing unchanged.
+ * Workers AI image generation is removed. The `ai` binding billed Regular
+ * Twitch Neurons, and there is no replacement image provider (Claude does
+ * not generate images). `generateAndStoreHeroImage` returns null so the
+ * article still publishes. Direct generate* calls throw
+ * `WORKERS_AI_IMAGES_REMOVED_ERROR` instead of calling `@cf/` models or
+ * `accounts/.../ai/run`.
  *
- * Slop guard: diffusion models mangle written text, so every prompt is
- * scene-based and forbids text/labels/logos. Never put packaging in
- * frame.
- *
- * Flags: ARTICLE_HERO_IMAGE="off" disables the hero;
- * ARTICLE_PRODUCT_IMAGES="on" enables per-product images (default OFF —
- * pick cards already show real Amazon product photos; AI look-alike
- * product shots next to real ones is an editorial call).
+ * The prompt builders stay so the no-text slop guard remains tested. They
+ * are not sent to a model.
  */
-
-// FLUX.2 Klein 4B — fast, cheap; hero/blog imagery.
-const BLOG_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
-// FLUX.2 Dev — premium quality; product imagery.
-const PRODUCT_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
-// Fallback when Klein/Dev are unavailable.
-const FALLBACK_MODEL = "@cf/black-forest-labs/flux-1-schnell";
-
-/** seo-images-staging bucket's managed public domain (enabled 2026-07-23). */
-export const DEFAULT_IMAGES_PUBLIC_BASE_URL =
-  "https://pub-d005467c78ef4809ab585678182662c8.r2.dev";
 
 export interface GeneratedImage {
   r2Key: string;
@@ -217,14 +197,7 @@ export function buildProductPrompt(
   return `${breed} naturally posed beside ${generic} on a styled surface. ${camera}. ${lighting}. Realistic home photograph, sharp focus on the cat, shallow depth of field with soft bokeh background. No studio equipment, no text, no labels, no logos, no brand names, no watermarks.`;
 }
 
-// ── Generation + R2 storage ─────────────────────────────────────────────────
-
-function imagesPublicBase(env: unknown): string {
-  return (
-    getEnvBinding(env, "IMAGES_PUBLIC_BASE_URL") ??
-    DEFAULT_IMAGES_PUBLIC_BASE_URL
-  ).replace(/\/$/, "");
-}
+// ── R2 key scheme (storage helpers; nothing writes images today) ───────────
 
 export function heroImageR2Key(categorySlug: string, slug: string): string {
   return `articles/${categorySlug}/${slug}-hero.jpg`;
@@ -238,236 +211,64 @@ export function productImageR2Key(
   return `articles/${categorySlug}/${slug}-product-${productIndex}.jpg`;
 }
 
-/**
- * FLUX.2 models reject the AI binding's JSON input ("required properties
- * at '/' are 'multipart'", schema change observed 2026-07-24) — they only
- * accept multipart/form-data, which the binding cannot send. Call the
- * Workers AI REST endpoint directly for those models.
- */
-const MULTIPART_ONLY_MODELS = new Set([BLOG_IMAGE_MODEL, PRODUCT_IMAGE_MODEL]);
+export const WORKERS_AI_IMAGES_REMOVED_ERROR =
+  "Workers AI image generation was removed (Regular Twitch Neurons). This worker has no AI binding and no replacement image provider.";
 
-async function runImageModelMultipart(
-  env: unknown,
-  model: string,
-  prompt: string
-): Promise<string | null> {
-  const accountId = getEnvBinding(env, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = getEnvBinding(env, "CLOUDFLARE_API_TOKEN");
-  if (!accountId || !apiToken) {
-    throw new Error("CF API creds missing for multipart image model call");
-  }
-  const form = new FormData();
-  form.append("prompt", prompt);
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}` },
-      body: form
-    }
-  );
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${detail.slice(0, 160)}`);
-  }
-  const json = (await res.json()) as { result?: { image?: unknown } };
-  return typeof json.result?.image === "string" ? json.result.image : null;
+function workersAiImagesRemoved(): never {
+  throw new Error(WORKERS_AI_IMAGES_REMOVED_ERROR);
 }
 
-async function generateSingleImage(
-  agent: SEOArticleAgent,
-  prompt: string,
-  model: string
-): Promise<Uint8Array | null> {
-  const ai = (
-    agent.envBindings as {
-      AI?: { run: (model: string, inputs: unknown) => Promise<unknown> };
-    }
-  ).AI;
-  const models = [model, FALLBACK_MODEL];
-
-  for (const m of models) {
-    try {
-      let base64: string | null = null;
-      if (MULTIPART_ONLY_MODELS.has(m)) {
-        base64 = await runImageModelMultipart(agent.envBindings, m, prompt);
-      } else {
-        if (!ai) continue;
-        const result = await ai.run(m, { prompt });
-        if (
-          result &&
-          typeof result === "object" &&
-          "image" in (result as Record<string, unknown>) &&
-          typeof (result as Record<string, unknown>).image === "string"
-        ) {
-          base64 = (result as Record<string, string>).image;
-        }
-      }
-      if (base64) {
-        return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      }
-    } catch (err: unknown) {
-      agent.log("warning", `Image model ${m} failed: ${errMsg(err)}`);
-    }
-  }
-  return null;
-}
-
-async function storeImage(
-  agent: SEOArticleAgent,
-  r2Key: string,
-  bytes: Uint8Array
-): Promise<string | null> {
-  const bucket = (agent.envBindings as { IMAGES_R2?: R2Bucket }).IMAGES_R2;
-  if (!bucket) return null;
-  await bucket.put(r2Key, bytes, {
-    httpMetadata: {
-      contentType: "image/jpeg",
-      cacheControl: "public, max-age=31536000, immutable"
-    }
-  });
-  return `${imagesPublicBase(agent.envBindings)}/${r2Key}`;
-}
-
-/** Generate the hero image for an article. */
+/** Refuses to call Workers AI. There is no image provider to fall back to. */
 export async function generateHeroImage(
-  agent: SEOArticleAgent,
-  keyword: string,
-  categorySlug: string,
-  slug: string
+  _agent: SEOArticleAgent,
+  _keyword: string,
+  _categorySlug: string,
+  _slug: string
 ): Promise<GeneratedImage | null> {
-  const prompt = buildHeroPrompt(keyword, 0);
-  const bytes = await generateSingleImage(agent, prompt, BLOG_IMAGE_MODEL);
-  if (!bytes) return null;
-
-  const r2Key = heroImageR2Key(categorySlug, slug);
-  const url = await storeImage(agent, r2Key, bytes);
-  if (!url) return null;
-  agent.log(
-    "info",
-    `Hero image: ${r2Key} (${Math.round(bytes.length / 1024)} KB) → ${url}`,
-    "productManager",
-    { kanbanStage: "done" }
-  );
-
-  return {
-    r2Key,
-    url,
-    alt: `${keyword} - cat product photo`,
-    caption: keyword,
-    width: 1024,
-    height: 1024,
-    imageType: "hero",
-    prompt
-  };
+  workersAiImagesRemoved();
 }
 
-/** Generate a product image for the comparison table (flag-gated). */
+/** Refuses to call Workers AI. There is no image provider to fall back to. */
 export async function generateProductImage(
-  agent: SEOArticleAgent,
-  keyword: string,
-  productName: string,
-  categorySlug: string,
-  slug: string,
-  productIndex: number
+  _agent: SEOArticleAgent,
+  _keyword: string,
+  _productName: string,
+  _categorySlug: string,
+  _slug: string,
+  _productIndex: number
 ): Promise<GeneratedImage | null> {
-  const prompt = buildProductPrompt(keyword, productName, productIndex);
-  const bytes = await generateSingleImage(agent, prompt, PRODUCT_IMAGE_MODEL);
-  if (!bytes) return null;
-
-  const r2Key = productImageR2Key(categorySlug, slug, productIndex);
-  const url = await storeImage(agent, r2Key, bytes);
-  if (!url) return null;
-  agent.log(
-    "info",
-    `Product image ${productIndex}: ${r2Key} (${Math.round(bytes.length / 1024)} KB)`,
-    "productManager"
-  );
-
-  return {
-    r2Key,
-    url,
-    alt: `${productName} - product photo`,
-    caption: productName,
-    width: 1024,
-    height: 1024,
-    imageType: "product",
-    prompt
-  };
+  workersAiImagesRemoved();
 }
 
 /**
- * Pipeline entry point (writer.ts Step 10.5): hero image, plus product
- * images when ARTICLE_PRODUCT_IMAGES="on". Never throws; a null hero
- * just means the article publishes without one.
+ * Pipeline entry point (writer.ts Step 10.5). Never throws. Returns null
+ * so the article publishes without a generated hero.
  */
 export async function generateAndStoreHeroImage(
   agent: SEOArticleAgent,
-  keyword: string,
+  _keyword: string,
   _categoryName: string,
-  categorySlug: string,
-  slug: string
+  _categorySlug: string,
+  _slug: string
 ): Promise<string | null> {
-  const env = agent.envBindings;
-  const flag = (getEnvBinding(env, "ARTICLE_HERO_IMAGE") ?? "on").toLowerCase();
-  if (flag === "off" || flag === "false" || flag === "0") return null;
-
-  try {
-    const hero = await generateHeroImage(agent, keyword, categorySlug, slug);
-    return hero?.url ?? null;
-  } catch (err: unknown) {
-    agent.log(
-      "warning",
-      `Hero image generation failed (non-fatal, article publishes without it): ${errMsg(err)}`,
-      "productManager"
-    );
-    return null;
-  }
+  agent.log(
+    "info",
+    "Hero image skipped: Workers AI was removed (Regular Twitch Neurons). Article publishes without a generated hero.",
+    "productManager"
+  );
+  return null;
 }
 
 /**
- * Generate all images for an article (hero + up to 3 product images).
- * Product images run only when ARTICLE_PRODUCT_IMAGES="on" — pick cards
- * already show real Amazon photos, so AI product shots are an explicit
- * editorial opt-in.
+ * Refuses to call Workers AI. Callers that still want a batch must handle
+ * the error; the writer path uses `generateAndStoreHeroImage` instead.
  */
 export async function generateArticleImages(
-  agent: SEOArticleAgent,
-  keyword: string,
-  categorySlug: string,
-  slug: string,
-  products: Array<{ name?: string; displayName?: string }>
+  _agent: SEOArticleAgent,
+  _keyword: string,
+  _categorySlug: string,
+  _slug: string,
+  _products: Array<{ name?: string; displayName?: string }>
 ): Promise<GeneratedImage[]> {
-  const images: GeneratedImage[] = [];
-
-  const hero = await generateHeroImage(agent, keyword, categorySlug, slug);
-  if (hero) images.push(hero);
-
-  const productFlag = (
-    getEnvBinding(agent.envBindings, "ARTICLE_PRODUCT_IMAGES") ?? "off"
-  ).toLowerCase();
-  if (productFlag === "on" || productFlag === "true" || productFlag === "1") {
-    const realProducts = products
-      .filter((p) => p.displayName || p.name)
-      .slice(0, 3);
-    for (let i = 0; i < realProducts.length; i++) {
-      const pName =
-        realProducts[i].displayName || realProducts[i].name || keyword;
-      const productImg = await generateProductImage(
-        agent,
-        keyword,
-        pName,
-        categorySlug,
-        slug,
-        i
-      );
-      if (productImg) images.push(productImg);
-    }
-  }
-
-  agent.log(
-    "info",
-    `Images: ${images.length} generated (${images.filter((i) => i.imageType === "hero").length} hero + ${images.filter((i) => i.imageType === "product").length} product)`
-  );
-  return images;
+  workersAiImagesRemoved();
 }

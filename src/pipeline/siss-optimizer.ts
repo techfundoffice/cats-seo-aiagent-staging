@@ -515,8 +515,8 @@ function makeSkipResult(reason: string): SissOptimizerResult {
  *
  * No new API keys or secrets required: uses the same
  * `suggestqueries.google.com` endpoint already used by Step 5 PAA expansion,
- * plus Workers AI (already bound via `agent.envBindings.AI`) and
- * ARTICLES_KV for the write-back.
+ * the Claude Code subscription (`runKimiWithPoll`) for the remediation
+ * rewrite, and ARTICLES_KV for the write-back. It does not use Workers AI.
  */
 export async function runSissOptimizer(
   agent: SEOArticleAgent,
