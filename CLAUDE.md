@@ -246,7 +246,10 @@ OpenRouter key rotation. `src/pipeline/ai-poll.ts`, `@openrouter/ai-sdk-provider
 and `workers-ai-provider` are gone. There is no `AI_CHAT_FALLBACK` hatch.
 Vision uses Claude only (`analyzeScreenshotWithVision`). Flux image generation
 was removed with the Workers AI binding (`article-image.ts` returns null);
-there is no replacement image provider. OpenAI embeddings stay, because they
+there is no replacement image provider. Do not add the binding back —
+`src/pipeline/__tests__/workers-ai-removed.test.ts` fails `npm run check`
+if wrangler, `env.d.ts`, `src/`, or `scripts/` grow a Workers AI call.
+See `docs/workers-ai-removal.md`. OpenAI embeddings stay, because they
 cannot use the Claude subscription token. Historical activity-log
 classifiers (`kimiProviderHealth`, failure-breakdown OpenRouter categories)
 still match old log lines; they do not call a model.

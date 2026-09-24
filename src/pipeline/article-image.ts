@@ -3,12 +3,11 @@ import type { SEOArticleAgent } from "../server";
 /**
  * article-image.ts — prompt helpers retained from the old Flux pipeline.
  *
- * Workers AI image generation is removed. The `ai` binding billed Regular
+ * Workers AI image generation is removed. The binding billed Regular
  * Twitch Neurons, and there is no replacement image provider (Claude does
  * not generate images). `generateAndStoreHeroImage` returns null so the
  * article still publishes. Direct generate* calls throw
- * `WORKERS_AI_IMAGES_REMOVED_ERROR` instead of calling `@cf/` models or
- * `accounts/.../ai/run`.
+ * `WORKERS_AI_IMAGES_REMOVED_ERROR`.
  *
  * The prompt builders stay so the no-text slop guard remains tested. They
  * are not sent to a model.

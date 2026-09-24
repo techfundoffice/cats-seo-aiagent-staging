@@ -23,6 +23,9 @@ SKIP = {
     "GITHUB_TOKEN_SECRET",
     # Composio was removed from this codebase — never push its key.
     "COMPOSIO_API_KEY",
+    # Workers AI was removed. A leftover token must not be installed on
+    # the worker, where a future call could bill Regular Twitch Neurons.
+    "CLOUDFLARE_WORKERS_AI_TOKEN",
 }
 
 secrets = json.load(sys.stdin)

@@ -1,19 +1,12 @@
-// AI-Enhanced Web Scraper
-// Combine Browser Rendering with Workers AI to extract structured data intelligently
+// Browser scrape template.
+// Workers AI extraction was removed from this repository. Do not add an
+// AI binding. Structured extraction belongs on Claude. See
+// docs/workers-ai-removal.md.
 
 import puppeteer from "@cloudflare/puppeteer";
 
 interface Env {
   MYBROWSER: Fetcher;
-  AI: Ai;
-}
-
-interface ProductData {
-  name: string;
-  price: string;
-  description: string;
-  availability: string;
-  [key: string]: any;
 }
 
 export default {
@@ -41,51 +34,15 @@ export default {
 
       await browser.close();
 
-      // Truncate to fit AI context (4000 chars)
-      const truncatedContent = bodyContent.slice(0, 4000);
-
-      // Step 2: Extract structured data with AI
-      const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a data extraction assistant. Extract product information from HTML and return ONLY valid JSON."
-          },
-          {
-            role: "user",
-            content: `Extract product information from this HTML. Return JSON with these fields: name, price, description, availability. If any field is not found, use empty string.\n\nHTML:\n${truncatedContent}`
-          }
-        ],
-        stream: false
-      });
-
-      // Parse AI response
-      let productData: ProductData;
-      try {
-        const responseText = (aiResponse as any).response;
-        // Try to extract JSON from response (AI might wrap it in markdown)
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          productData = JSON.parse(jsonMatch[0]);
-        } else {
-          productData = JSON.parse(responseText);
-        }
-      } catch {
-        productData = {
-          name: "",
-          price: "",
-          description: "",
-          availability: "",
-          raw: (aiResponse as any).response
-        };
-      }
-
-      return Response.json({
-        url,
-        product: productData,
-        extractedAt: new Date().toISOString()
-      });
+      return Response.json(
+        {
+          url,
+          htmlLength: bodyContent.length,
+          error:
+            "Workers AI extraction was removed from this repository. Use Claude."
+        },
+        { status: 501 }
+      );
     } catch (error) {
       await browser.close();
       return Response.json(
@@ -103,10 +60,9 @@ export default {
 
 /**
  * Setup:
- *   Add AI binding to wrangler.jsonc:
+ *   Browser binding only. Do not add a Workers AI binding.
  *   {
  *     "browser": { "binding": "MYBROWSER" },
- *     "ai": { "binding": "AI" },
  *     "compatibility_flags": ["nodejs_compat"]
  *   }
  *
@@ -134,9 +90,9 @@ export default {
  * Limitations:
  * - AI context limited to ~4000 chars of HTML
  * - May hallucinate if data not present
- * - Requires AI binding (uses neurons quota)
+ * - This repository has no Workers AI binding
  *
  * See also:
- * - cloudflare-workers-ai skill for more AI patterns
+ * - docs/workers-ai-removal.md
  * - web-scraper-basic.ts for traditional CSS selector approach
  */
